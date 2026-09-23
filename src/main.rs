@@ -1,20 +1,43 @@
 mod app;
 mod audio;
+mod hotkey;
 mod models;
 mod motion;
 mod place;
+mod settings;
 mod stt;
 mod text;
 mod theme;
 mod ui;
 
+use std::borrow::Cow;
+
 use gpui::{
-    px, size, App, AppContext, Application, Bounds, Focusable, WindowBackgroundAppearance,
-    WindowBounds, WindowDecorations, WindowKind, WindowOptions,
+    px, size, App, AppContext, Application, AssetSource, Bounds, Focusable, SharedString,
+    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind, WindowOptions,
 };
 
+struct Assets;
+
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        Ok(match path {
+            "icons/gear.svg" => Some(Cow::Borrowed(include_bytes!("../assets/gear.svg"))),
+            "icons/chevron.svg" => Some(Cow::Borrowed(include_bytes!("../assets/chevron.svg"))),
+            "icons/chevron-left.svg" => {
+                Some(Cow::Borrowed(include_bytes!("../assets/chevron-left.svg")))
+            }
+            _ => None,
+        })
+    }
+
+    fn list(&self, _path: &str) -> gpui::Result<Vec<SharedString>> {
+        Ok(Vec::new())
+    }
+}
+
 fn main() {
-    Application::new().run(|cx: &mut App| {
+    Application::new().with_assets(Assets).run(|cx: &mut App| {
         app::bind_keys(cx);
 
         let window_size = size(px(app::WINDOW_WIDTH), px(app::COLLAPSED_HEIGHT));

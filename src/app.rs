@@ -3,18 +3,23 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::{actions, App, ClipboardItem, Context, FocusHandle, Focusable, KeyBinding, WeakEntity};
+use gpui::{
+    actions, App, ClipboardItem, Context, FocusHandle, Focusable, KeyBinding, Keystroke, WeakEntity,
+};
 
 use crate::audio::{self, Mic};
+use crate::hotkey;
 use crate::models::{self, ModelSpec};
 use crate::motion::{Ease, Spring};
 use crate::place;
+use crate::settings::{self, Preferences};
 use crate::stt;
 
 pub(crate) const WINDOW_WIDTH: f32 = 400.0;
 pub(crate) const COLLAPSED_HEIGHT: f32 = 64.0;
 pub(crate) const PICKER_EXTRA: f32 = 360.0;
 pub(crate) const RESULT_EXTRA: f32 = 132.0;
+pub(crate) const SETTINGS_EXTRA: f32 = 307.0;
 pub(crate) const ERROR_EXTRA: f32 = 22.0;
 
 const BARS: usize = 22;
@@ -23,6 +28,13 @@ const BARS: usize = 22;
 pub(crate) enum Reveal {
     Picker,
     Result,
+    Settings,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsPage {
+    Main,
+    Language,
 }
 
 actions!(whisp, [ToggleListen, CloseOverlay]);
@@ -62,6 +74,17 @@ pub(crate) struct Whisp {
     pub bars: Vec<Spring>,
     pub reveal: Option<Reveal>,
     pub picker_opened_at: Option<Instant>,
+    pub settings_open: bool,
+    pub settings_page: SettingsPage,
+    pub settings_opened_at: Option<Instant>,
+    pub language: String,
+    pub show_hotkey: String,
+    pub copy_notes: bool,
+    pub clean_fillers: bool,
+    pub recording_hotkey: bool,
+    pub page_fade: Ease,
+    pub bar_visible: bool,
+    suppress_actions_until: Option<Instant>,
     last_tick: Instant,
     pin_started: bool,
     screen_x: f32,
@@ -74,9 +97,29 @@ pub(crate) struct Whisp {
 impl Whisp {
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
         let models = load_models();
+        let prefs = settings::load();
         let selected = models::load_selected()
             .filter(|id| models::spec(id).is_some())
             .unwrap_or_else(|| models::recommended_id().to_string());
+        if let Some(chord) = hotkey::parse(&prefs.show_hotkey) {
+            hotkey::install(chord);
+        }
+        let view = cx.weak_entity();
+        cx.intercept_keystrokes(move |event, _, cx| {
+            if hotkey::is_modifier_only(&event.keystroke.key) {
+                return;
+            }
+            let keystroke = event.keystroke.clone();
+            view.update(cx, |this, cx| {
+                if !this.recording_hotkey {
+                    return;
+                }
+                cx.stop_propagation();
+                this.capture_hotkey(&keystroke, cx);
+            })
+            .ok();
+        })
+        .detach();
         let (screen_x, screen_y, screen_w, screen_h) = cx
             .primary_display()
             .map(|display| {
@@ -105,6 +148,17 @@ impl Whisp {
             bars: vec![Spring::level(0.08); BARS],
             reveal: None,
             picker_opened_at: None,
+            settings_open: false,
+            settings_page: SettingsPage::Main,
+            settings_opened_at: None,
+            language: prefs.language,
+            show_hotkey: prefs.show_hotkey,
+            copy_notes: prefs.copy_notes,
+            clean_fillers: prefs.clean_fillers,
+            recording_hotkey: false,
+            page_fade: Ease::at(1.0, Duration::from_millis(180), 0.02),
+            bar_visible: true,
+            suppress_actions_until: None,
             last_tick: Instant::now(),
             pin_started: false,
             screen_x,
@@ -125,6 +179,7 @@ impl Whisp {
         self.chrome.set(self.settled_height());
         let mut moving = self.chrome.step();
         moving |= self.press.step();
+        moving |= self.page_fade.step();
         if self.press.target() == 0.0 && !self.press.busy() {
             self.press_id = None;
         }
@@ -140,7 +195,9 @@ impl Whisp {
             moving |= bar.step(dt);
         }
 
-        if self.picker_open {
+        if self.settings_open {
+            self.reveal = Some(Reveal::Settings);
+        } else if self.picker_open {
             self.reveal = Some(Reveal::Picker);
         } else if matches!(self.phase, Phase::Result(_)) {
             self.reveal = Some(Reveal::Result);
@@ -156,24 +213,28 @@ impl Whisp {
             window.request_animation_frame();
         }
 
-        let height = self.chrome.value;
-        if (self.placed_height - height).abs() >= 0.5 {
-            self.placed_height = height;
-            window.resize(gpui::size(gpui::px(WINDOW_WIDTH), gpui::px(height)));
-            place::dock(
-                WINDOW_WIDTH,
-                height,
-                self.screen_x,
-                self.screen_y,
-                self.screen_w,
-                self.screen_h,
-            );
+        if self.bar_visible {
+            let height = self.chrome.value;
+            if (self.placed_height - height).abs() >= 0.5 {
+                self.placed_height = height;
+                window.resize(gpui::size(gpui::px(WINDOW_WIDTH), gpui::px(height)));
+                place::dock(
+                    WINDOW_WIDTH,
+                    height,
+                    self.screen_x,
+                    self.screen_y,
+                    self.screen_w,
+                    self.screen_h,
+                );
+            }
         }
     }
 
     fn settled_height(&self) -> f32 {
         let mut height = COLLAPSED_HEIGHT;
-        if self.picker_open {
+        if self.settings_open {
+            height += SETTINGS_EXTRA;
+        } else if self.picker_open {
             height += PICKER_EXTRA;
         } else if matches!(self.phase, Phase::Result(_)) {
             height += RESULT_EXTRA;
@@ -185,8 +246,13 @@ impl Whisp {
     }
 
     fn staggering(&self) -> bool {
+        let window = Duration::from_millis(380);
         self.picker_opened_at
-            .is_some_and(|opened| opened.elapsed() < Duration::from_millis(380))
+            .is_some_and(|opened| opened.elapsed() < window)
+            || (self.settings_page == SettingsPage::Main
+                && self
+                    .settings_opened_at
+                    .is_some_and(|opened| opened.elapsed() < window))
     }
 
     pub(crate) fn press_down(&mut self, id: &str) {
@@ -213,7 +279,9 @@ impl Whisp {
 
     fn snap_chrome(&mut self) {
         self.chrome.snap(self.settled_height());
-        if self.picker_open {
+        if self.settings_open {
+            self.reveal = Some(Reveal::Settings);
+        } else if self.picker_open {
             self.reveal = Some(Reveal::Picker);
         } else if matches!(self.phase, Phase::Result(_)) {
             self.reveal = Some(Reveal::Result);
@@ -234,15 +302,28 @@ impl Whisp {
         cx.spawn(async move |this: WeakEntity<Self>, cx| loop {
             gpui::Timer::after(Duration::from_millis(80)).await;
             let alive = this
-                .update(cx, |view, _| {
-                    place::dock(
-                        WINDOW_WIDTH,
-                        view.chrome.value,
-                        screen_x,
-                        screen_y,
-                        screen_w,
-                        screen_h,
-                    );
+                .update(cx, |view, cx| {
+                    let pressed = hotkey::take_press();
+                    if pressed {
+                        view.bar_visible = !view.bar_visible;
+                        cx.notify();
+                    }
+                    if view.bar_visible {
+                        if pressed {
+                            place::set_mapped(true);
+                            cx.activate(true);
+                        }
+                        place::dock(
+                            WINDOW_WIDTH,
+                            view.chrome.value,
+                            screen_x,
+                            screen_y,
+                            screen_w,
+                            screen_h,
+                        );
+                    } else {
+                        place::set_mapped(false);
+                    }
                 })
                 .is_ok();
             if !alive {
@@ -269,8 +350,12 @@ impl Whisp {
     }
 
     pub(crate) fn toggle_listen(&mut self, cx: &mut Context<Self>) {
+        if self.recording_hotkey || self.actions_suppressed() {
+            return;
+        }
         self.error = None;
         self.copied = false;
+        self.close_settings();
         if !self.selected_ready() {
             self.picker_open = true;
             self.picker_opened_at = None;
@@ -328,6 +413,7 @@ impl Whisp {
         match audio::decode_wav(include_bytes!("../assets/sample.wav")) {
             Ok((samples, rate)) => {
                 self.phase = Phase::Transcribing;
+                self.close_settings();
                 self.picker_open = false;
                 self.picker_opened_at = None;
                 self.snap_chrome();
@@ -355,6 +441,16 @@ impl Whisp {
     }
 
     pub(crate) fn toggle_picker(&mut self, cx: &mut Context<Self>) {
+        self.stop_recording();
+        if self.settings_open {
+            self.settings_open = false;
+            self.settings_opened_at = None;
+            self.settings_page = SettingsPage::Main;
+            self.picker_open = true;
+            self.picker_opened_at = Some(Instant::now());
+            cx.notify();
+            return;
+        }
         self.picker_open = !self.picker_open;
         self.picker_opened_at = if self.picker_open {
             Some(Instant::now())
@@ -364,8 +460,122 @@ impl Whisp {
         cx.notify();
     }
 
+    pub(crate) fn toggle_settings(&mut self, cx: &mut Context<Self>) {
+        self.stop_recording();
+        self.picker_open = false;
+        self.picker_opened_at = None;
+        self.settings_open = !self.settings_open;
+        if self.settings_open {
+            self.settings_page = SettingsPage::Main;
+            self.settings_opened_at = Some(Instant::now());
+            self.page_fade.snap(1.0);
+        } else {
+            self.settings_opened_at = None;
+            self.settings_page = SettingsPage::Main;
+        }
+        self.error = None;
+        cx.notify();
+    }
+
+    pub(crate) fn open_languages(&mut self, cx: &mut Context<Self>) {
+        self.stop_recording();
+        self.settings_page = SettingsPage::Language;
+        self.page_fade.snap(0.0);
+        self.page_fade.set(1.0);
+        cx.notify();
+    }
+
+    pub(crate) fn choose_language(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !Preferences::languages()
+            .iter()
+            .any(|language| language.id == id)
+        {
+            return;
+        }
+        self.language = id.to_string();
+        self.persist();
+        self.settings_page = SettingsPage::Main;
+        self.page_fade.snap(0.0);
+        self.page_fade.set(1.0);
+        cx.notify();
+    }
+
+    pub(crate) fn begin_hotkey_capture(&mut self, cx: &mut Context<Self>) {
+        if self.recording_hotkey {
+            self.stop_recording();
+        } else {
+            self.recording_hotkey = true;
+            self.error = None;
+            hotkey::set_paused(true);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_copy_notes(&mut self, cx: &mut Context<Self>) {
+        self.copy_notes = !self.copy_notes;
+        self.persist();
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_clean_fillers(&mut self, cx: &mut Context<Self>) {
+        self.clean_fillers = !self.clean_fillers;
+        self.persist();
+        cx.notify();
+    }
+
+    pub(crate) fn capture_hotkey(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
+        if hotkey::is_modifier_only(&keystroke.key) {
+            return;
+        }
+        if keystroke.key == "escape" {
+            self.recording_hotkey = false;
+            hotkey::set_paused(false);
+            self.error = None;
+            self.suppress_actions_until = Some(Instant::now() + Duration::from_millis(280));
+            cx.notify();
+            return;
+        }
+        let Some(chord) = hotkey::from_keystroke(keystroke) else {
+            return;
+        };
+        if !chord.has_modifier() {
+            self.error = Some("Use Ctrl, Alt, or Super as well.".into());
+            cx.notify();
+            return;
+        }
+        self.show_hotkey = chord.canonical();
+        self.recording_hotkey = false;
+        self.error = None;
+        self.suppress_actions_until = Some(Instant::now() + Duration::from_millis(280));
+        self.persist();
+        hotkey::install(chord);
+        hotkey::set_paused(false);
+        cx.notify();
+    }
+
     pub(crate) fn close_overlay(&mut self, cx: &mut Context<Self>) {
-        if self.picker_open {
+        if self.recording_hotkey {
+            self.recording_hotkey = false;
+            hotkey::set_paused(false);
+            self.error = None;
+            self.suppress_actions_until = Some(Instant::now() + Duration::from_millis(280));
+            cx.notify();
+            return;
+        }
+        if self.actions_suppressed() {
+            return;
+        }
+        if self.settings_open && self.settings_page == SettingsPage::Language {
+            self.settings_page = SettingsPage::Main;
+            self.page_fade.snap(1.0);
+            cx.notify();
+            return;
+        }
+        if self.settings_open {
+            self.settings_open = false;
+            self.settings_opened_at = None;
+            self.settings_page = SettingsPage::Main;
+        } else if self.picker_open {
             self.picker_open = false;
             self.picker_opened_at = None;
         } else if matches!(self.phase, Phase::Result(_)) {
@@ -411,17 +621,26 @@ impl Whisp {
         let spec = self.selected_spec();
         let model_id = spec.id.to_string();
         let path = models::model_path(spec);
+        let language = settings::whisper_language(&self.language).map(str::to_string);
+        let clean = self.clean_fillers;
+        let copy = self.copy_notes;
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let outcome = cx
                 .background_executor()
-                .spawn(async move { stt::transcribe(&model_id, &path, &samples, rate) })
+                .spawn(async move {
+                    stt::transcribe(&model_id, &path, &samples, rate, language.as_deref(), clean)
+                })
                 .await;
             this.update(cx, |view, cx| {
                 match outcome {
                     Ok(text) => {
-                        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                        if copy {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                            view.copied = true;
+                        } else {
+                            view.copied = false;
+                        }
                         view.phase = Phase::Result(text);
-                        view.copied = true;
                         view.error = None;
                     }
                     Err(err) => {
@@ -434,6 +653,35 @@ impl Whisp {
             .ok();
         })
         .detach();
+    }
+
+    fn close_settings(&mut self) {
+        self.settings_open = false;
+        self.settings_opened_at = None;
+        self.settings_page = SettingsPage::Main;
+        self.stop_recording();
+    }
+
+    fn stop_recording(&mut self) {
+        if self.recording_hotkey {
+            self.recording_hotkey = false;
+            hotkey::set_paused(false);
+        }
+    }
+
+    fn actions_suppressed(&self) -> bool {
+        self.suppress_actions_until
+            .is_some_and(|until| Instant::now() < until)
+    }
+
+    fn persist(&self) {
+        settings::save(&Preferences {
+            selected: self.selected.clone(),
+            language: self.language.clone(),
+            show_hotkey: self.show_hotkey.clone(),
+            copy_notes: self.copy_notes,
+            clean_fillers: self.clean_fillers,
+        });
     }
 
     fn start_download(&mut self, spec: &'static ModelSpec, cx: &mut Context<Self>) {
