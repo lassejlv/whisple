@@ -1,6 +1,11 @@
 use std::time::Duration;
 
-use gpui::{
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
+use gpui_kit::component::progress::Progress;
+use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::switch::Switch;
+use gpui_kit::component::{FocusableExt, Icon, IconName, Sizable};
+use gpui_kit::{
     div, linear_color_stop, linear_gradient, prelude::*, px, Animation, AnimationExt, Context,
     IntoElement, ParentElement, Render, SharedString, Styled, Window,
 };
@@ -169,7 +174,7 @@ impl Whisp {
         } else {
             div()
                 .text_size(px(15.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
+                .font_weight(gpui_kit::FontWeight::MEDIUM)
                 .line_height(px(20.0))
                 .text_color(if matches!(self.phase, Phase::Transcribing) {
                     theme::SECONDARY
@@ -214,7 +219,7 @@ impl Whisp {
                 .justify_center()
                 .rounded_full()
                 .bg(if open { theme::BLUE_SOFT } else { theme::CLEAR })
-                .child(icon("icons/gear.svg", color, 15.0 * scale)),
+                .child(icon(IconName::Settings, color, 15.0 * scale)),
         )
     }
 
@@ -243,15 +248,14 @@ impl Whisp {
                 .rounded_full()
                 .bg(if open { theme::BLUE_SOFT } else { theme::FILL })
                 .text_size(px(12.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
+                .font_weight(gpui_kit::FontWeight::MEDIUM)
                 .text_color(if open { theme::BLUE } else { theme::LABEL })
                 .child(label.to_string())
-                .child(
-                    div()
-                        .text_size(px(9.0))
-                        .text_color(if open { theme::BLUE } else { theme::SECONDARY })
-                        .child("▾"),
-                ),
+                .child(icon(
+                    IconName::ChevronDown,
+                    if open { theme::BLUE } else { theme::SECONDARY },
+                    12.0,
+                )),
         )
     }
 
@@ -275,7 +279,7 @@ impl Whisp {
                         div()
                             .h(px(60.0))
                             .text_size(px(15.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .font_weight(gpui_kit::FontWeight::MEDIUM)
                             .line_height(px(22.0))
                             .text_color(theme::LABEL)
                             .whitespace_normal()
@@ -310,7 +314,8 @@ impl Whisp {
 
     fn copy_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let scale = self.press_scale("copy");
-        press_handlers(
+        let view = cx.weak_entity();
+        press_feedback(
             div()
                 .id("copy")
                 .h(px(28.0))
@@ -319,19 +324,29 @@ impl Whisp {
                 .justify_center(),
             "copy",
             cx,
-            |this, cx| this.copy_result(cx),
         )
         .child(
-            div()
+            Button::new("copy-action")
+                .label("Copy")
+                .custom(
+                    ButtonCustomVariant::new(cx)
+                        .color(theme::tone(theme::CLEAR))
+                        .foreground(theme::tone(theme::BLUE))
+                        .hover(theme::tone(theme::BLUE_SOFT))
+                        .active(theme::tone(theme::BLUE_SOFT))
+                        .shadow(false),
+                )
+                .compact()
+                .small()
+                .rounded(px(999.0))
+                .focus_ring(false)
                 .h(px(26.0 * scale))
                 .px(px(10.0))
-                .flex()
-                .items_center()
-                .rounded_full()
                 .text_size(px(12.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme::BLUE)
-                .child("Copy"),
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                .on_click(move |_, _, cx| {
+                    view.update(cx, |this, cx| this.copy_result(cx)).ok();
+                }),
         )
     }
 
@@ -451,7 +466,7 @@ impl Whisp {
         id: &str,
         title: &str,
         value: impl Into<SharedString>,
-        value_color: gpui::Rgba,
+        value_color: gpui_kit::Rgba,
         highlighted: bool,
         drill: bool,
         opacity: f32,
@@ -494,7 +509,7 @@ impl Whisp {
                     div()
                         .flex_1()
                         .text_size(px(14.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .font_weight(gpui_kit::FontWeight::MEDIUM)
                         .text_color(theme::LABEL)
                         .whitespace_nowrap()
                         .text_ellipsis()
@@ -510,14 +525,14 @@ impl Whisp {
                             div()
                                 .max_w(px(168.0))
                                 .text_size(px(13.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .font_weight(gpui_kit::FontWeight::MEDIUM)
                                 .text_color(value_color)
                                 .whitespace_nowrap()
                                 .text_ellipsis()
                                 .child(value),
                         )
                         .when(drill, |row| {
-                            row.child(icon("icons/chevron.svg", theme::TERTIARY, 12.0))
+                            row.child(icon(IconName::ChevronRight, theme::TERTIARY, 12.0))
                         }),
                 ),
         )
@@ -561,11 +576,11 @@ impl Whisp {
                 .child(
                     div()
                         .text_size(px(14.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .font_weight(gpui_kit::FontWeight::MEDIUM)
                         .text_color(theme::LABEL)
                         .child(title),
                 )
-                .child(switch(on)),
+                .child(setting_switch(id, on, cx)),
         )
     }
 
@@ -614,9 +629,9 @@ impl Whisp {
         title: &str,
         back_id: &'static str,
         list_id: &'static str,
-        rows: Vec<gpui::AnyElement>,
+        rows: Vec<gpui_kit::AnyElement>,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         div()
             .h(px(SETTINGS_BODY_H))
             .w_full()
@@ -628,7 +643,7 @@ impl Whisp {
                 div()
                     .id(list_id)
                     .h(px(SETTINGS_LIST_H))
-                    .overflow_y_scroll()
+                    .overflow_y_scrollbar()
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
@@ -652,11 +667,11 @@ impl Whisp {
         .flex_row()
         .items_center()
         .gap(px(6.0))
-        .child(icon("icons/chevron-left.svg", theme::BLUE, 14.0 * scale))
+        .child(icon(IconName::ChevronLeft, theme::BLUE, 14.0 * scale))
         .child(
             div()
                 .text_size(px(15.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .text_color(theme::BLUE)
                 .child(title),
         )
@@ -702,7 +717,7 @@ impl Whisp {
                             .child(
                                 div()
                                     .text_size(px(15.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                     .line_height(px(20.0))
                                     .text_color(theme::LABEL)
                                     .child("Voice models"),
@@ -719,7 +734,7 @@ impl Whisp {
                         div()
                             .id("model-list")
                             .h(px(236.0))
-                            .overflow_y_scroll()
+                            .overflow_y_scrollbar()
                             .flex()
                             .flex_col()
                             .gap(px(2.0))
@@ -732,7 +747,8 @@ impl Whisp {
 
     fn sample_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let scale = self.press_scale("sample");
-        press_handlers(
+        let view = cx.weak_entity();
+        press_feedback(
             div()
                 .id("sample")
                 .h(px(36.0))
@@ -742,21 +758,29 @@ impl Whisp {
                 .justify_center(),
             "sample",
             cx,
-            |this, cx| this.transcribe_sample(cx),
         )
         .child(
-            div()
+            Button::new("sample-action")
+                .label("Transcribe sample")
+                .custom(
+                    ButtonCustomVariant::new(cx)
+                        .color(theme::tone(theme::FILL))
+                        .foreground(theme::tone(theme::LABEL))
+                        .hover(theme::tone(theme::FILL))
+                        .active(theme::tone(theme::BLUE_SOFT))
+                        .shadow(false),
+                )
+                .compact()
+                .small()
+                .rounded(px(10.0))
+                .focus_ring(false)
                 .w(px(376.0 * scale))
                 .h(px(34.0 * scale))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(10.0))
-                .bg(theme::FILL)
                 .text_size(px(13.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme::LABEL)
-                .child("Transcribe sample"),
+                .font_weight(gpui_kit::FontWeight::MEDIUM)
+                .on_click(move |_, _, cx| {
+                    view.update(cx, |this, cx| this.transcribe_sample(cx)).ok();
+                }),
         )
     }
 }
@@ -767,7 +791,7 @@ fn model_row(
     ready: bool,
     opacity: f32,
     cx: &mut Context<Whisp>,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let selected = app.selected == spec.id && ready;
     let progress = app
         .download
@@ -830,7 +854,7 @@ fn model_row(
                             .child(
                                 div()
                                     .text_size(px(14.0))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .font_weight(gpui_kit::FontWeight::MEDIUM)
                                     .text_color(theme::LABEL)
                                     .child(spec.name.to_string()),
                             )
@@ -838,7 +862,7 @@ fn model_row(
                                 row.child(
                                     div()
                                         .text_size(px(11.0))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                         .text_color(theme::BLUE)
                                         .child("Best"),
                                 )
@@ -847,7 +871,7 @@ fn model_row(
                     .child(
                         div()
                             .text_size(px(12.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .font_weight(gpui_kit::FontWeight::MEDIUM)
                             .text_color(status_color)
                             .child(status),
                     ),
@@ -867,18 +891,10 @@ fn model_row(
             .when(fraction.is_some(), |row| {
                 let fraction = fraction.unwrap_or(0.0);
                 row.child(
-                    div()
-                        .h(px(2.0))
-                        .w_full()
-                        .rounded_full()
-                        .bg(theme::FILL)
-                        .child(
-                            div()
-                                .h(px(2.0))
-                                .w(px(340.0 * fraction))
-                                .rounded_full()
-                                .bg(theme::BLUE),
-                        ),
+                    Progress::new(SharedString::from(format!("progress-{press_id}")))
+                        .value(fraction * 100.0)
+                        .color(theme::BLUE)
+                        .with_size(px(2.0)),
                 )
             }),
     )
@@ -892,7 +908,7 @@ fn choice_row(
     on: bool,
     cx: &mut Context<Whisp>,
     action: impl Fn(&mut Whisp, &mut Context<Whisp>) + 'static,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let scale = app.press_scale(&press_id);
     press_handlers(
         div().id(SharedString::from(press_id.clone())).w_full(),
@@ -914,34 +930,28 @@ fn choice_row(
             .child(
                 div()
                     .text_size(px(14.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .font_weight(gpui_kit::FontWeight::MEDIUM)
                     .text_color(if on { theme::BLUE } else { theme::LABEL })
                     .child(label),
             )
             .when(on, |row| {
-                row.child(
-                    div()
-                        .text_size(px(13.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme::BLUE)
-                        .child("✓"),
-                )
+                row.child(icon(IconName::Check, theme::BLUE, 14.0))
             }),
     )
     .into_any_element()
 }
 
 fn press_handlers(
-    el: gpui::Stateful<gpui::Div>,
+    el: gpui_kit::Stateful<gpui_kit::Div>,
     id: &str,
     cx: &mut Context<Whisp>,
     action: impl Fn(&mut Whisp, &mut Context<Whisp>) + 'static,
-) -> gpui::Stateful<gpui::Div> {
+) -> gpui_kit::Stateful<gpui_kit::Div> {
     let down = id.to_string();
     let up = id.to_string();
     let out = id.to_string();
     el.on_mouse_down(
-        gpui::MouseButton::Left,
+        gpui_kit::MouseButton::Left,
         cx.listener(move |this, _, _, cx| {
             cx.stop_propagation();
             this.press_down(&down);
@@ -949,14 +959,14 @@ fn press_handlers(
         }),
     )
     .on_mouse_up(
-        gpui::MouseButton::Left,
+        gpui_kit::MouseButton::Left,
         cx.listener(move |this, _, _, cx| {
             cx.stop_propagation();
             this.press_up(&up);
         }),
     )
     .on_mouse_up_out(
-        gpui::MouseButton::Left,
+        gpui_kit::MouseButton::Left,
         cx.listener(move |this, _, _, _cx| {
             this.press_up(&out);
         }),
@@ -971,7 +981,7 @@ fn entrance(index: usize, opened: Option<std::time::Instant>) -> f32 {
     motion::ease_out(t.clamp(0.0, 1.0))
 }
 
-fn settings_header(title: &str, subtitle: &str) -> gpui::Div {
+fn settings_header(title: &str, subtitle: &str) -> gpui_kit::Div {
     div()
         .h(px(48.0))
         .flex()
@@ -981,7 +991,7 @@ fn settings_header(title: &str, subtitle: &str) -> gpui::Div {
         .child(
             div()
                 .text_size(px(15.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .line_height(px(20.0))
                 .text_color(theme::LABEL)
                 .child(title.to_string()),
@@ -995,35 +1005,62 @@ fn settings_header(title: &str, subtitle: &str) -> gpui::Div {
         )
 }
 
-fn icon(path: &'static str, color: gpui::Rgba, size: f32) -> gpui::Svg {
-    gpui::svg().path(path).size(px(size)).text_color(color)
+fn icon(name: IconName, color: gpui_kit::Rgba, size: f32) -> Icon {
+    Icon::new(name).text_color(color).with_size(px(size))
 }
 
-fn switch(on: bool) -> gpui::Div {
-    div()
-        .w(px(36.0))
-        .h(px(22.0))
-        .rounded_full()
-        .bg(if on { theme::GREEN } else { theme::MATERIAL })
-        .border_1()
-        .border_color(if on { theme::GREEN } else { theme::HAIRLINE })
-        .relative()
-        .child(
-            div()
-                .absolute()
-                .top(px(2.0))
-                .left(px(if on { 16.0 } else { 2.0 }))
-                .size(px(18.0))
-                .rounded_full()
-                .bg(theme::LABEL),
-        )
+fn setting_switch(id: &str, on: bool, cx: &mut Context<Whisp>) -> impl IntoElement {
+    let view = cx.weak_entity();
+    let which = id.to_string();
+    Switch::new(SharedString::from(format!("{which}-switch")))
+        .checked(on)
+        .small()
+        .color(theme::GREEN)
+        .on_change(move |checked, _, cx| {
+            let checked = *checked;
+            view.update(cx, |this, cx| match which.as_str() {
+                "startup" => this.set_open_on_startup(checked, cx),
+                "copy" => this.set_copy_notes(checked, cx),
+                "clean" => this.set_clean_fillers(checked, cx),
+                _ => {}
+            })
+            .ok();
+        })
 }
 
-fn separator() -> gpui::Div {
+fn press_feedback(
+    el: gpui_kit::Stateful<gpui_kit::Div>,
+    id: &str,
+    cx: &mut Context<Whisp>,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let down = id.to_string();
+    let up = id.to_string();
+    let out = id.to_string();
+    el.on_mouse_down(
+        gpui_kit::MouseButton::Left,
+        cx.listener(move |this, _, _, _| {
+            this.press_down(&down);
+        }),
+    )
+    .on_mouse_up(
+        gpui_kit::MouseButton::Left,
+        cx.listener(move |this, _, _, _| {
+            this.press_up(&up);
+        }),
+    )
+    .on_mouse_up_out(
+        gpui_kit::MouseButton::Left,
+        cx.listener(move |this, _, _, _| {
+            this.press_up(&out);
+        }),
+    )
+}
+
+fn separator() -> gpui_kit::Div {
     div().h(px(1.0)).w_full().bg(theme::SEPARATOR)
 }
 
-fn error_line(message: String) -> gpui::Div {
+fn error_line(message: String) -> gpui_kit::Div {
     div()
         .h(px(ERROR_EXTRA))
         .w_full()
@@ -1035,7 +1072,7 @@ fn error_line(message: String) -> gpui::Div {
         .child(message)
 }
 
-fn sheen() -> gpui::Div {
+fn sheen() -> gpui_kit::Div {
     div()
         .absolute()
         .top_0()
@@ -1049,7 +1086,7 @@ fn sheen() -> gpui::Div {
         ))
 }
 
-fn waveform(bars: &[Spring]) -> gpui::Div {
+fn waveform(bars: &[Spring]) -> gpui_kit::Div {
     let marks = bars.iter().map(|bar| {
         let height = 4.0 + bar.value.clamp(0.0, 1.0) * 18.0;
         div()
@@ -1067,7 +1104,7 @@ fn waveform(bars: &[Spring]) -> gpui::Div {
         .children(marks)
 }
 
-fn voice_mark(listening: bool) -> gpui::Div {
+fn voice_mark(listening: bool) -> gpui_kit::Div {
     if listening {
         return div().size(px(11.0)).rounded(px(3.0)).bg(theme::LABEL);
     }
