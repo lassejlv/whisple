@@ -8,7 +8,7 @@ use std::sync::{Mutex, Once};
 use std::thread;
 use std::time::Duration;
 
-use gpui::{Keystroke, Modifiers};
+use gpui_kit::{Keystroke, Modifiers};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::ConnectionExt as _;
 

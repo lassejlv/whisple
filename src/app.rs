@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::{
-    actions, App, ClipboardItem, Context, FocusHandle, Focusable, KeyBinding, Keystroke, WeakEntity,
+use gpui_kit::{
+    App, ClipboardItem, Context, FocusHandle, Focusable, KeyBinding, Keystroke, WeakEntity,
 };
 
 use crate::audio::{self, Mic};
@@ -43,7 +43,7 @@ pub(crate) enum SettingsPage {
     Microphone,
 }
 
-actions!(whisp, [ToggleListen, CloseOverlay]);
+gpui_kit::actions!(whisp, [ToggleListen, CloseOverlay]);
 
 pub(crate) enum Phase {
     Idle,
@@ -186,7 +186,7 @@ impl Whisp {
         }
     }
 
-    pub(crate) fn tick(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+    pub(crate) fn tick(&mut self, window: &mut gpui_kit::Window, cx: &mut Context<Self>) {
         self.ensure_pin(cx);
         let now = Instant::now();
         let dt = now.saturating_duration_since(self.last_tick).as_secs_f32();
@@ -232,9 +232,14 @@ impl Whisp {
 
         if self.bar_visible {
             let height = self.chrome.value;
-            if (self.placed_height - height).abs() >= 0.5 {
+            let actual = window.viewport_size().height.as_f32();
+            // Windows' resize keeps the top-left fixed, so a taller panel grows
+            // off the bottom of the screen and only the header stays visible.
+            // AppKit's content-size change is async and needs the resizable
+            // style bit, which a borderless window does not get. `place::dock`
+            // holds the bottom edge on every platform.
+            if (self.placed_height - height).abs() >= 0.5 || (actual - height).abs() >= 1.0 {
                 self.placed_height = height;
-                window.resize(gpui::size(gpui::px(WINDOW_WIDTH), gpui::px(height)));
                 place::dock(
                     WINDOW_WIDTH,
                     height,
@@ -243,6 +248,7 @@ impl Whisp {
                     self.screen_w,
                     self.screen_h,
                 );
+                apply_window_height(window, height, cx);
             }
         }
     }
@@ -317,7 +323,9 @@ impl Whisp {
         let screen_w = self.screen_w;
         let screen_h = self.screen_h;
         cx.spawn(async move |this: WeakEntity<Self>, cx| loop {
-            gpui::Timer::after(Duration::from_millis(80)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(80))
+                .await;
             let alive = this
                 .update(cx, |view, cx| {
                     let pressed = hotkey::take_press();
@@ -531,13 +539,19 @@ impl Whisp {
     }
 
     pub(crate) fn toggle_open_on_startup(&mut self, cx: &mut Context<Self>) {
-        let next = !self.open_on_startup;
-        if let Err(err) = startup::apply(next) {
+        self.set_open_on_startup(!self.open_on_startup, cx);
+    }
+
+    pub(crate) fn set_open_on_startup(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on == self.open_on_startup {
+            return;
+        }
+        if let Err(err) = startup::apply(on) {
             self.error = Some(err);
             cx.notify();
             return;
         }
-        self.open_on_startup = next;
+        self.open_on_startup = on;
         self.error = None;
         self.persist();
         cx.notify();
@@ -574,13 +588,27 @@ impl Whisp {
     }
 
     pub(crate) fn toggle_copy_notes(&mut self, cx: &mut Context<Self>) {
-        self.copy_notes = !self.copy_notes;
+        self.set_copy_notes(!self.copy_notes, cx);
+    }
+
+    pub(crate) fn set_copy_notes(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on == self.copy_notes {
+            return;
+        }
+        self.copy_notes = on;
         self.persist();
         cx.notify();
     }
 
     pub(crate) fn toggle_clean_fillers(&mut self, cx: &mut Context<Self>) {
-        self.clean_fillers = !self.clean_fillers;
+        self.set_clean_fillers(!self.clean_fillers, cx);
+    }
+
+    pub(crate) fn set_clean_fillers(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on == self.clean_fillers {
+            return;
+        }
+        self.clean_fillers = on;
         self.persist();
         cx.notify();
     }
@@ -824,4 +852,22 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("space", ToggleListen, Some("Whisp")),
         KeyBinding::new("escape", CloseOverlay, Some("Whisp")),
     ]);
+}
+
+fn apply_window_height(window: &mut gpui_kit::Window, height: f32, cx: &mut Context<Whisp>) {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        let _ = cx;
+        window.resize(gpui_kit::size(
+            gpui_kit::px(WINDOW_WIDTH),
+            gpui_kit::px(height),
+        ));
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    {
+        let _ = height;
+        // The frame was already moved in `place::dock`. Pull GPUI's viewport
+        // up to the content size before this frame lays out.
+        window.bounds_changed(cx);
+    }
 }

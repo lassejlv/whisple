@@ -2,42 +2,66 @@
 //! rounded shape. Lavapipe does not composite transparent windows, so the
 //! X shape extension is what makes the corners disappear.
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use x11rb::connection::Connection;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use x11rb::protocol::shape::{ConnectionExt as _, SK, SO};
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use x11rb::protocol::xproto::{
     AtomEnum, ConfigureWindowAux, ConnectionExt as _, Rectangle, Window,
 };
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use x11rb::rust_connection::RustConnection;
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub fn dock(width: f32, height: f32, screen_x: f32, screen_y: f32, screen_w: f32, screen_h: f32) {
-    let Ok(_guard) = LOCK.lock() else {
-        return;
-    };
-    let radius = if height <= 88.0 { height / 2.0 } else { 22.0 };
-    let x = screen_x + (screen_w - width) / 2.0;
-    let y = screen_y + screen_h - height - 18.0;
-    if let Err(err) = place(
-        x.round() as i32,
-        y.round() as i32,
-        width.round() as u16,
-        height.round() as u16,
-        radius.round() as u16,
-    ) {
-        eprintln!("could not place the voice window: {err}");
+    // AppKit's setContentSize and Win32's SWP_NOMOVE keep the top-left fixed,
+    // so a taller panel grows off the bottom of the screen. Hold the bottom
+    // edge ourselves. Linux already does that with the X configure below.
+    #[cfg(target_os = "macos")]
+    macos::anchor(width, height);
+    #[cfg(target_os = "windows")]
+    windows::anchor(width, height);
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    let _ = (screen_x, screen_y, screen_w, screen_h);
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        let Ok(_guard) = LOCK.lock() else {
+            return;
+        };
+        let radius = if height <= 88.0 { height / 2.0 } else { 22.0 };
+        let x = screen_x + (screen_w - width) / 2.0;
+        let y = screen_y + screen_h - height - 18.0;
+        if let Err(err) = place(
+            x.round() as i32,
+            y.round() as i32,
+            width.round() as u16,
+            height.round() as u16,
+            radius.round() as u16,
+        ) {
+            eprintln!("could not place the voice window: {err}");
+        }
     }
 }
 
 pub fn set_mapped(mapped: bool) {
-    let Ok(_guard) = LOCK.lock() else {
-        return;
-    };
-    if let Err(err) = map_client(mapped) {
-        eprintln!("could not change the voice window: {err}");
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    let _ = mapped;
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        let Ok(_guard) = LOCK.lock() else {
+            return;
+        };
+        if let Err(err) = map_client(mapped) {
+            eprintln!("could not change the voice window: {err}");
+        }
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn map_client(mapped: bool) -> Result<(), String> {
     let (conn, _client, top) = locate()?;
     if mapped {
@@ -49,6 +73,7 @@ fn map_client(mapped: bool) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn place(x: i32, y: i32, width: u16, height: u16, radius: u16) -> Result<(), String> {
     let (conn, client, top) = locate()?;
 
@@ -77,6 +102,7 @@ fn place(x: i32, y: i32, width: u16, height: u16, radius: u16) -> Result<(), Str
     Ok(())
 }
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn locate() -> Result<(RustConnection, Window, Window), String> {
     let (conn, screen) = x11rb::connect(None).map_err(|err| err.to_string())?;
     let root = conn.setup().roots[screen].root;
@@ -92,6 +118,7 @@ fn locate() -> Result<(RustConnection, Window, Window), String> {
     Ok((conn, client, top))
 }
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn find_pid(
     conn: &impl Connection,
     window: Window,
@@ -114,6 +141,7 @@ fn find_pid(
     None
 }
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn window_pid(conn: &impl Connection, window: Window, pid_atom: u32) -> Option<u32> {
     let reply = conn
         .get_property(false, window, pid_atom, AtomEnum::CARDINAL, 0, 1)
@@ -124,6 +152,7 @@ fn window_pid(conn: &impl Connection, window: Window, pid_atom: u32) -> Option<u
     Some(u32::from_ne_bytes(bytes))
 }
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn top_level(conn: &impl Connection, mut window: Window, root: Window) -> Option<Window> {
     for _ in 0..8 {
         let tree = conn.query_tree(window).ok()?.reply().ok()?;
@@ -135,6 +164,7 @@ fn top_level(conn: &impl Connection, mut window: Window, root: Window) -> Option
     Some(window)
 }
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn rounded_rects(width: u16, height: u16, radius: u16) -> Vec<Rectangle> {
     if radius == 0 {
         return vec![Rectangle {
@@ -176,6 +206,173 @@ fn rounded_rects(width: u16, height: u16, radius: u16) -> Vec<Rectangle> {
     rects
 }
 
+#[cfg(target_os = "macos")]
+mod macos {
+    use cocoa::appkit::NSApplication;
+    use cocoa::base::{id, nil, NO};
+    use cocoa::foundation::{NSPoint, NSRect, NSSize};
+    use objc::{msg_send, sel, sel_impl};
+
+    const MARGIN: f64 = 18.0;
+    /// `NSWindowAnimationBehaviorNone`. Popups default to utility-window
+    /// animation, which eases the frame and leaves the panel clipped.
+    const ANIMATION_NONE: isize = 2;
+
+    pub fn anchor(width: f32, height: f32) {
+        unsafe {
+            let app = NSApplication::sharedApplication(nil);
+            let windows: id = msg_send![app, windows];
+            let count: usize = msg_send![windows, count];
+            if count == 0 {
+                return;
+            }
+            let window: id = msg_send![windows, objectAtIndex: count - 1];
+            if window.is_null() {
+                return;
+            }
+            let _: () = msg_send![window, setAnimationBehavior: ANIMATION_NONE];
+
+            let screen: id = msg_send![window, screen];
+            if screen.is_null() {
+                return;
+            }
+            // `visibleFrame` sits above the Dock and below the menu bar.
+            let visible: NSRect = msg_send![screen, visibleFrame];
+            let content = NSRect {
+                origin: NSPoint {
+                    x: visible.origin.x + (visible.size.width - f64::from(width)) * 0.5,
+                    y: visible.origin.y + MARGIN,
+                },
+                size: NSSize {
+                    width: f64::from(width),
+                    height: f64::from(height),
+                },
+            };
+            let frame: NSRect = msg_send![window, frameRectForContentRect: content];
+            let current: NSRect = msg_send![window, frame];
+            if close(current.origin.x, frame.origin.x)
+                && close(current.origin.y, frame.origin.y)
+                && close(current.size.width, frame.size.width)
+                && close(current.size.height, frame.size.height)
+            {
+                return;
+            }
+            // `display: NO` avoids a synchronous AppKit redraw while GPUI is
+            // already drawing this frame. The view's resize callback and
+            // `bounds_changed` pick up the new content size.
+            let _: () = msg_send![window, setFrame: frame display: NO animate: NO];
+        }
+    }
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 0.5
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod windows {
+    use std::ffi::c_void;
+
+    const MARGIN: f32 = 18.0;
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+    const SPI_GETWORKAREA: u32 = 0x0030;
+
+    #[repr(C)]
+    struct Rect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn EnumWindows(callback: extern "system" fn(isize, isize) -> i32, lparam: isize) -> i32;
+        fn GetWindowThreadProcessId(hwnd: isize, process_id: *mut u32) -> u32;
+        fn IsWindowVisible(hwnd: isize) -> i32;
+        fn GetWindowRect(hwnd: isize, rect: *mut Rect) -> i32;
+        fn GetClientRect(hwnd: isize, rect: *mut Rect) -> i32;
+        fn GetDpiForWindow(hwnd: isize) -> u32;
+        fn SetWindowPos(
+            hwnd: isize,
+            insert_after: isize,
+            x: i32,
+            y: i32,
+            cx: i32,
+            cy: i32,
+            flags: u32,
+        ) -> i32;
+        fn SystemParametersInfoW(action: u32, param: u32, pv: *mut c_void, winini: u32) -> i32;
+    }
+
+    pub fn anchor(width: f32, height: f32) {
+        let mut hwnd = 0isize;
+        unsafe {
+            EnumWindows(find_ours, &mut hwnd as *mut isize as isize);
+        }
+        if hwnd == 0 {
+            return;
+        }
+        unsafe {
+            let mut window = Rect {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            let mut client = window;
+            if GetWindowRect(hwnd, &mut window) == 0 || GetClientRect(hwnd, &mut client) == 0 {
+                return;
+            }
+            let mut work = window;
+            if SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut work as *mut Rect as *mut c_void, 0)
+                == 0
+            {
+                return;
+            }
+            let dpi = GetDpiForWindow(hwnd).max(96) as f32;
+            let scale = dpi / 96.0;
+            let extra_w = (window.right - window.left) - (client.right - client.left);
+            let extra_h = (window.bottom - window.top) - (client.bottom - client.top);
+            let outer_w = (width * scale).round() as i32 + extra_w;
+            let outer_h = (height * scale).round() as i32 + extra_h;
+            let margin = (MARGIN * scale).round() as i32;
+            let left = work.left + (work.right - work.left - outer_w) / 2;
+            let top = work.bottom - margin - outer_h;
+            if (window.left - left).abs() < 2
+                && (window.top - top).abs() < 2
+                && (window.right - window.left - outer_w).abs() < 2
+                && (window.bottom - window.top - outer_h).abs() < 2
+            {
+                return;
+            }
+            SetWindowPos(
+                hwnd,
+                0,
+                left,
+                top,
+                outer_w,
+                outer_h,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+
+    extern "system" fn find_ours(hwnd: isize, lparam: isize) -> i32 {
+        unsafe {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if pid == std::process::id() && IsWindowVisible(hwnd) != 0 {
+                *(lparam as *mut isize) = hwnd;
+                return 0;
+            }
+        }
+        1
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn circle_inset(radius: u16, row: u16) -> u16 {
     let r = radius as f32;
     let y = r - row as f32 - 0.5;
