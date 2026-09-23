@@ -1,0 +1,4 @@
+[env]
+# Some crates ship a rust-toolchain.toml pinned to their oldest supported
+# compiler. Force the active toolchain so those files are not picked up.
+RUSTUP_TOOLCHAIN = "stable"
