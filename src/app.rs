@@ -1,16 +1,29 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use gpui::{actions, App, ClipboardItem, Context, FocusHandle, Focusable, KeyBinding, WeakEntity};
 
 use crate::audio::{self, Mic};
 use crate::models::{self, ModelSpec};
+use crate::motion::{Ease, Spring};
 use crate::place;
 use crate::stt;
 
-pub(crate) const WINDOW_WIDTH: f32 = 420.0;
-pub(crate) const COLLAPSED_HEIGHT: f32 = 74.0;
+pub(crate) const WINDOW_WIDTH: f32 = 400.0;
+pub(crate) const COLLAPSED_HEIGHT: f32 = 64.0;
+pub(crate) const PICKER_EXTRA: f32 = 360.0;
+pub(crate) const RESULT_EXTRA: f32 = 132.0;
+pub(crate) const ERROR_EXTRA: f32 = 22.0;
+
+const BARS: usize = 22;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reveal {
+    Picker,
+    Result,
+}
 
 actions!(whisp, [ToggleListen, CloseOverlay]);
 
@@ -43,6 +56,14 @@ pub(crate) struct Whisp {
     pub download: Option<Download>,
     pub error: Option<String>,
     pub copied: bool,
+    pub chrome: Ease,
+    pub press_id: Option<String>,
+    pub press: Ease,
+    pub bars: Vec<Spring>,
+    pub reveal: Option<Reveal>,
+    pub picker_opened_at: Option<Instant>,
+    last_tick: Instant,
+    pin_started: bool,
     screen_x: f32,
     screen_y: f32,
     screen_w: f32,
@@ -78,6 +99,14 @@ impl Whisp {
             download: None,
             error: None,
             copied: false,
+            chrome: Ease::chrome(COLLAPSED_HEIGHT),
+            press_id: None,
+            press: Ease::press(0.0),
+            bars: vec![Spring::level(0.08); BARS],
+            reveal: None,
+            picker_opened_at: None,
+            last_tick: Instant::now(),
+            pin_started: false,
             screen_x,
             screen_y,
             screen_w,
@@ -86,38 +115,147 @@ impl Whisp {
         }
     }
 
-    pub(crate) fn sync_chrome(&mut self, window: &mut gpui::Window) {
-        let height = self.chrome_height();
-        if (self.placed_height - height).abs() < 0.5 {
-            return;
+    pub(crate) fn tick(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        self.ensure_pin(cx);
+        let now = Instant::now();
+        let dt = now.saturating_duration_since(self.last_tick).as_secs_f32();
+        self.last_tick = now;
+        let dt = if dt > 0.1 { 1.0 / 60.0 } else { dt };
+
+        self.chrome.set(self.settled_height());
+        let mut moving = self.chrome.step();
+        moving |= self.press.step();
+        if self.press.target() == 0.0 && !self.press.busy() {
+            self.press_id = None;
         }
-        self.placed_height = height;
-        window.resize(gpui::size(gpui::px(WINDOW_WIDTH), gpui::px(height)));
-        place::dock(
-            WINDOW_WIDTH,
-            height,
-            self.screen_x,
-            self.screen_y,
-            self.screen_w,
-            self.screen_h,
-        );
+
+        if matches!(self.phase, Phase::Listening(_)) {
+            self.note_level();
+        } else {
+            for bar in &mut self.bars {
+                bar.target = 0.08;
+            }
+        }
+        for bar in &mut self.bars {
+            moving |= bar.step(dt);
+        }
+
+        if self.picker_open {
+            self.reveal = Some(Reveal::Picker);
+        } else if matches!(self.phase, Phase::Result(_)) {
+            self.reveal = Some(Reveal::Result);
+        } else if !self.chrome.busy() {
+            self.reveal = None;
+        }
+
+        if moving
+            || self.staggering()
+            || self.download.is_some()
+            || matches!(self.phase, Phase::Listening(_) | Phase::Transcribing)
+        {
+            window.request_animation_frame();
+        }
+
+        let height = self.chrome.value;
+        if (self.placed_height - height).abs() >= 0.5 {
+            self.placed_height = height;
+            window.resize(gpui::size(gpui::px(WINDOW_WIDTH), gpui::px(height)));
+            place::dock(
+                WINDOW_WIDTH,
+                height,
+                self.screen_x,
+                self.screen_y,
+                self.screen_w,
+                self.screen_h,
+            );
+        }
     }
 
-    fn chrome_height(&self) -> f32 {
+    fn settled_height(&self) -> f32 {
         let mut height = COLLAPSED_HEIGHT;
         if self.picker_open {
-            height += 438.0;
+            height += PICKER_EXTRA;
         } else if matches!(self.phase, Phase::Result(_)) {
-            height += 148.0;
+            height += RESULT_EXTRA;
         }
         if self.error.is_some() {
-            height += 24.0;
+            height += ERROR_EXTRA;
         }
         height
     }
 
-    pub(crate) fn panel_open(&self) -> bool {
-        self.picker_open || matches!(self.phase, Phase::Result(_)) || self.error.is_some()
+    fn staggering(&self) -> bool {
+        self.picker_opened_at
+            .is_some_and(|opened| opened.elapsed() < Duration::from_millis(380))
+    }
+
+    pub(crate) fn press_down(&mut self, id: &str) {
+        if self.press_id.as_deref() != Some(id) {
+            self.press.snap(0.0);
+            self.press_id = Some(id.to_string());
+        }
+        self.press.set(1.0);
+    }
+
+    pub(crate) fn press_up(&mut self, id: &str) {
+        if self.press_id.as_deref() == Some(id) {
+            self.press.set(0.0);
+        }
+    }
+
+    pub(crate) fn press_scale(&self, id: &str) -> f32 {
+        if self.press_id.as_deref() == Some(id) {
+            1.0 - 0.03 * self.press.value
+        } else {
+            1.0
+        }
+    }
+
+    fn snap_chrome(&mut self) {
+        self.chrome.snap(self.settled_height());
+        if self.picker_open {
+            self.reveal = Some(Reveal::Picker);
+        } else if matches!(self.phase, Phase::Result(_)) {
+            self.reveal = Some(Reveal::Result);
+        } else {
+            self.reveal = None;
+        }
+    }
+
+    fn ensure_pin(&mut self, cx: &mut Context<Self>) {
+        if self.pin_started {
+            return;
+        }
+        self.pin_started = true;
+        let screen_x = self.screen_x;
+        let screen_y = self.screen_y;
+        let screen_w = self.screen_w;
+        let screen_h = self.screen_h;
+        cx.spawn(async move |this: WeakEntity<Self>, cx| loop {
+            gpui::Timer::after(Duration::from_millis(80)).await;
+            let alive = this
+                .update(cx, |view, _| {
+                    place::dock(
+                        WINDOW_WIDTH,
+                        view.chrome.value,
+                        screen_x,
+                        screen_y,
+                        screen_w,
+                        screen_h,
+                    );
+                })
+                .is_ok();
+            if !alive {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    fn rest_bars(&mut self) {
+        for bar in &mut self.bars {
+            bar.snap(0.08);
+        }
     }
 
     pub(crate) fn selected_spec(&self) -> &'static ModelSpec {
@@ -135,7 +273,9 @@ impl Whisp {
         self.copied = false;
         if !self.selected_ready() {
             self.picker_open = true;
+            self.picker_opened_at = None;
             self.error = Some("Download a model before recording.".into());
+            self.snap_chrome();
             cx.notify();
             return;
         }
@@ -148,18 +288,25 @@ impl Whisp {
                 };
                 let (samples, rate) = mic.take();
                 self.levels.clear();
+                self.rest_bars();
                 self.transcribe(samples, rate, cx);
+                self.snap_chrome();
             }
             Phase::Transcribing => {}
             Phase::Idle | Phase::Result(_) => match Mic::start() {
                 Ok(mic) => {
                     self.levels.clear();
+                    self.rest_bars();
                     self.phase = Phase::Listening(mic);
                     self.picker_open = false;
+                    self.picker_opened_at = None;
+                    self.snap_chrome();
                 }
                 Err(err) => {
                     self.error = Some(err);
                     self.picker_open = true;
+                    self.picker_opened_at = None;
+                    self.snap_chrome();
                 }
             },
         }
@@ -182,6 +329,8 @@ impl Whisp {
             Ok((samples, rate)) => {
                 self.phase = Phase::Transcribing;
                 self.picker_open = false;
+                self.picker_opened_at = None;
+                self.snap_chrome();
                 self.transcribe(samples, rate, cx);
             }
             Err(err) => self.error = Some(err),
@@ -207,17 +356,24 @@ impl Whisp {
 
     pub(crate) fn toggle_picker(&mut self, cx: &mut Context<Self>) {
         self.picker_open = !self.picker_open;
+        self.picker_opened_at = if self.picker_open {
+            Some(Instant::now())
+        } else {
+            None
+        };
         cx.notify();
     }
 
     pub(crate) fn close_overlay(&mut self, cx: &mut Context<Self>) {
         if self.picker_open {
             self.picker_open = false;
+            self.picker_opened_at = None;
         } else if matches!(self.phase, Phase::Result(_)) {
             self.phase = Phase::Idle;
             self.copied = false;
         }
         self.error = None;
+        self.snap_chrome();
         cx.notify();
     }
 
@@ -236,8 +392,18 @@ impl Whisp {
         };
         let level = mic.level();
         self.levels.push_back(level);
-        while self.levels.len() > 22 {
+        while self.levels.len() > BARS {
             self.levels.pop_front();
+        }
+        for (index, bar) in self.bars.iter_mut().enumerate() {
+            let from_end = BARS - 1 - index;
+            bar.target = self
+                .levels
+                .iter()
+                .rev()
+                .nth(from_end)
+                .copied()
+                .unwrap_or(0.08);
         }
     }
 
