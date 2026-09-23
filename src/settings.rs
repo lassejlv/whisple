@@ -17,6 +17,9 @@ pub struct Preferences {
     pub show_hotkey: String,
     pub copy_notes: bool,
     pub clean_fillers: bool,
+    /// Empty means the system default input.
+    pub input_device: String,
+    pub open_on_startup: bool,
 }
 
 pub struct Language {
@@ -123,6 +126,10 @@ struct File {
     copy_notes: bool,
     #[serde(default = "yes")]
     clean_fillers: bool,
+    #[serde(default)]
+    input_device: String,
+    #[serde(default)]
+    open_on_startup: bool,
 }
 
 fn yes() -> bool {
@@ -137,6 +144,8 @@ impl Default for Preferences {
             show_hotkey: DEFAULT_HOTKEY.into(),
             copy_notes: true,
             clean_fillers: true,
+            input_device: String::new(),
+            open_on_startup: false,
         }
     }
 }
@@ -201,7 +210,21 @@ pub fn decode(raw: &str) -> Preferences {
     }
     prefs.copy_notes = file.copy_notes;
     prefs.clean_fillers = file.clean_fillers;
+    prefs.input_device = clean_device(&file.input_device);
+    prefs.open_on_startup = file.open_on_startup;
     prefs
+}
+
+pub fn microphone_label(name: &str) -> &str {
+    if name.is_empty() {
+        "System default"
+    } else {
+        name
+    }
+}
+
+fn clean_device(name: &str) -> String {
+    name.trim().chars().filter(|ch| !ch.is_control()).collect()
 }
 
 fn path() -> PathBuf {
@@ -219,6 +242,8 @@ impl From<&Preferences> for File {
             show_hotkey: prefs.show_hotkey.clone(),
             copy_notes: prefs.copy_notes,
             clean_fillers: prefs.clean_fillers,
+            input_device: prefs.input_device.clone(),
+            open_on_startup: prefs.open_on_startup,
         }
     }
 }
@@ -235,6 +260,24 @@ mod tests {
         assert_eq!(prefs.show_hotkey, DEFAULT_HOTKEY);
         assert!(prefs.copy_notes);
         assert!(prefs.clean_fillers);
+        assert!(prefs.input_device.is_empty());
+        assert!(!prefs.open_on_startup);
+        assert_eq!(microphone_label(""), "System default");
+    }
+
+    #[test]
+    fn startup_and_microphone_survive_a_round_trip() {
+        let prefs = decode(
+            r#"{"open_on_startup":true,"input_device":"  Studio Mic\n","selected":"small-en"}"#,
+        );
+        assert!(prefs.open_on_startup);
+        assert_eq!(prefs.input_device, "Studio Mic");
+        assert_eq!(microphone_label(&prefs.input_device), "Studio Mic");
+        let raw = serde_json::to_string(&File::from(&prefs)).unwrap();
+        let again = decode(&raw);
+        assert!(again.open_on_startup);
+        assert_eq!(again.input_device, "Studio Mic");
+        assert_eq!(again.selected, "small-en");
     }
 
     #[test]

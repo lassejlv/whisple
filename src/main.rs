@@ -5,6 +5,7 @@ mod models;
 mod motion;
 mod place;
 mod settings;
+mod startup;
 mod stt;
 mod text;
 mod theme;
