@@ -7,7 +7,7 @@ use gpui::{
 
 use crate::app::{
     Phase, Reveal, SettingsPage, Whisp, COLLAPSED_HEIGHT, ERROR_EXTRA, PICKER_EXTRA, RESULT_EXTRA,
-    SETTINGS_EXTRA,
+    SETTINGS_BODY_H, SETTINGS_EXTRA, SETTINGS_LIST_H,
 };
 use crate::hotkey;
 use crate::models;
@@ -336,10 +336,10 @@ impl Whisp {
     }
 
     fn settings_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let page = if self.settings_page == SettingsPage::Language {
-            self.language_page(cx).into_any_element()
-        } else {
-            self.settings_main(cx).into_any_element()
+        let page = match self.settings_page {
+            SettingsPage::Language => self.language_page(cx).into_any_element(),
+            SettingsPage::Microphone => self.microphone_page(cx).into_any_element(),
+            SettingsPage::Main => self.settings_main(cx).into_any_element(),
         };
         div()
             .h(px(SETTINGS_EXTRA))
@@ -371,18 +371,18 @@ impl Whisp {
             theme::SECONDARY
         };
         div()
-            .h(px(282.0))
+            .h(px(SETTINGS_BODY_H))
             .w_full()
             .flex()
             .flex_col()
             .gap(px(8.0))
             .child(settings_header(
                 "Settings",
-                "Shortcut, language, and notes.",
+                "Shortcut, microphone, and notes.",
             ))
             .child(
                 div()
-                    .h(px(226.0))
+                    .h(px(SETTINGS_LIST_H))
                     .flex()
                     .flex_col()
                     .gap(px(6.0))
@@ -392,9 +392,29 @@ impl Whisp {
                         hotkey_value,
                         hotkey_color,
                         self.recording_hotkey,
+                        false,
                         entrance(0, opened),
                         cx,
                         |this, cx| this.begin_hotkey_capture(cx),
+                    ))
+                    .child(self.switch_row(
+                        "startup",
+                        "Open on startup",
+                        self.open_on_startup,
+                        entrance(1, opened),
+                        cx,
+                        |this, cx| this.toggle_open_on_startup(cx),
+                    ))
+                    .child(self.setting_row(
+                        "microphone",
+                        "Microphone",
+                        settings::microphone_label(&self.input_device).to_string(),
+                        theme::SECONDARY,
+                        false,
+                        true,
+                        entrance(2, opened),
+                        cx,
+                        |this, cx| this.open_microphones(cx),
                     ))
                     .child(self.setting_row(
                         "language",
@@ -402,7 +422,8 @@ impl Whisp {
                         settings::language_name(&self.language),
                         theme::SECONDARY,
                         false,
-                        entrance(1, opened),
+                        true,
+                        entrance(3, opened),
                         cx,
                         |this, cx| this.open_languages(cx),
                     ))
@@ -410,7 +431,7 @@ impl Whisp {
                         "copy",
                         "Copy to clipboard",
                         self.copy_notes,
-                        entrance(2, opened),
+                        entrance(4, opened),
                         cx,
                         |this, cx| this.toggle_copy_notes(cx),
                     ))
@@ -418,7 +439,7 @@ impl Whisp {
                         "clean",
                         "Clean up notes",
                         self.clean_fillers,
-                        entrance(3, opened),
+                        entrance(5, opened),
                         cx,
                         |this, cx| this.toggle_clean_fillers(cx),
                     )),
@@ -432,6 +453,7 @@ impl Whisp {
         value: impl Into<SharedString>,
         value_color: gpui::Rgba,
         highlighted: bool,
+        drill: bool,
         opacity: f32,
         cx: &mut Context<Self>,
         action: impl Fn(&mut Whisp, &mut Context<Whisp>) + 'static,
@@ -439,7 +461,6 @@ impl Whisp {
         let scale = self.press_scale(id);
         let title = title.to_string();
         let value = value.into();
-        let show_chevron = id == "language";
         press_handlers(
             div()
                 .id(SharedString::from(id.to_string()))
@@ -495,7 +516,7 @@ impl Whisp {
                                 .text_ellipsis()
                                 .child(value),
                         )
-                        .when(show_chevron, |row| {
+                        .when(drill, |row| {
                             row.child(icon("icons/chevron.svg", theme::TERTIARY, 12.0))
                         }),
                 ),
@@ -556,57 +577,57 @@ impl Whisp {
                 let id = language.id.to_string();
                 let name = language.name.to_string();
                 let on = selected == language.id;
-                let press_id = format!("lang-{id}");
-                let scale = self.press_scale(&press_id);
-                press_handlers(
-                    div().id(SharedString::from(press_id.clone())).w_full(),
-                    &press_id,
-                    cx,
-                    move |this, cx| this.choose_language(&id, cx),
-                )
-                .child(
-                    div()
-                        .w(px(376.0 * scale))
-                        .h(px(36.0))
-                        .px(px(12.0))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .rounded(px(10.0))
-                        .bg(if on { theme::BLUE_SOFT } else { theme::CLEAR })
-                        .child(
-                            div()
-                                .text_size(px(14.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(if on { theme::BLUE } else { theme::LABEL })
-                                .child(name),
-                        )
-                        .when(on, |row| {
-                            row.child(
-                                div()
-                                    .text_size(px(13.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(theme::BLUE)
-                                    .child("✓"),
-                            )
-                        }),
-                )
-                .into_any_element()
+                choice_row(self, format!("lang-{id}"), name, on, cx, move |this, cx| {
+                    this.choose_language(&id, cx);
+                })
             })
             .collect::<Vec<_>>();
+        self.drill_page("Language", "lang-back", "language-list", rows, cx)
+    }
 
+    fn microphone_page(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = self.input_device.clone();
+        let mut choices = vec![(String::new(), "System default".to_string())];
+        for name in &self.microphones {
+            choices.push((name.clone(), name.clone()));
+        }
+        let rows = choices
+            .into_iter()
+            .enumerate()
+            .map(|(index, (name, label))| {
+                let on = selected == name;
+                choice_row(
+                    self,
+                    format!("mic-{index}"),
+                    label,
+                    on,
+                    cx,
+                    move |this, cx| this.choose_microphone(&name, cx),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.drill_page("Microphone", "mic-back", "microphone-list", rows, cx)
+    }
+
+    fn drill_page(
+        &self,
+        title: &str,
+        back_id: &'static str,
+        list_id: &'static str,
+        rows: Vec<gpui::AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         div()
-            .h(px(282.0))
+            .h(px(SETTINGS_BODY_H))
             .w_full()
             .flex()
             .flex_col()
             .gap(px(8.0))
-            .child(self.language_header(cx))
+            .child(self.drill_header(back_id, title, cx))
             .child(
                 div()
-                    .id("language-list")
-                    .h(px(226.0))
+                    .id(list_id)
+                    .h(px(SETTINGS_LIST_H))
                     .overflow_y_scroll()
                     .flex()
                     .flex_col()
@@ -615,19 +636,18 @@ impl Whisp {
             )
     }
 
-    fn language_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let scale = self.press_scale("lang-back");
-        press_handlers(
-            div().id("lang-back").h(px(48.0)).w_full(),
-            "lang-back",
-            cx,
-            |this, cx| {
-                this.settings_page = SettingsPage::Main;
-                this.page_fade.snap(0.0);
-                this.page_fade.set(1.0);
-                cx.notify();
-            },
-        )
+    fn drill_header(
+        &self,
+        id: &'static str,
+        title: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let scale = self.press_scale(id);
+        let title = title.to_string();
+        press_handlers(div().id(id).h(px(48.0)).w_full(), id, cx, |this, cx| {
+            this.show_main_page();
+            cx.notify();
+        })
         .flex()
         .flex_row()
         .items_center()
@@ -638,7 +658,7 @@ impl Whisp {
                 .text_size(px(15.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(theme::BLUE)
-                .child("Language"),
+                .child(title),
         )
     }
 
@@ -859,6 +879,52 @@ fn model_row(
                                 .rounded_full()
                                 .bg(theme::BLUE),
                         ),
+                )
+            }),
+    )
+    .into_any_element()
+}
+
+fn choice_row(
+    app: &Whisp,
+    press_id: String,
+    label: String,
+    on: bool,
+    cx: &mut Context<Whisp>,
+    action: impl Fn(&mut Whisp, &mut Context<Whisp>) + 'static,
+) -> gpui::AnyElement {
+    let scale = app.press_scale(&press_id);
+    press_handlers(
+        div().id(SharedString::from(press_id.clone())).w_full(),
+        &press_id,
+        cx,
+        action,
+    )
+    .child(
+        div()
+            .w(px(376.0 * scale))
+            .h(px(36.0))
+            .px(px(12.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .rounded(px(10.0))
+            .bg(if on { theme::BLUE_SOFT } else { theme::CLEAR })
+            .child(
+                div()
+                    .text_size(px(14.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(if on { theme::BLUE } else { theme::LABEL })
+                    .child(label),
+            )
+            .when(on, |row| {
+                row.child(
+                    div()
+                        .text_size(px(13.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme::BLUE)
+                        .child("✓"),
                 )
             }),
     )

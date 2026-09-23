@@ -15,11 +15,11 @@ pub struct Mic {
 }
 
 impl Mic {
-    pub fn start() -> Result<Self, String> {
+    /// `preferred` is a device name from [`input_names`]. An empty name uses the
+    /// system default.
+    pub fn start(preferred: &str) -> Result<Self, String> {
         let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or_else(|| "No microphone found. Try the sample in Models.".to_string())?;
+        let device = choose_input(&host, preferred)?;
         let supported = device
             .default_input_config()
             .map_err(|err| err.to_string())?;
@@ -105,6 +105,49 @@ impl Mic {
     }
 }
 
+pub fn input_names() -> Result<Vec<String>, String> {
+    let host = cpal::default_host();
+    let devices = host.input_devices().map_err(|err| err.to_string())?;
+    let mut names = Vec::new();
+    for device in devices {
+        let Ok(name) = device.name() else {
+            continue;
+        };
+        let name = name.trim().to_string();
+        if name.is_empty() || names.iter().any(|existing| existing == &name) {
+            continue;
+        }
+        names.push(name);
+    }
+    names.sort_by(|left, right| left.to_lowercase().cmp(&right.to_lowercase()));
+    Ok(names)
+}
+
+pub fn known_input(preferred: &str, names: &[String]) -> Result<(), String> {
+    if preferred.is_empty() || names.iter().any(|name| name == preferred) {
+        Ok(())
+    } else {
+        Err(format!("Microphone \"{preferred}\" is not connected."))
+    }
+}
+
+fn choose_input(host: &cpal::Host, preferred: &str) -> Result<cpal::Device, String> {
+    if preferred.is_empty() {
+        return host
+            .default_input_device()
+            .ok_or_else(|| "No microphone found. Try the sample in Models.".to_string());
+    }
+    let names = input_names()?;
+    known_input(preferred, &names)?;
+    let devices = host.input_devices().map_err(|err| err.to_string())?;
+    for device in devices {
+        if device.name().ok().as_deref().map(str::trim) == Some(preferred) {
+            return Ok(device);
+        }
+    }
+    Err(format!("Microphone \"{preferred}\" is not connected."))
+}
+
 fn push(samples: &Mutex<Vec<f32>>, level: &AtomicU32, data: &[f32], channels: usize, max: usize) {
     let mono = downmix(data, channels);
     store_level(level, &mono);
@@ -181,7 +224,15 @@ pub fn to_whisper_pcm(samples: &[f32], rate: u32) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_wav, to_whisper_pcm};
+    use super::{decode_wav, known_input, to_whisper_pcm};
+
+    #[test]
+    fn a_missing_microphone_is_rejected() {
+        let names = vec!["Built-in".to_string()];
+        assert!(known_input("", &names).is_ok());
+        assert!(known_input("Built-in", &names).is_ok());
+        assert!(known_input("Studio Mic", &names).is_err());
+    }
 
     #[test]
     fn resamples_to_sixteen_kilohertz() {

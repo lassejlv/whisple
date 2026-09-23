@@ -13,13 +13,18 @@ use crate::models::{self, ModelSpec};
 use crate::motion::{Ease, Spring};
 use crate::place;
 use crate::settings::{self, Preferences};
+use crate::startup;
 use crate::stt;
 
 pub(crate) const WINDOW_WIDTH: f32 = 400.0;
 pub(crate) const COLLAPSED_HEIGHT: f32 = 64.0;
 pub(crate) const PICKER_EXTRA: f32 = 360.0;
 pub(crate) const RESULT_EXTRA: f32 = 132.0;
-pub(crate) const SETTINGS_EXTRA: f32 = 307.0;
+/// 14 top + 48 header + 8 gap + 342 list + 10 bottom + 1 separator.
+/// The list is 6 rows of 52 with 5 gaps of 6.
+pub(crate) const SETTINGS_LIST_H: f32 = 342.0;
+pub(crate) const SETTINGS_BODY_H: f32 = 398.0;
+pub(crate) const SETTINGS_EXTRA: f32 = 423.0;
 pub(crate) const ERROR_EXTRA: f32 = 22.0;
 
 const BARS: usize = 22;
@@ -35,6 +40,7 @@ pub(crate) enum Reveal {
 pub(crate) enum SettingsPage {
     Main,
     Language,
+    Microphone,
 }
 
 actions!(whisp, [ToggleListen, CloseOverlay]);
@@ -81,6 +87,9 @@ pub(crate) struct Whisp {
     pub show_hotkey: String,
     pub copy_notes: bool,
     pub clean_fillers: bool,
+    pub input_device: String,
+    pub open_on_startup: bool,
+    pub microphones: Vec<String>,
     pub recording_hotkey: bool,
     pub page_fade: Ease,
     pub bar_visible: bool,
@@ -103,6 +112,11 @@ impl Whisp {
             .unwrap_or_else(|| models::recommended_id().to_string());
         if let Some(chord) = hotkey::parse(&prefs.show_hotkey) {
             hotkey::install(chord);
+        }
+        if prefs.open_on_startup {
+            if let Err(err) = startup::apply(true) {
+                eprintln!("could not refresh the login item: {err}");
+            }
         }
         let view = cx.weak_entity();
         cx.intercept_keystrokes(move |event, _, cx| {
@@ -155,6 +169,9 @@ impl Whisp {
             show_hotkey: prefs.show_hotkey,
             copy_notes: prefs.copy_notes,
             clean_fillers: prefs.clean_fillers,
+            input_device: prefs.input_device,
+            open_on_startup: prefs.open_on_startup,
+            microphones: Vec::new(),
             recording_hotkey: false,
             page_fade: Ease::at(1.0, Duration::from_millis(180), 0.02),
             bar_visible: true,
@@ -378,7 +395,7 @@ impl Whisp {
                 self.snap_chrome();
             }
             Phase::Transcribing => {}
-            Phase::Idle | Phase::Result(_) => match Mic::start() {
+            Phase::Idle | Phase::Result(_) => match Mic::start(&self.input_device) {
                 Ok(mic) => {
                     self.levels.clear();
                     self.rest_bars();
@@ -485,6 +502,47 @@ impl Whisp {
         cx.notify();
     }
 
+    pub(crate) fn open_microphones(&mut self, cx: &mut Context<Self>) {
+        self.stop_recording();
+        match audio::input_names() {
+            Ok(names) => {
+                self.microphones = names;
+                self.error = None;
+            }
+            Err(err) => {
+                self.microphones.clear();
+                self.error = Some(err);
+            }
+        }
+        self.settings_page = SettingsPage::Microphone;
+        self.page_fade.snap(0.0);
+        self.page_fade.set(1.0);
+        cx.notify();
+    }
+
+    pub(crate) fn choose_microphone(&mut self, name: &str, cx: &mut Context<Self>) {
+        if audio::known_input(name, &self.microphones).is_err() {
+            return;
+        }
+        self.input_device = name.to_string();
+        self.persist();
+        self.show_main_page();
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_open_on_startup(&mut self, cx: &mut Context<Self>) {
+        let next = !self.open_on_startup;
+        if let Err(err) = startup::apply(next) {
+            self.error = Some(err);
+            cx.notify();
+            return;
+        }
+        self.open_on_startup = next;
+        self.error = None;
+        self.persist();
+        cx.notify();
+    }
+
     pub(crate) fn choose_language(&mut self, id: &str, cx: &mut Context<Self>) {
         if !Preferences::languages()
             .iter()
@@ -494,10 +552,14 @@ impl Whisp {
         }
         self.language = id.to_string();
         self.persist();
+        self.show_main_page();
+        cx.notify();
+    }
+
+    pub(crate) fn show_main_page(&mut self) {
         self.settings_page = SettingsPage::Main;
         self.page_fade.snap(0.0);
         self.page_fade.set(1.0);
-        cx.notify();
     }
 
     pub(crate) fn begin_hotkey_capture(&mut self, cx: &mut Context<Self>) {
@@ -565,7 +627,7 @@ impl Whisp {
         if self.actions_suppressed() {
             return;
         }
-        if self.settings_open && self.settings_page == SettingsPage::Language {
+        if self.settings_open && self.settings_page != SettingsPage::Main {
             self.settings_page = SettingsPage::Main;
             self.page_fade.snap(1.0);
             cx.notify();
@@ -681,6 +743,8 @@ impl Whisp {
             show_hotkey: self.show_hotkey.clone(),
             copy_notes: self.copy_notes,
             clean_fillers: self.clean_fillers,
+            input_device: self.input_device.clone(),
+            open_on_startup: self.open_on_startup,
         });
     }
 
