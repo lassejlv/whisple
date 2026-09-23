@@ -1,0 +1,200 @@
+use std::io::Cursor;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+const WHISPER_RATE: u32 = 16_000;
+const MAX_SECONDS: usize = 60;
+
+pub struct Mic {
+    samples: Arc<Mutex<Vec<f32>>>,
+    level: Arc<AtomicU32>,
+    rate: u32,
+    _stream: cpal::Stream,
+}
+
+impl Mic {
+    pub fn start() -> Result<Self, String> {
+        let host = cpal::default_host();
+        let device = host
+            .default_input_device()
+            .ok_or_else(|| "No microphone found. Try the sample in Models.".to_string())?;
+        let supported = device
+            .default_input_config()
+            .map_err(|err| err.to_string())?;
+        let rate = supported.sample_rate().0;
+        let channels = supported.channels() as usize;
+        let samples = Arc::new(Mutex::new(Vec::<f32>::new()));
+        let level = Arc::new(AtomicU32::new(0));
+        let max_samples = rate as usize * MAX_SECONDS;
+
+        let err_fn = |err| eprintln!("microphone: {err}");
+        let stream = match supported.sample_format() {
+            cpal::SampleFormat::F32 => {
+                let samples = Arc::clone(&samples);
+                let level = Arc::clone(&level);
+                device
+                    .build_input_stream(
+                        &supported.into(),
+                        move |data: &[f32], _| push(&samples, &level, data, channels, max_samples),
+                        err_fn,
+                        None,
+                    )
+                    .map_err(|err| err.to_string())?
+            }
+            cpal::SampleFormat::I16 => {
+                let samples = Arc::clone(&samples);
+                let level = Arc::clone(&level);
+                device
+                    .build_input_stream(
+                        &supported.into(),
+                        move |data: &[i16], _| {
+                            let converted: Vec<f32> = data
+                                .iter()
+                                .map(|sample| *sample as f32 / i16::MAX as f32)
+                                .collect();
+                            push(&samples, &level, &converted, channels, max_samples);
+                        },
+                        err_fn,
+                        None,
+                    )
+                    .map_err(|err| err.to_string())?
+            }
+            cpal::SampleFormat::U16 => {
+                let samples = Arc::clone(&samples);
+                let level = Arc::clone(&level);
+                device
+                    .build_input_stream(
+                        &supported.into(),
+                        move |data: &[u16], _| {
+                            let converted: Vec<f32> = data
+                                .iter()
+                                .map(|sample| (*sample as f32 / u16::MAX as f32) * 2.0 - 1.0)
+                                .collect();
+                            push(&samples, &level, &converted, channels, max_samples);
+                        },
+                        err_fn,
+                        None,
+                    )
+                    .map_err(|err| err.to_string())?
+            }
+            other => return Err(format!("Unsupported microphone format: {other}")),
+        };
+        stream.play().map_err(|err| err.to_string())?;
+
+        Ok(Self {
+            samples,
+            level,
+            rate,
+            _stream: stream,
+        })
+    }
+
+    pub fn level(&self) -> f32 {
+        f32::from_bits(self.level.load(Ordering::Relaxed))
+    }
+
+    pub fn take(self) -> (Vec<f32>, u32) {
+        let samples = self
+            .samples
+            .lock()
+            .map(|mut guard| std::mem::take(&mut *guard))
+            .unwrap_or_default();
+        (samples, self.rate)
+    }
+}
+
+fn push(samples: &Mutex<Vec<f32>>, level: &AtomicU32, data: &[f32], channels: usize, max: usize) {
+    let mono = downmix(data, channels);
+    store_level(level, &mono);
+    if let Ok(mut guard) = samples.lock() {
+        let room = max.saturating_sub(guard.len());
+        guard.extend(mono.into_iter().take(room));
+    }
+}
+
+fn downmix(data: &[f32], channels: usize) -> Vec<f32> {
+    if channels <= 1 {
+        return data.to_vec();
+    }
+    data.chunks(channels)
+        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+        .collect()
+}
+
+fn store_level(level: &AtomicU32, samples: &[f32]) {
+    if samples.is_empty() {
+        return;
+    }
+    let energy = samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32;
+    let boosted = (energy.sqrt() * 8.0).clamp(0.0, 1.0);
+    level.store(boosted.to_bits(), Ordering::Relaxed);
+}
+
+pub fn decode_wav(bytes: &[u8]) -> Result<(Vec<f32>, u32), String> {
+    let mut reader = hound::WavReader::new(Cursor::new(bytes)).map_err(|err| err.to_string())?;
+    let spec = reader.spec();
+    let channels = spec.channels as usize;
+    let interleaved = match spec.sample_format {
+        hound::SampleFormat::Float => reader
+            .samples::<f32>()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| err.to_string())?,
+        hound::SampleFormat::Int if spec.bits_per_sample <= 16 => reader
+            .samples::<i16>()
+            .map(|sample| sample.map(|value| value as f32 / i16::MAX as f32))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| err.to_string())?,
+        hound::SampleFormat::Int => {
+            let denom = (1i64 << spec.bits_per_sample.saturating_sub(1)) as f32;
+            reader
+                .samples::<i32>()
+                .map(|sample| sample.map(|value| value as f32 / denom))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|err| err.to_string())?
+        }
+    };
+    Ok((downmix(&interleaved, channels), spec.sample_rate))
+}
+
+pub fn to_whisper_pcm(samples: &[f32], rate: u32) -> Vec<f32> {
+    if samples.is_empty() {
+        return Vec::new();
+    }
+    if rate == WHISPER_RATE {
+        return samples.to_vec();
+    }
+    let ratio = WHISPER_RATE as f32 / rate as f32;
+    let out_len = ((samples.len() as f32) * ratio).round() as usize;
+    let mut out = Vec::with_capacity(out_len);
+    let last = samples.len() - 1;
+    for index in 0..out_len {
+        let position = index as f32 / ratio;
+        let left = (position.floor() as usize).min(last);
+        let right = (left + 1).min(last);
+        let mix = position - left as f32;
+        out.push(samples[left] * (1.0 - mix) + samples[right] * mix);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_wav, to_whisper_pcm};
+
+    #[test]
+    fn resamples_to_sixteen_kilohertz() {
+        let input = vec![0.0, 1.0, 0.0, -1.0];
+        let output = to_whisper_pcm(&input, 8_000);
+        assert_eq!(output.len(), 8);
+        assert!(output.iter().all(|sample| sample.abs() <= 1.0));
+    }
+
+    #[test]
+    fn reads_the_bundled_sample() {
+        let (samples, rate) = decode_wav(include_bytes!("../assets/sample.wav")).unwrap();
+        assert_eq!(rate, 22_050);
+        assert!(samples.len() > 16_000);
+    }
+}
