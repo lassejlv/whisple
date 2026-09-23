@@ -7,9 +7,11 @@ use x11rb::protocol::shape::{ConnectionExt as _, SK, SO};
 use x11rb::protocol::xproto::{
     AtomEnum, ConfigureWindowAux, ConnectionExt as _, Rectangle, Window,
 };
+use x11rb::rust_connection::RustConnection;
+
+static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub fn dock(width: f32, height: f32, screen_x: f32, screen_y: f32, screen_w: f32, screen_h: f32) {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let Ok(_guard) = LOCK.lock() else {
         return;
     };
@@ -27,18 +29,28 @@ pub fn dock(width: f32, height: f32, screen_x: f32, screen_y: f32, screen_w: f32
     }
 }
 
+pub fn set_mapped(mapped: bool) {
+    let Ok(_guard) = LOCK.lock() else {
+        return;
+    };
+    if let Err(err) = map_client(mapped) {
+        eprintln!("could not change the voice window: {err}");
+    }
+}
+
+fn map_client(mapped: bool) -> Result<(), String> {
+    let (conn, _client, top) = locate()?;
+    if mapped {
+        conn.map_window(top).map_err(|err| err.to_string())?;
+    } else {
+        conn.unmap_window(top).map_err(|err| err.to_string())?;
+    }
+    conn.flush().map_err(|err| err.to_string())?;
+    Ok(())
+}
+
 fn place(x: i32, y: i32, width: u16, height: u16, radius: u16) -> Result<(), String> {
-    let (conn, screen) = x11rb::connect(None).map_err(|err| err.to_string())?;
-    let root = conn.setup().roots[screen].root;
-    let pid_atom = conn
-        .intern_atom(false, b"_NET_WM_PID")
-        .map_err(|err| err.to_string())?
-        .reply()
-        .map_err(|err| err.to_string())?
-        .atom;
-    let pid = std::process::id();
-    let client = find_pid(&conn, root, pid_atom, pid, 0).ok_or("voice window not found")?;
-    let top = top_level(&conn, client, root).unwrap_or(client);
+    let (conn, client, top) = locate()?;
 
     conn.configure_window(
         top,
@@ -63,6 +75,21 @@ fn place(x: i32, y: i32, width: u16, height: u16, radius: u16) -> Result<(), Str
     .map_err(|err| err.to_string())?;
     conn.flush().map_err(|err| err.to_string())?;
     Ok(())
+}
+
+fn locate() -> Result<(RustConnection, Window, Window), String> {
+    let (conn, screen) = x11rb::connect(None).map_err(|err| err.to_string())?;
+    let root = conn.setup().roots[screen].root;
+    let pid_atom = conn
+        .intern_atom(false, b"_NET_WM_PID")
+        .map_err(|err| err.to_string())?
+        .reply()
+        .map_err(|err| err.to_string())?
+        .atom;
+    let client =
+        find_pid(&conn, root, pid_atom, std::process::id(), 0).ok_or("voice window not found")?;
+    let top = top_level(&conn, client, root).unwrap_or(client);
+    Ok((conn, client, top))
 }
 
 fn find_pid(

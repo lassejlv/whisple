@@ -18,6 +18,8 @@ pub fn transcribe(
     model_path: &Path,
     samples: &[f32],
     rate: u32,
+    language: Option<&str>,
+    clean: bool,
 ) -> Result<String, String> {
     let pcm = to_whisper_pcm(samples, rate);
     if pcm.len() < 16_000 / 4 {
@@ -55,7 +57,8 @@ pub fn transcribe(
         .map(|count| count.get().min(4) as i32)
         .unwrap_or(2);
     params.set_n_threads(threads);
-    params.set_language(Some("en"));
+    params.set_language(language);
+    params.set_detect_language(language.is_none());
     params.set_translate(false);
     params.set_print_special(false);
     params.set_print_progress(false);
@@ -82,10 +85,14 @@ pub fn transcribe(
         raw.push_str(piece.trim());
     }
 
-    let cleaned = cleanup(&raw);
-    if cleaned.is_empty() {
+    let text = if clean {
+        cleanup(&raw)
+    } else {
+        raw.split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    if text.is_empty() {
         Err("No speech came through.".into())
     } else {
-        Ok(cleaned)
+        Ok(text)
     }
 }

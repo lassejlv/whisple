@@ -10,8 +10,6 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use serde::{Deserialize, Serialize};
-
 const HF: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
 
 #[derive(Clone, Copy)]
@@ -122,36 +120,19 @@ pub fn format_size(bytes: u64) -> String {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct Settings {
-    selected: String,
-}
-
-fn settings_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("whisp")
-        .join("settings.json")
-}
-
 pub fn load_selected() -> Option<String> {
-    let raw = fs::read_to_string(settings_path()).ok()?;
-    serde_json::from_str::<Settings>(&raw)
-        .ok()
-        .map(|settings| settings.selected)
+    let selected = crate::settings::load().selected;
+    if selected.is_empty() {
+        None
+    } else {
+        Some(selected)
+    }
 }
 
 pub fn save_selected(id: &str) {
-    let path = settings_path();
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let raw = serde_json::to_string_pretty(&Settings {
-        selected: id.to_string(),
-    });
-    if let Ok(raw) = raw {
-        let _ = fs::write(path, raw);
-    }
+    let mut prefs = crate::settings::load();
+    prefs.selected = id.to_string();
+    crate::settings::save(&prefs);
 }
 
 pub fn download(

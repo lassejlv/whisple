@@ -5,9 +5,14 @@ use gpui::{
     IntoElement, ParentElement, Render, SharedString, Styled, Window,
 };
 
-use crate::app::{Phase, Reveal, Whisp, COLLAPSED_HEIGHT, ERROR_EXTRA, PICKER_EXTRA, RESULT_EXTRA};
+use crate::app::{
+    Phase, Reveal, SettingsPage, Whisp, COLLAPSED_HEIGHT, ERROR_EXTRA, PICKER_EXTRA, RESULT_EXTRA,
+    SETTINGS_EXTRA,
+};
+use crate::hotkey;
 use crate::models;
 use crate::motion::{self, Spring};
+use crate::settings;
 use crate::theme;
 
 impl Render for Whisp {
@@ -50,6 +55,7 @@ impl Whisp {
         let extra = match self.reveal {
             Some(Reveal::Picker) => PICKER_EXTRA,
             Some(Reveal::Result) => RESULT_EXTRA,
+            Some(Reveal::Settings) => SETTINGS_EXTRA,
             None => 0.0,
         };
         let error_h = if self.error.is_some() {
@@ -68,6 +74,7 @@ impl Whisp {
             Some(Reveal::Result) => self
                 .transcript_card(self.result_text(), cx)
                 .into_any_element(),
+            Some(Reveal::Settings) => self.settings_panel(cx).into_any_element(),
             None => div().into_any_element(),
         };
 
@@ -111,6 +118,7 @@ impl Whisp {
             .gap(px(6.0))
             .child(self.voice_button(cx))
             .child(self.pill_center(label, cx))
+            .child(self.settings_button(cx))
             .child(self.model_chip(chip, cx))
     }
 
@@ -181,6 +189,33 @@ impl Whisp {
             |this, cx| this.toggle_listen(cx),
         )
         .child(body)
+    }
+
+    fn settings_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let scale = self.press_scale("settings");
+        let open = self.settings_open;
+        let color = if open { theme::BLUE } else { theme::LABEL };
+        press_handlers(
+            div()
+                .id("settings")
+                .size(px(32.0))
+                .flex()
+                .items_center()
+                .justify_center(),
+            "settings",
+            cx,
+            |this, cx| this.toggle_settings(cx),
+        )
+        .child(
+            div()
+                .size(px(28.0 * scale))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(if open { theme::BLUE_SOFT } else { theme::CLEAR })
+                .child(icon("icons/gear.svg", color, 15.0 * scale)),
+        )
     }
 
     fn model_chip(&self, label: &str, cx: &mut Context<Self>) -> impl IntoElement {
@@ -297,6 +332,313 @@ impl Whisp {
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(theme::BLUE)
                 .child("Copy"),
+        )
+    }
+
+    fn settings_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let page = if self.settings_page == SettingsPage::Language {
+            self.language_page(cx).into_any_element()
+        } else {
+            self.settings_main(cx).into_any_element()
+        };
+        div()
+            .h(px(SETTINGS_EXTRA))
+            .w_full()
+            .flex()
+            .flex_col()
+            .justify_end()
+            .child(
+                div()
+                    .px(px(12.0))
+                    .pt(px(14.0))
+                    .pb(px(10.0))
+                    .opacity(self.page_fade.value)
+                    .child(page),
+            )
+            .child(separator())
+    }
+
+    fn settings_main(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let opened = self.settings_opened_at;
+        let hotkey_value = if self.recording_hotkey {
+            "Press shortcut".to_string()
+        } else {
+            hotkey::label(&self.show_hotkey)
+        };
+        let hotkey_color = if self.recording_hotkey {
+            theme::BLUE
+        } else {
+            theme::SECONDARY
+        };
+        div()
+            .h(px(282.0))
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(settings_header(
+                "Settings",
+                "Shortcut, language, and notes.",
+            ))
+            .child(
+                div()
+                    .h(px(226.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .child(self.setting_row(
+                        "hotkey",
+                        "Show bar",
+                        hotkey_value,
+                        hotkey_color,
+                        self.recording_hotkey,
+                        entrance(0, opened),
+                        cx,
+                        |this, cx| this.begin_hotkey_capture(cx),
+                    ))
+                    .child(self.setting_row(
+                        "language",
+                        "Language",
+                        settings::language_name(&self.language),
+                        theme::SECONDARY,
+                        false,
+                        entrance(1, opened),
+                        cx,
+                        |this, cx| this.open_languages(cx),
+                    ))
+                    .child(self.switch_row(
+                        "copy",
+                        "Copy to clipboard",
+                        self.copy_notes,
+                        entrance(2, opened),
+                        cx,
+                        |this, cx| this.toggle_copy_notes(cx),
+                    ))
+                    .child(self.switch_row(
+                        "clean",
+                        "Clean up notes",
+                        self.clean_fillers,
+                        entrance(3, opened),
+                        cx,
+                        |this, cx| this.toggle_clean_fillers(cx),
+                    )),
+            )
+    }
+
+    fn setting_row(
+        &self,
+        id: &str,
+        title: &str,
+        value: impl Into<SharedString>,
+        value_color: gpui::Rgba,
+        highlighted: bool,
+        opacity: f32,
+        cx: &mut Context<Self>,
+        action: impl Fn(&mut Whisp, &mut Context<Whisp>) + 'static,
+    ) -> impl IntoElement {
+        let scale = self.press_scale(id);
+        let title = title.to_string();
+        let value = value.into();
+        let show_chevron = id == "language";
+        press_handlers(
+            div()
+                .id(SharedString::from(id.to_string()))
+                .w_full()
+                .h(px(52.0))
+                .opacity(opacity),
+            id,
+            cx,
+            action,
+        )
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .w(px(376.0 * scale))
+                .h(px(48.0 * scale))
+                .px(px(12.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .rounded(px(12.0))
+                .bg(if highlighted {
+                    theme::BLUE_SOFT
+                } else {
+                    theme::FILL
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(14.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme::LABEL)
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.0))
+                        .child(
+                            div()
+                                .max_w(px(168.0))
+                                .text_size(px(13.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(value_color)
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .child(value),
+                        )
+                        .when(show_chevron, |row| {
+                            row.child(icon("icons/chevron.svg", theme::TERTIARY, 12.0))
+                        }),
+                ),
+        )
+    }
+
+    fn switch_row(
+        &self,
+        id: &str,
+        title: &str,
+        on: bool,
+        opacity: f32,
+        cx: &mut Context<Self>,
+        action: impl Fn(&mut Whisp, &mut Context<Whisp>) + 'static,
+    ) -> impl IntoElement {
+        let scale = self.press_scale(id);
+        let title = title.to_string();
+        press_handlers(
+            div()
+                .id(SharedString::from(id.to_string()))
+                .w_full()
+                .h(px(52.0))
+                .opacity(opacity),
+            id,
+            cx,
+            action,
+        )
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .w(px(376.0 * scale))
+                .h(px(48.0 * scale))
+                .px(px(12.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .rounded(px(12.0))
+                .bg(theme::FILL)
+                .child(
+                    div()
+                        .text_size(px(14.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme::LABEL)
+                        .child(title),
+                )
+                .child(switch(on)),
+        )
+    }
+
+    fn language_page(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = self.language.clone();
+        let rows = settings::Preferences::languages()
+            .iter()
+            .map(|language| {
+                let id = language.id.to_string();
+                let name = language.name.to_string();
+                let on = selected == language.id;
+                let press_id = format!("lang-{id}");
+                let scale = self.press_scale(&press_id);
+                press_handlers(
+                    div().id(SharedString::from(press_id.clone())).w_full(),
+                    &press_id,
+                    cx,
+                    move |this, cx| this.choose_language(&id, cx),
+                )
+                .child(
+                    div()
+                        .w(px(376.0 * scale))
+                        .h(px(36.0))
+                        .px(px(12.0))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .rounded(px(10.0))
+                        .bg(if on { theme::BLUE_SOFT } else { theme::CLEAR })
+                        .child(
+                            div()
+                                .text_size(px(14.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(if on { theme::BLUE } else { theme::LABEL })
+                                .child(name),
+                        )
+                        .when(on, |row| {
+                            row.child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(theme::BLUE)
+                                    .child("✓"),
+                            )
+                        }),
+                )
+                .into_any_element()
+            })
+            .collect::<Vec<_>>();
+
+        div()
+            .h(px(282.0))
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(self.language_header(cx))
+            .child(
+                div()
+                    .id("language-list")
+                    .h(px(226.0))
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .children(rows),
+            )
+    }
+
+    fn language_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let scale = self.press_scale("lang-back");
+        press_handlers(
+            div().id("lang-back").h(px(48.0)).w_full(),
+            "lang-back",
+            cx,
+            |this, cx| {
+                this.settings_page = SettingsPage::Main;
+                this.page_fade.snap(0.0);
+                this.page_fade.set(1.0);
+                cx.notify();
+            },
+        )
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .child(icon("icons/chevron-left.svg", theme::BLUE, 14.0 * scale))
+        .child(
+            div()
+                .text_size(px(15.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme::BLUE)
+                .child("Language"),
         )
     }
 
@@ -561,6 +903,54 @@ fn entrance(index: usize, opened: Option<std::time::Instant>) -> f32 {
     };
     let t = (opened.elapsed().as_secs_f32() - index as f32 * 0.03) / 0.18;
     motion::ease_out(t.clamp(0.0, 1.0))
+}
+
+fn settings_header(title: &str, subtitle: &str) -> gpui::Div {
+    div()
+        .h(px(48.0))
+        .flex()
+        .flex_col()
+        .justify_center()
+        .gap(px(2.0))
+        .child(
+            div()
+                .text_size(px(15.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .line_height(px(20.0))
+                .text_color(theme::LABEL)
+                .child(title.to_string()),
+        )
+        .child(
+            div()
+                .text_size(px(12.0))
+                .line_height(px(16.0))
+                .text_color(theme::SECONDARY)
+                .child(subtitle.to_string()),
+        )
+}
+
+fn icon(path: &'static str, color: gpui::Rgba, size: f32) -> gpui::Svg {
+    gpui::svg().path(path).size(px(size)).text_color(color)
+}
+
+fn switch(on: bool) -> gpui::Div {
+    div()
+        .w(px(36.0))
+        .h(px(22.0))
+        .rounded_full()
+        .bg(if on { theme::GREEN } else { theme::MATERIAL })
+        .border_1()
+        .border_color(if on { theme::GREEN } else { theme::HAIRLINE })
+        .relative()
+        .child(
+            div()
+                .absolute()
+                .top(px(2.0))
+                .left(px(if on { 16.0 } else { 2.0 }))
+                .size(px(18.0))
+                .rounded_full()
+                .bg(theme::LABEL),
+        )
 }
 
 fn separator() -> gpui::Div {
