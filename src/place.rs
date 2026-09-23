@@ -9,6 +9,10 @@ use x11rb::protocol::xproto::{
 };
 
 pub fn dock(width: f32, height: f32, screen_x: f32, screen_y: f32, screen_w: f32, screen_h: f32) {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let Ok(_guard) = LOCK.lock() else {
+        return;
+    };
     let radius = if height <= 88.0 { height / 2.0 } else { 22.0 };
     let x = screen_x + (screen_w - width) / 2.0;
     let y = screen_y + screen_h - height - 18.0;

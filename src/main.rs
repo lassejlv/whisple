@@ -1,6 +1,7 @@
 mod app;
 mod audio;
 mod models;
+mod motion;
 mod place;
 mod stt;
 mod text;
@@ -31,7 +32,7 @@ fn main() {
                 display_id: None,
                 window_background: WindowBackgroundAppearance::Transparent,
                 app_id: Some("whisp".into()),
-                window_min_size: Some(size(px(320.0), px(64.0))),
+                window_min_size: Some(size(px(320.0), px(56.0))),
                 window_decorations: Some(WindowDecorations::Client),
                 tabbing_identifier: None,
             },
