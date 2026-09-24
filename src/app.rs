@@ -17,6 +17,9 @@ use crate::place;
 use crate::settings::{self, Preferences};
 use crate::startup;
 use crate::stt;
+use crate::tray;
+#[cfg(target_os = "macos")]
+use crate::updater::{self, PreparedUpdate};
 
 pub(crate) const WINDOW_WIDTH: f32 = 400.0;
 pub(crate) const WINDOW_RADIUS: f32 = 20.0;
@@ -79,6 +82,7 @@ pub(crate) struct Whisp {
     pub models: Vec<InstalledModel>,
     pub selected: String,
     pub download: Option<Download>,
+    pub pending_uninstall: Option<String>,
     pub error: Option<String>,
     pub copied: bool,
     pub chrome: Ease,
@@ -96,6 +100,12 @@ pub(crate) struct Whisp {
     pub clean_fillers: bool,
     pub input_device: String,
     pub open_on_startup: bool,
+    #[cfg(target_os = "macos")]
+    update: Option<PreparedUpdate>,
+    #[cfg(target_os = "macos")]
+    update_checking: bool,
+    #[cfg(target_os = "macos")]
+    last_update_check: Instant,
     pub microphones: Vec<String>,
     pub recording_hotkey: bool,
     /// When the current recording started, for the bar's timer.
@@ -109,9 +119,10 @@ pub(crate) struct Whisp {
     pub last_text: String,
     pub page_fade: Ease,
     pub bar_visible: bool,
+    #[cfg(target_os = "macos")]
+    was_window_active: bool,
     suppress_actions_until: Option<Instant>,
     last_tick: Instant,
-    pin_started: bool,
     screen_x: f32,
     screen_y: f32,
     screen_w: f32,
@@ -120,15 +131,19 @@ pub(crate) struct Whisp {
 }
 
 impl Whisp {
-    pub(crate) fn new(cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        window: &mut gpui_kit::Window,
+        visible: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let models = load_models();
         let prefs = settings::load();
         let selected = models::load_selected()
             .filter(|id| models::spec(id).is_some())
             .unwrap_or_else(|| models::recommended_id().to_string());
-        if let Some(chord) = hotkey::parse(&prefs.show_hotkey) {
-            hotkey::install(chord);
-        }
+        let hotkey_error = hotkey::parse(&prefs.show_hotkey)
+            .and_then(|chord| hotkey::install(chord).err())
+            .map(|err| format!("Could not register the shortcut: {err}"));
         if prefs.open_on_startup {
             if let Err(err) = startup::apply(true) {
                 eprintln!("could not refresh the login item: {err}");
@@ -162,7 +177,19 @@ impl Whisp {
                 )
             })
             .unwrap_or((0.0, 0.0, 1920.0, 1200.0));
-        Self {
+        #[cfg(target_os = "macos")]
+        cx.observe_window_activation(window, |view, window, cx| {
+            if !view.bar_visible {
+                return;
+            }
+            if window.is_window_active() {
+                view.was_window_active = true;
+            } else if view.was_window_active && !view.visibility_locked() {
+                view.set_visible(false, window, cx);
+            }
+        })
+        .detach();
+        let mut view = Self {
             focus_handle: cx.focus_handle(),
             phase: Phase::Idle,
             levels: VecDeque::new(),
@@ -170,7 +197,8 @@ impl Whisp {
             models,
             selected,
             download: None,
-            error: None,
+            pending_uninstall: None,
+            error: hotkey_error,
             copied: false,
             chrome: Ease::chrome(COLLAPSED_HEIGHT),
             press_id: None,
@@ -187,6 +215,12 @@ impl Whisp {
             clean_fillers: prefs.clean_fillers,
             input_device: prefs.input_device,
             open_on_startup: prefs.open_on_startup,
+            #[cfg(target_os = "macos")]
+            update: None,
+            #[cfg(target_os = "macos")]
+            update_checking: false,
+            #[cfg(target_os = "macos")]
+            last_update_check: Instant::now(),
             microphones: Vec::new(),
             recording_hotkey: false,
             listen_started: None,
@@ -194,20 +228,25 @@ impl Whisp {
             recorded: Duration::ZERO,
             last_text: String::new(),
             page_fade: Ease::at(1.0, Duration::from_millis(180), 0.02),
-            bar_visible: true,
+            bar_visible: visible,
+            #[cfg(target_os = "macos")]
+            was_window_active: false,
             suppress_actions_until: None,
             last_tick: Instant::now(),
-            pin_started: false,
             screen_x,
             screen_y,
             screen_w,
             screen_h,
-            placed_height: 0.0,
-        }
+            placed_height: COLLAPSED_HEIGHT,
+        };
+        // A hidden window need not render, so start listening at creation.
+        view.listen_for_commands(window.window_handle(), cx);
+        #[cfg(target_os = "macos")]
+        view.check_for_updates(cx);
+        view
     }
 
     pub(crate) fn tick(&mut self, window: &mut gpui_kit::Window, cx: &mut Context<Self>) {
-        self.ensure_pin(cx);
         let now = Instant::now();
         let dt = now.saturating_duration_since(self.last_tick).as_secs_f32();
         self.last_tick = now;
@@ -259,14 +298,23 @@ impl Whisp {
             // style bit, which a borderless window does not get. `place::dock`
             // holds the bottom edge on every platform.
             if (self.placed_height - height).abs() >= 0.5 || (actual - height).abs() >= 1.0 {
-                self.placed_height = height;
                 let (screen_x, screen_y, screen_w, screen_h) =
                     (self.screen_x, self.screen_y, self.screen_w, self.screen_h);
-                // Resize before layout, in this frame. Deferring it past the
-                // draw left AppKit resizing a layer mid-present, and growing
-                // panels stalled for a second waiting on the next drawable.
-                place::dock(WINDOW_WIDTH, height, screen_x, screen_y, screen_w, screen_h);
-                apply_window_height(window, height, cx);
+                // Run before the next draw, outside this render pass. Resizing
+                // the Metal surface during rendering can leave AppKit waiting
+                // a second for a drawable, even with only one resize.
+                #[cfg(target_os = "macos")]
+                cx.on_next_frame(window, move |view, window, cx| {
+                    view.placed_height = height;
+                    place::dock(WINDOW_WIDTH, height, screen_x, screen_y, screen_w, screen_h);
+                    apply_window_height(window, height, cx);
+                });
+                #[cfg(not(target_os = "macos"))]
+                {
+                    self.placed_height = height;
+                    place::dock(WINDOW_WIDTH, height, screen_x, screen_y, screen_w, screen_h);
+                    apply_window_height(window, height, cx);
+                }
             }
         }
     }
@@ -298,7 +346,7 @@ impl Whisp {
     /// the HUD animates inside it.
     fn window_height(&self) -> f32 {
         #[cfg(target_os = "macos")]
-        let height = self.chrome.value.max(self.chrome.target());
+        let height = self.chrome.window_height(self.placed_height);
         #[cfg(not(target_os = "macos"))]
         let height = self.chrome.value;
         height.round()
@@ -368,11 +416,11 @@ impl Whisp {
         }
     }
 
-    fn ensure_pin(&mut self, cx: &mut Context<Self>) {
-        if self.pin_started {
-            return;
-        }
-        self.pin_started = true;
+    fn listen_for_commands(
+        &self,
+        window_handle: gpui_kit::AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) {
         let screen_x = self.screen_x;
         let screen_y = self.screen_y;
         let screen_w = self.screen_w;
@@ -381,36 +429,91 @@ impl Whisp {
             cx.background_executor()
                 .timer(Duration::from_millis(80))
                 .await;
-            let alive = this
-                .update(cx, |view, cx| {
-                    let pressed = hotkey::take_press();
-                    if pressed {
-                        view.bar_visible = !view.bar_visible;
-                        cx.notify();
-                    }
-                    if view.bar_visible {
+            let alive = window_handle
+                .update(cx, |_, window, cx| {
+                    this.update(cx, |view, cx| {
+                        let pressed = hotkey::take_press();
                         if pressed {
-                            place::set_mapped(true);
-                            cx.activate(true);
+                            view.set_visible(!view.bar_visible, window, cx);
                         }
-                        place::dock(
-                            WINDOW_WIDTH,
-                            view.chrome.value,
-                            screen_x,
-                            screen_y,
-                            screen_w,
-                            screen_h,
-                        );
-                    } else {
-                        place::set_mapped(false);
-                    }
+                        while let Some(command) = tray::take_command() {
+                            match command {
+                                tray::Command::Show => view.set_visible(true, window, cx),
+                                tray::Command::Hide => view.set_visible(false, window, cx),
+                                tray::Command::Settings => {
+                                    if !view.settings_open {
+                                        view.toggle_settings(cx);
+                                    }
+                                    view.set_visible(true, window, cx);
+                                }
+                                #[cfg(target_os = "macos")]
+                                tray::Command::Update => view.install_or_check_for_updates(cx),
+                                #[cfg(not(target_os = "macos"))]
+                                tray::Command::Update => {}
+                                tray::Command::Quit => cx.quit(),
+                            }
+                        }
+                        #[cfg(target_os = "macos")]
+                        if view.last_update_check.elapsed() >= Duration::from_secs(6 * 60 * 60) {
+                            view.check_for_updates(cx);
+                        }
+                        if view.bar_visible {
+                            // Re-anchor the native size already chosen by tick;
+                            // the animated HUD height would undo its resize and
+                            // clip an opening panel.
+                            place::dock(
+                                WINDOW_WIDTH,
+                                view.placed_height,
+                                screen_x,
+                                screen_y,
+                                screen_w,
+                                screen_h,
+                            );
+                        }
+                    })
+                    .is_ok()
                 })
-                .is_ok();
+                .unwrap_or(false);
             if !alive {
                 break;
             }
         })
         .detach();
+    }
+
+    pub(crate) fn set_visible(
+        &mut self,
+        visible: bool,
+        window: &mut gpui_kit::Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !visible && self.visibility_locked() {
+            return;
+        }
+        self.bar_visible = visible;
+        if !visible {
+            self.pending_uninstall = None;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            self.was_window_active = false;
+        }
+        tray::set_visible(visible, cx);
+        place::set_mapped(visible);
+        if visible {
+            window.activate_window();
+            cx.activate(true);
+            window.focus(&self.focus_handle, cx);
+        } else {
+            self.stop_recording();
+            #[cfg(target_os = "macos")]
+            cx.hide();
+        }
+        cx.notify();
+    }
+
+    fn visibility_locked(&self) -> bool {
+        matches!(self.phase, Phase::Listening(_) | Phase::Transcribing)
     }
 
     fn rest_bars(&mut self) {
@@ -517,6 +620,7 @@ impl Whisp {
         let Some(spec) = models::spec(id) else {
             return;
         };
+        self.pending_uninstall = None;
         self.error = None;
         if models::is_downloaded(spec) {
             self.selected = spec.id.to_string();
@@ -536,6 +640,53 @@ impl Whisp {
         }
     }
 
+    pub(crate) fn uninstall_model(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(spec) = models::spec(id) else {
+            return;
+        };
+        if !models::is_downloaded(spec) {
+            self.pending_uninstall = None;
+            self.refresh_models();
+            cx.notify();
+            return;
+        }
+        if self.pending_uninstall.as_deref() != Some(id) {
+            self.pending_uninstall = Some(id.to_string());
+            cx.notify();
+            return;
+        }
+        self.pending_uninstall = None;
+        if matches!(self.phase, Phase::Listening(_) | Phase::Transcribing)
+            || self
+                .download
+                .as_ref()
+                .is_some_and(|download| download.id == id)
+        {
+            self.error = Some("Finish recording or downloading before removing this model.".into());
+            cx.notify();
+            return;
+        }
+        match models::uninstall(spec) {
+            Ok(()) => {
+                self.refresh_models();
+                if self.selected == id {
+                    let replacement = self
+                        .models
+                        .iter()
+                        .find(|model| model.ready && model.spec.recommended)
+                        .or_else(|| self.models.iter().find(|model| model.ready))
+                        .map(|model| model.spec.id)
+                        .unwrap_or_else(models::recommended_id);
+                    self.selected = replacement.to_string();
+                    self.persist();
+                }
+                self.error = None;
+            }
+            Err(err) => self.error = Some(err),
+        }
+        cx.notify();
+    }
+
     /// Disk used by the downloaded models.
     pub(crate) fn storage_used(&self) -> u64 {
         self.models
@@ -547,6 +698,7 @@ impl Whisp {
 
     pub(crate) fn toggle_picker(&mut self, cx: &mut Context<Self>) {
         self.stop_recording();
+        self.pending_uninstall = None;
         if self.settings_open {
             self.settings_open = false;
             self.settings_opened_at = None;
@@ -567,6 +719,7 @@ impl Whisp {
 
     pub(crate) fn toggle_settings(&mut self, cx: &mut Context<Self>) {
         self.stop_recording();
+        self.pending_uninstall = None;
         self.picker_open = false;
         self.picker_opened_at = None;
         self.settings_open = !self.settings_open;
@@ -726,17 +879,21 @@ impl Whisp {
             cx.notify();
             return;
         }
+        if let Err(err) = hotkey::install(chord.clone()) {
+            self.error = Some(format!("Could not use that shortcut: {err}"));
+            cx.notify();
+            return;
+        }
         self.show_hotkey = chord.canonical();
         self.recording_hotkey = false;
         self.error = None;
         self.suppress_actions_until = Some(Instant::now() + Duration::from_millis(280));
         self.persist();
-        hotkey::install(chord);
         hotkey::set_paused(false);
         cx.notify();
     }
 
-    pub(crate) fn close_overlay(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn close_overlay(&mut self, window: &mut gpui_kit::Window, cx: &mut Context<Self>) {
         if self.recording_hotkey {
             self.recording_hotkey = false;
             hotkey::set_paused(false);
@@ -761,9 +918,12 @@ impl Whisp {
         } else if self.picker_open {
             self.picker_open = false;
             self.picker_opened_at = None;
+            self.pending_uninstall = None;
         } else if matches!(self.phase, Phase::Result(_)) {
             self.phase = Phase::Idle;
             self.copied = false;
+        } else if matches!(self.phase, Phase::Idle) {
+            self.set_visible(false, window, cx);
         }
         self.error = None;
         self.snap_chrome();
@@ -924,6 +1084,71 @@ impl Whisp {
         .detach();
     }
 
+    #[cfg(target_os = "macos")]
+    fn check_for_updates(&mut self, cx: &mut Context<Self>) {
+        self.last_update_check = Instant::now();
+        if !updater::is_packaged() || self.update_checking {
+            return;
+        }
+        let prepared_version = self.update.as_ref().map(|update| update.version.clone());
+        self.update_checking = true;
+        tray::set_update(tray::UpdateStatus::Checking, cx);
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move { updater::check_and_prepare(prepared_version) })
+                .await;
+            this.update(cx, |view, cx| {
+                view.update_checking = false;
+                let failed = match outcome {
+                    Ok(Some(update)) => {
+                        view.update = Some(update);
+                        false
+                    }
+                    Ok(None) => false,
+                    Err(err) => {
+                        eprintln!("Whisple update check failed: {err}");
+                        view.error = Some(format!("Update check failed: {err}"));
+                        true
+                    }
+                };
+                let version = view
+                    .update
+                    .as_ref()
+                    .map(|update| update.version.to_string());
+                let menu_status = match (version.as_deref(), failed) {
+                    (Some(version), _) => tray::UpdateStatus::Available(version),
+                    (None, true) => tray::UpdateStatus::Error,
+                    (None, false) => tray::UpdateStatus::UpToDate,
+                };
+                tray::set_update(menu_status, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn install_or_check_for_updates(&mut self, cx: &mut Context<Self>) {
+        if self.update.is_none() {
+            self.check_for_updates(cx);
+            return;
+        }
+        if self.visibility_locked() {
+            self.error = Some("Finish recording before installing the update.".into());
+            cx.notify();
+            return;
+        }
+        match self.update.as_mut().unwrap().install() {
+            Ok(()) => cx.quit(),
+            Err(err) => {
+                self.error = Some(format!("Could not install the update: {err}"));
+                cx.notify();
+            }
+        }
+    }
+
     fn refresh_models(&mut self) {
         self.models = load_models();
     }
@@ -958,7 +1183,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-q", QuitWhisp, None),
     ]);
     cx.on_action::<QuitWhisp>(|_, cx| cx.quit());
-    cx.set_menus([Menu::new("Whisp").items([MenuItem::action("Quit Whisp", QuitWhisp)])]);
+    cx.set_menus([Menu::new("Whisple").items([MenuItem::action("Quit Whisple", QuitWhisp)])]);
 }
 
 fn apply_window_height(window: &mut gpui_kit::Window, height: f32, cx: &mut App) {

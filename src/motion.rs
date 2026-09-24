@@ -97,8 +97,12 @@ impl Ease {
     }
 
     pub fn step(&mut self) -> bool {
+        self.step_at(Instant::now())
+    }
+
+    fn step_at(&mut self, now: Instant) -> bool {
         let duration = self.duration.as_secs_f32().max(0.001);
-        let t = self.start.elapsed().as_secs_f32() / duration;
+        let t = now.saturating_duration_since(self.start).as_secs_f32() / duration;
         if t >= 1.0 {
             self.value = self.target;
             return false;
@@ -113,6 +117,18 @@ impl Ease {
 
     pub fn target(&self) -> f32 {
         self.target
+    }
+
+    /// Grow the native window before revealing content, then hold its size
+    /// until the animation settles. AppKit resizes can trigger synchronous
+    /// draws, so only the content should resize on each animation frame.
+    #[cfg(any(target_os = "macos", test))]
+    pub fn window_height(&self, placed_height: f32) -> f32 {
+        if self.value == self.target {
+            self.target.round()
+        } else {
+            placed_height.max(self.value).max(self.target).round()
+        }
     }
 }
 
@@ -185,5 +201,50 @@ mod tests {
         }
         assert!(peak < 1.03, "peak {peak}");
         assert!((spring.value - 1.0).abs() < 0.02);
+    }
+
+    fn native_resizes(ease: &mut Ease, mut placed: f32) -> Vec<f32> {
+        let start = ease.start;
+        let mut sizes = Vec::new();
+        for millis in (0..=240).step_by(8) {
+            ease.step_at(start + Duration::from_millis(millis));
+            let height = ease.window_height(placed);
+            assert!(height + 0.5 >= ease.value, "window clipped its content");
+            if height != placed {
+                sizes.push(height);
+                placed = height;
+            }
+        }
+        sizes
+    }
+
+    #[test]
+    fn native_window_grows_once_for_settings() {
+        let mut ease = Ease::chrome(58.0);
+        ease.set(431.0);
+        assert_eq!(native_resizes(&mut ease, 58.0), vec![431.0]);
+    }
+
+    #[test]
+    fn native_window_shrinks_once_after_settings_close() {
+        let mut ease = Ease::chrome(431.0);
+        ease.set(58.0);
+        assert_eq!(native_resizes(&mut ease, 431.0), vec![58.0]);
+    }
+
+    #[test]
+    fn native_window_shrinks_once_when_returning_from_subpage() {
+        let mut ease = Ease::chrome(451.0);
+        ease.set(431.0);
+        assert_eq!(native_resizes(&mut ease, 451.0), vec![431.0]);
+    }
+
+    #[test]
+    fn interrupted_close_keeps_space_for_reopened_settings() {
+        let mut ease = Ease::chrome(503.0);
+        ease.set(58.0);
+        ease.step_at(ease.start + Duration::from_millis(80));
+        ease.set(431.0);
+        assert_eq!(native_resizes(&mut ease, 503.0), vec![431.0]);
     }
 }

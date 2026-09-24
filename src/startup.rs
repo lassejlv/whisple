@@ -1,4 +1,4 @@
-//! Login item so Whisp opens when the session starts.
+//! Login item so Whisple opens when the session starts.
 //!
 //! Linux writes an XDG autostart entry. macOS writes a per-user Launch Agent.
 //! The file always points at the binary that is running now.
@@ -65,7 +65,7 @@ fn entry(exe: &str) -> String {
 
 pub fn desktop_entry(exe: &str) -> String {
     format!(
-        "[Desktop Entry]\nType=Application\nVersion=1.0\nName=Whisp\nComment=Local voice dictation\nExec={}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
+        "[Desktop Entry]\nType=Application\nVersion=1.0\nName=Whisple\nComment=Local voice dictation\nExec={}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
         desktop_exec(exe)
     )
 }
@@ -107,7 +107,7 @@ mod tests {
         let entry = desktop_entry("/Users/Lasse/Dev/whisp app/whisp");
         assert!(entry.contains("Exec=\"/Users/Lasse/Dev/whisp app/whisp\""));
         assert!(entry.contains("X-GNOME-Autostart-enabled=true"));
-        assert!(entry.contains("Name=Whisp"));
+        assert!(entry.contains("Name=Whisple"));
     }
 
     #[test]
