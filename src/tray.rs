@@ -114,7 +114,7 @@ mod macos {
             let update_ready = matches!(status, UpdateStatus::Available(_));
             let label = match status {
                 UpdateStatus::Checking => "Checking for Updates…".to_string(),
-                UpdateStatus::Available(version) => format!("Install Whisple v{version}…"),
+                UpdateStatus::Available(version) => format!("Whisple v{version} Ready…"),
                 UpdateStatus::UpToDate => "Whisple is Up to Date".to_string(),
                 UpdateStatus::Error => "Update Check Failed — Retry".to_string(),
             };

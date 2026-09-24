@@ -23,6 +23,7 @@ struct Release {
     tag_name: String,
     draft: bool,
     published_at: Option<String>,
+    body: Option<String>,
     assets: Vec<ReleaseAsset>,
 }
 
@@ -37,12 +38,65 @@ struct ReleaseAsset {
 
 struct Candidate<'a> {
     version: Version,
+    notes: &'a str,
     asset: &'a ReleaseAsset,
+}
+
+/// Presentation state is separate from the verified, prepared bundle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UpdatePrompt {
+    Ready,
+    Confirm,
+    AfterRecording,
+    JustUpdated,
+}
+
+impl UpdatePrompt {
+    pub(crate) fn after_recording(self, busy: bool) -> Self {
+        if self == Self::AfterRecording && !busy {
+            Self::Confirm
+        } else {
+            self
+        }
+    }
+
+    pub(crate) fn may_install(self, busy: bool) -> bool {
+        self == Self::Confirm && !busy
+    }
 }
 
 pub(crate) struct PreparedUpdate {
     pub version: Version,
+    pub notes: String,
     temp: TempDir,
+}
+
+fn update_marker() -> PathBuf {
+    dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("whisple/installed-version")
+}
+
+fn write_update_marker(marker: &Path, version: &Version) -> Result<(), String> {
+    if let Some(parent) = marker.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("Could not create the update status directory: {err}"))?;
+    }
+    fs::write(marker, version.to_string())
+        .map_err(|err| format!("Could not record the update version: {err}"))
+}
+
+/// Only an actual version change after an install request displays this notice.
+pub(crate) fn just_updated() -> bool {
+    let marker = update_marker();
+    let Ok(version) = fs::read_to_string(&marker) else {
+        return false;
+    };
+    if version.trim() != env!("CARGO_PKG_VERSION") {
+        return false;
+    }
+    let _ = fs::remove_file(marker);
+    true
 }
 
 pub(crate) fn is_packaged() -> bool {
@@ -112,7 +166,11 @@ fn select_latest<'a>(
             // A just-published release is incomplete until CI attaches its assets.
             continue;
         };
-        return (version > *current).then_some(Candidate { version, asset });
+        return (version > *current).then_some(Candidate {
+            version,
+            notes: release.body.as_deref().unwrap_or(""),
+            asset,
+        });
     }
     None
 }
@@ -174,6 +232,7 @@ pub(crate) fn check_and_prepare(
     fs::remove_file(archive).map_err(|err| err.to_string())?;
     Ok(Some(PreparedUpdate {
         version: candidate.version,
+        notes: candidate.notes.chars().take(2400).collect(),
         temp,
     }))
 }
@@ -297,7 +356,9 @@ impl PreparedUpdate {
             .map_err(|err| err.to_string())?;
         let log =
             File::create(self.temp.path().join("update.log")).map_err(|err| err.to_string())?;
-        Command::new("/bin/bash")
+        let marker = update_marker();
+        write_update_marker(&marker, &self.version)?;
+        if let Err(err) = Command::new("/bin/bash")
             .arg(&helper)
             .arg(&current_app)
             .arg(self.temp.path().join("Whisple.app"))
@@ -307,7 +368,10 @@ impl PreparedUpdate {
             .stdout(Stdio::from(log.try_clone().map_err(|err| err.to_string())?))
             .stderr(Stdio::from(log))
             .spawn()
-            .map_err(|err| format!("Could not start the update installer: {err}"))?;
+        {
+            let _ = fs::remove_file(marker);
+            return Err(format!("Could not start the update installer: {err}"));
+        }
         self.temp.disable_cleanup(true);
         Ok(())
     }
@@ -323,6 +387,7 @@ mod tests {
             tag_name: tag.into(),
             draft: false,
             published_at: Some(published.into()),
+            body: Some("Release notes".into()),
             assets: if complete {
                 vec![ReleaseAsset {
                     name: asset_name(&version, arch),
@@ -365,5 +430,25 @@ mod tests {
         let releases = [release("v1.0.1", "2026-09-24T10:00:00Z", "x86_64", true)];
         assert!(select_latest(&releases, &Version::parse("1.0.0").unwrap(), "arm64").is_none());
         assert!(select_latest(&releases, &Version::parse("1.0.2").unwrap(), "x86_64").is_none());
+    }
+
+    #[test]
+    fn recording_defers_confirmation_but_never_authorizes_install() {
+        let deferred = UpdatePrompt::AfterRecording;
+        assert_eq!(deferred.after_recording(true), deferred);
+        assert!(!deferred.may_install(false));
+        assert_eq!(deferred.after_recording(false), UpdatePrompt::Confirm);
+        assert!(!UpdatePrompt::Confirm.may_install(true));
+        assert!(UpdatePrompt::Confirm.may_install(false));
+        assert!(!UpdatePrompt::Ready.may_install(false));
+    }
+
+    #[test]
+    fn first_update_creates_status_directory_before_writing_marker() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("whisple/installed-version");
+        let version = Version::parse("0.2.0").unwrap();
+        write_update_marker(&marker, &version).unwrap();
+        assert_eq!(fs::read_to_string(marker).unwrap(), "0.2.0");
     }
 }

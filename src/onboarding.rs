@@ -15,6 +15,7 @@ use gpui_kit::{
 
 use crate::cloud::{self, Provider};
 use crate::hotkey;
+use crate::license;
 use crate::microphone_permission;
 use crate::models::{self, ModelSpec};
 use crate::settings;
@@ -51,6 +52,13 @@ pub(crate) struct Onboarding {
 }
 
 pub(crate) fn open(cx: &mut App) {
+    // The trial begins when onboarding opens, not when setup finishes. The
+    // credential store can block, so do not access it on the UI thread.
+    cx.background_executor()
+        .spawn(async {
+            let _ = license::start_trial();
+        })
+        .detach();
     let window_size = size(px(WIDTH), px(HEIGHT));
     let bounds = cx
         .primary_display()

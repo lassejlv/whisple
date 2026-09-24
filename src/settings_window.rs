@@ -121,6 +121,7 @@ pub(crate) struct SettingsWindow {
     key_visible: bool,
     license_input: Entity<InputState>,
     license_busy: bool,
+    just_activated: bool,
     microphone_names: Vec<String>,
     monitor: Option<Mic>,
     monitor_level: f32,
@@ -319,6 +320,7 @@ impl SettingsWindow {
             key_visible: false,
             license_input,
             license_busy: false,
+            just_activated: false,
             microphone_names,
             monitor: None,
             monitor_level: 0.0,
@@ -335,6 +337,7 @@ impl SettingsWindow {
         self.cloud_config = None;
         self.key_input = None;
         self.error = None;
+        self.just_activated = false;
         self.page = page;
         window.resize(size(px(WIDTH), px(page.height())));
         if page == Page::Audio {
@@ -361,6 +364,17 @@ impl SettingsWindow {
         self.hud.update(cx, |hud, cx| hud.cancel_hotkey_capture(cx));
         self.monitor = None;
         window.remove_window();
+    }
+
+    fn start_talking(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let hud = self.hud.clone();
+        let hud_window = hud.read(cx).hud_window;
+        self.close(window, cx);
+        cx.defer(move |cx| {
+            let _ = hud_window.update(cx, |_, window, cx| {
+                hud.update(cx, |view, cx| view.set_visible(true, window, cx));
+            });
+        });
     }
 
     fn choose_microphone(&mut self, name: &str, cx: &mut Context<Self>) {
@@ -405,18 +419,22 @@ impl SettingsWindow {
     fn toggle_startup(&mut self, cx: &mut Context<Self>) {
         self.hud
             .update(cx, |hud, cx| hud.toggle_open_on_startup(cx));
+        cx.notify();
     }
 
     fn toggle_copy(&mut self, cx: &mut Context<Self>) {
         self.hud.update(cx, |hud, cx| hud.toggle_copy_notes(cx));
+        cx.notify();
     }
 
     fn toggle_clean(&mut self, cx: &mut Context<Self>) {
         self.hud.update(cx, |hud, cx| hud.toggle_clean_fillers(cx));
+        cx.notify();
     }
 
     fn begin_shortcut(&mut self, cx: &mut Context<Self>) {
         self.hud.update(cx, |hud, cx| hud.begin_hotkey_capture(cx));
+        cx.notify();
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> Div {
@@ -1188,6 +1206,7 @@ impl SettingsWindow {
             }
             this.update(cx, |view: &mut Self, cx| {
                 view.license_busy = false;
+                view.just_activated = matches!(result, Ok(Access::Active(_)));
                 view.error = result.err();
                 cx.notify();
             })
@@ -1226,16 +1245,18 @@ impl SettingsWindow {
         }
         self.license_busy = true;
         self.error = None;
+        self.just_activated = false;
         let hud = self.hud.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async { license::deactivate() })
+                .spawn(async {
+                    license::deactivate()?;
+                    Ok::<_, String>(license::check_saved())
+                })
                 .await;
-            if result.is_ok() {
-                hud.update(cx, |view, cx| {
-                    view.set_license_access(Access::Unlicensed, cx)
-                });
+            if let Ok(access) = &result {
+                hud.update(cx, |view, cx| view.set_license_access(access.clone(), cx));
             }
             this.update(cx, |view: &mut Self, cx| {
                 view.license_busy = false;
@@ -1250,12 +1271,32 @@ impl SettingsWindow {
 
     fn license(&self, cx: &mut Context<Self>) -> Div {
         let status = self.hud.read(cx).license_access.clone();
+        let trial_detail = status.trial_remaining().map(|remaining| {
+            let total_minutes = remaining.as_secs().div_ceil(60);
+            let hours = total_minutes / 60;
+            let minutes = total_minutes % 60;
+            format!("{hours}h {minutes}m left of your 3-day free trial. Dictation is ready.")
+        });
+        let trial_license_issue = match &status {
+            Access::Trial {
+                license_issue: Some(reason),
+                ..
+            } => Some(format!("Saved license needs attention: {reason}")),
+            _ => None,
+        };
         let (title, detail) = match &status {
             Access::Unlicensed => (
                 "No license on this device",
                 "Enter the key from your Polar purchase to unlock dictation.",
             ),
             Access::Checking => ("Checking license", "Contacting Polar to verify access."),
+            Access::Trial { .. } if status.allowed() => {
+                ("Free trial", trial_detail.as_deref().unwrap_or_default())
+            }
+            Access::Trial { .. } | Access::TrialExpired => (
+                "Free trial ended",
+                "Your 3-day trial has ended. Activate a license to keep dictating.",
+            ),
             Access::Active(_) => ("License active", "Whisple is ready to use on this device."),
             Access::Offline(_) => (
                 "License active offline",
@@ -1298,6 +1339,70 @@ impl SettingsWindow {
                             ),
                     )
                     .child(label_stack(title, Some(detail))),
+            )
+            .when_some(trial_license_issue, |pane, issue| {
+                pane.child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(theme::RED)
+                        .child(issue),
+                )
+            })
+            .when(
+                self.just_activated && matches!(&status, Access::Active(_)),
+                |pane| {
+                    pane.child(
+                        div()
+                            .p(px(18.0))
+                            .rounded(px(12.0))
+                            .bg(theme::AMBER_SOFT)
+                            .flex()
+                            .flex_col()
+                            .gap(px(10.0))
+                            .child(
+                                div()
+                                    .text_size(px(16.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme::LABEL)
+                                    .child("Whisple is yours"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .text_color(theme::SECONDARY)
+                                    .child("Your lifetime license is active. Thanks for supporting Whisple."),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(theme::SECONDARY)
+                                    .child(format!(
+                                        "Active on this Mac · {}",
+                                        status.display_key().unwrap_or_default()
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .id("license-start-talking")
+                                    .role(gpui_kit::Role::Button)
+                                    .aria_label("Start talking")
+                                    .h(px(34.0))
+                                    .px(px(14.0))
+                                    .rounded(px(8.0))
+                                    .bg(theme::AMBER)
+                                    .text_color(theme::HUD)
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_size(px(12.0))
+                                    .cursor_pointer()
+                                    .flex()
+                                    .items_center()
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.start_talking(window, cx)
+                                    }))
+                                    .child("Start talking"),
+                            ),
+                    )
+                },
             )
             .child(section(
                 "Lifetime license",
@@ -1710,7 +1815,10 @@ fn setting_row(
             row.border_t_1().border_color(theme::HAIRLINE)
         })
         .cursor_pointer()
-        .on_click(cx.listener(move |view, _, _, cx| action(view, cx)))
+        .on_click(cx.listener(move |view, _, window, cx| {
+            action(view, cx);
+            window.refresh();
+        }))
         .child(label_stack(title, subtitle))
         .child(trailing)
         .into_any_element()

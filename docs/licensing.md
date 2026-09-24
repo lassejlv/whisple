@@ -18,17 +18,34 @@ verify the product grants the replacement before distributing the build.
 
 ## App behavior
 
-The app activates a pasted key once, then stores the key and activation ID in
-the user's system credential store. It validates the key on startup and every
-six hours. Dictation requires a granted license from this organization and
-benefit, plus a matching activation ID. A successful check allows up to 72
-hours of temporary offline use, ending sooner if the key expires. Revoked,
-disabled, expired, or mismatched keys lose access immediately on the next
-online check. Deactivation calls Polar before removing the local credential.
+The three-day free trial starts on first launch (including onboarding). Its
+start time and latest observed time are stored in a separate system credential
+entry. It allows dictation without a key for exactly 72 hours, including
+offline use. The deadline is checked when dictation is requested, not just at
+startup. Restarting the app, activating a key, or deactivating one does not
+restart the trial. Clock rollback beyond five minutes from the last saved
+check blocks trial access until the clock is corrected; moving the clock
+forward past the deadline expires the trial. The trial is local to this
+credential store, not a server-verified per-person entitlement. Removing the
+credential store entry or reinstalling onto a new device cannot be prevented
+by this client-only design.
 
-The License page links to the existing hosted Polar checkout and to the
-Whisple customer portal. No local 14-day trial is implemented: the current
-Polar product is a one-time Lifetime purchase with no trial configured.
+The app activates a pasted key once, then stores the key and activation ID in
+the user's system credential store, separately from the trial. It validates
+the key on startup and every six hours. Paid dictation requires a granted
+license from this organization and benefit, plus a matching activation ID.
+A successful check allows up to 72 hours of temporary paid offline use,
+ending sooner if the key expires. Revoked, disabled, expired, or mismatched
+keys lose paid access immediately on the next online check. Deactivation
+calls Polar before removing only the license credential. If the trial has not
+ended, deactivating returns the app to trial access. A saved paid key that
+fails validation does not block remaining trial time: the License page still
+shows its validation issue, but dictation uses the trial until it expires.
+
+The License page shows remaining trial hours and minutes when the trial is
+active, or explains that it has ended. It links to the hosted Polar checkout
+and customer portal. The current Polar product remains a one-time Lifetime
+purchase; this three-day trial is local and is not configured in Polar.
 
 ## Release check
 

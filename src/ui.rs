@@ -11,7 +11,8 @@ use gpui_kit::{
 };
 
 use crate::app::{
-    Phase, Reveal, SettingsPage, Whisp, BAR_HEIGHT, COLLAPSED_HEIGHT, ERROR_EXTRA, WINDOW_RADIUS,
+    Phase, Recovery, Reveal, SettingsPage, Whisp, BAR_HEIGHT, COLLAPSED_HEIGHT, ERROR_EXTRA,
+    WINDOW_RADIUS,
 };
 use crate::cloud::Provider;
 use crate::hotkey;
@@ -19,6 +20,8 @@ use crate::models;
 use crate::motion;
 use crate::settings;
 use crate::theme;
+#[cfg(target_os = "macos")]
+use crate::updater::UpdatePrompt;
 
 /// Language rows visible at once; the list scrolls past this.
 const LANGUAGE_LIST_H: f32 = 280.0;
@@ -30,7 +33,6 @@ impl Render for Whisp {
         self.tick(window, cx);
         self.sync_language_search(window, cx);
         self.sync_key_input(window, cx);
-        let error = self.error.clone();
 
         div()
             .id("whisp")
@@ -82,14 +84,155 @@ impl Render for Whisp {
                     .shadow(vec![theme::top_edge(theme::EDGE)])
                     .when(self.reveal.is_some(), |column| column.child(self.panel(cx)))
                     .child(self.bar(cx))
-                    .when(error.is_some(), |column| {
-                        column.child(error_line(error.unwrap_or_default()))
+                    .when(self.error.is_some(), |column| {
+                        column.child(self.notice_card(cx))
                     }),
             )
     }
 }
 
+#[derive(Clone, Copy)]
+enum NoticeAction {
+    Microphone,
+    Model,
+    Record,
+    Key(Provider),
+    Retry,
+    Local,
+    Update,
+}
+
 impl Whisp {
+    fn notice_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let kind = self.recovery;
+        let title = kind.map_or("Something went wrong", Recovery::title);
+        let message = if kind == Some(Recovery::MicrophonePermission) {
+            #[cfg(target_os = "macos")]
+            let guidance = "Allow Whisple in System Settings → Privacy & Security → Microphone.";
+            #[cfg(not(target_os = "macos"))]
+            let guidance = "Allow Whisple microphone access in system privacy settings.";
+            guidance.to_string()
+        } else {
+            self.error.clone().unwrap_or_default()
+        };
+        let mut actions = Vec::new();
+        match kind {
+            Some(
+                Recovery::Microphone
+                | Recovery::MicrophoneDisconnected
+                | Recovery::MicrophonePermission,
+            ) => {
+                actions.push(("Choose microphone", NoticeAction::Microphone));
+            }
+            Some(Recovery::Model) => actions.push(("Choose model", NoticeAction::Model)),
+            Some(Recovery::NoSpeech) => actions.push(("Record again", NoticeAction::Record)),
+            Some(Recovery::CloudKey(provider)) => {
+                actions.push(("Edit API key", NoticeAction::Key(provider)));
+            }
+            Some(Recovery::CloudOffline | Recovery::CloudRateLimited | Recovery::CloudOther) => {
+                if self.failed_audio_available() {
+                    actions.push(("Retry", NoticeAction::Retry));
+                }
+            }
+            Some(Recovery::LocalFallback) => {
+                if self.failed_audio_available() {
+                    actions.push(("Retry cloud", NoticeAction::Retry));
+                }
+            }
+            Some(Recovery::UpdateCheck) => actions.push(("Check again", NoticeAction::Update)),
+            None => {}
+        }
+        if self.failed_audio_available()
+            && self
+                .models
+                .iter()
+                .any(|model| model.ready && model.spec.id.starts_with("turbo"))
+        {
+            actions.push(("Use local Turbo", NoticeAction::Local));
+        }
+        div()
+            .h(px(ERROR_EXTRA))
+            .w_full()
+            .flex_shrink_0()
+            .px(px(14.0))
+            .py(px(8.0))
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .border_t_1()
+            .border_color(theme::HAIRLINE)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::RED)
+                            .child(title),
+                    )
+                    .child(
+                        press_handlers(
+                            div().id("notice-dismiss").child("×"),
+                            "notice-dismiss",
+                            cx,
+                            |this, cx| this.dismiss_notice(cx),
+                        )
+                        .text_size(px(16.0))
+                        .text_color(theme::SECONDARY),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme::SECONDARY)
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(message),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(12.0))
+                    .children(actions.into_iter().map(|(label, action)| {
+                        press_handlers(
+                            div().id(format!("notice-{label}")).child(label),
+                            label,
+                            cx,
+                            move |this, cx| this.perform_notice_action(action, cx),
+                        )
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::AMBER)
+                    })),
+            )
+    }
+
+    fn perform_notice_action(&mut self, action: NoticeAction, cx: &mut Context<Self>) {
+        match action {
+            NoticeAction::Microphone => {
+                if !self.settings_open {
+                    self.toggle_settings(cx);
+                }
+                self.open_microphones(cx);
+            }
+            NoticeAction::Model => {
+                if !self.picker_open {
+                    self.toggle_picker(cx);
+                }
+                self.dismiss_notice(cx);
+            }
+            NoticeAction::Record => self.toggle_listen(cx),
+            NoticeAction::Key(provider) => self.open_cloud_config(provider, cx),
+            NoticeAction::Retry => self.retry_audio(false, cx),
+            NoticeAction::Local => self.retry_audio(true, cx),
+            NoticeAction::Update => self.check_updates_from_settings(cx),
+        }
+    }
+
     /// Keep the language search field alive only while its page shows, so it
     /// always opens empty.
     fn sync_language_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -170,6 +313,7 @@ impl Whisp {
                 .transcript_card(self.last_text.clone(), cx)
                 .into_any_element(),
             Some(Reveal::Settings) => self.settings_panel(cx).into_any_element(),
+            Some(Reveal::Update) => self.update_panel(cx).into_any_element(),
             None => div().into_any_element(),
         };
 
@@ -194,15 +338,131 @@ impl Whisp {
             )
     }
 
+    #[cfg(not(target_os = "macos"))]
+    fn update_panel(&self, _cx: &mut Context<Self>) -> AnyElement {
+        div().into_any_element()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn update_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let prompt = self.update_prompt.unwrap_or(UpdatePrompt::Ready);
+        let (version, notes) = self.update_details();
+        let updated = prompt == UpdatePrompt::JustUpdated;
+        let ready = prompt == UpdatePrompt::Ready;
+        let title = if updated {
+            "Just updated".to_string()
+        } else if ready {
+            format!("Whisple v{version} is ready")
+        } else {
+            format!("Ready to install v{version}")
+        };
+        let description = if updated {
+            "You're running the latest installed version of Whisple.".to_string()
+        } else if ready {
+            "The update is ready. Review the release notes before installing.".to_string()
+        } else if notes.trim().is_empty() {
+            "Whisple will restart after installation.".to_string()
+        } else {
+            notes
+        };
+        let action = if updated {
+            "Done"
+        } else if ready {
+            "Release notes"
+        } else {
+            "Install now"
+        };
+        div()
+            .id("update-panel")
+            .h(px(crate::app::UPDATE_EXTRA - 1.0))
+            .px(px(20.0))
+            .pt(px(20.0))
+            .pb(px(18.0))
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .child(
+                div()
+                    .text_size(px(16.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .h(px(96.0))
+                    .overflow_hidden()
+                    .text_size(px(13.0))
+                    .line_height(px(19.0))
+                    .text_color(theme::SECONDARY)
+                    .line_clamp(5)
+                    .child(description),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(10.0))
+                    .when(!updated, |row| {
+                        row.child(
+                            press_handlers(
+                                div()
+                                    .id("update-later")
+                                    .px(px(14.0))
+                                    .h(px(32.0))
+                                    .rounded_full()
+                                    .bg(theme::RAISED)
+                                    .flex()
+                                    .items_center()
+                                    .text_size(px(12.0)),
+                                "update-later",
+                                cx,
+                                |this, cx| this.dismiss_update(cx),
+                            )
+                            .child("Later"),
+                        )
+                    })
+                    .child(
+                        press_handlers(
+                            div()
+                                .id("update-action")
+                                .px(px(14.0))
+                                .h(px(32.0))
+                                .rounded_full()
+                                .bg(theme::AMBER_SOFT)
+                                .text_color(theme::AMBER)
+                                .flex()
+                                .items_center()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::SEMIBOLD),
+                            "update-action",
+                            cx,
+                            |this, cx| match this.update_prompt {
+                                Some(UpdatePrompt::Ready) => this.review_update(cx),
+                                Some(UpdatePrompt::JustUpdated) => this.dismiss_update(cx),
+                                _ => this.install_update(cx),
+                            },
+                        )
+                        .child(action),
+                    ),
+            )
+            .into_any_element()
+    }
+
     // MARK: Bar
 
     fn bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let listening = matches!(self.phase, Phase::Listening(_));
+        let trial_ended = matches!(
+            &self.license_access,
+            crate::license::Access::Trial { .. } | crate::license::Access::TrialExpired
+        ) && !self.license_access.allowed();
         let center = if listening {
             waveform(&self.bars).into_any_element()
         } else {
             let (label, color) = match &self.phase {
                 Phase::Transcribing => ("Transcribing…", theme::SECONDARY),
+                _ if trial_ended => ("Free trial ended", theme::LABEL),
                 Phase::Idle if self.selected_ready() => ("Start recording", theme::LABEL),
                 Phase::Result(_) if self.selected_ready() => ("Record again", theme::LABEL),
                 _ => ("Choose a model", theme::LABEL),
@@ -226,7 +486,11 @@ impl Whisp {
                     .text_color(theme::SECONDARY)
                     .child(clock(elapsed))
             }),
-            Phase::Transcribing => Some(hint_text("On device".to_string())),
+            Phase::Transcribing => Some(hint_text(self.transcribing_provider.map_or_else(
+                || "On device".to_string(),
+                |provider| provider.name().to_string(),
+            ))),
+            _ if trial_ended => None,
             _ => Some(hint_text(hotkey::symbols(&self.show_hotkey))),
         };
 
@@ -251,7 +515,31 @@ impl Whisp {
             )
             .children(hint)
             .child(self.settings_button(cx))
-            .child(self.model_capsule(cx))
+            .child(if trial_ended {
+                self.unlock_capsule(cx).into_any_element()
+            } else {
+                self.model_capsule(cx).into_any_element()
+            })
+    }
+
+    fn unlock_capsule(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        press_handlers(
+            div()
+                .id("unlock-license")
+                .h(px(28.0))
+                .px(px(11.0))
+                .rounded_full()
+                .bg(theme::AMBER_SOFT)
+                .text_color(theme::AMBER)
+                .text_size(px(12.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .flex()
+                .items_center(),
+            "unlock-license",
+            cx,
+            |this, cx| this.open_license_window(cx),
+        )
+        .child("Unlock Whisple")
     }
 
     fn voice_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1740,21 +2028,6 @@ fn separator() -> Div {
         .w_full()
         .flex_shrink_0()
         .bg(theme::HAIRLINE)
-}
-
-fn error_line(message: String) -> Div {
-    div()
-        .h(px(ERROR_EXTRA))
-        .w_full()
-        .flex_shrink_0()
-        .px(px(16.0))
-        .flex()
-        .items_center()
-        .text_size(px(12.0))
-        .text_color(theme::RED)
-        .whitespace_nowrap()
-        .text_ellipsis()
-        .child(message)
 }
 
 /// Live input level, oldest on the left fading in toward the newest.

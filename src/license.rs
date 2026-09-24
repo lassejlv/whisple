@@ -3,6 +3,7 @@
 //! These customer-portal endpoints are public. No organization access token is
 //! shipped with Whisple; the key and this device's activation live in Keychain.
 
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::DateTime;
@@ -21,20 +22,58 @@ const API_BASE: &str = "https://api.polar.sh/v1/customer-portal/license-keys";
 const KEYRING_SERVICE: &str = "app.whisple.license";
 const KEYRING_USER: &str = "polar-license";
 const OFFLINE_GRACE: i64 = 72 * 60 * 60;
+const TRIAL_USER: &str = "trial-v1";
+const TRIAL_LENGTH: i64 = 72 * 60 * 60;
+const CLOCK_TOLERANCE: i64 = 5 * 60;
+static TRIAL_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Access {
     Unlicensed,
     Checking,
+    Trial {
+        expires_at: i64,
+        last_seen: i64,
+        license_issue: Option<String>,
+    },
+    TrialExpired,
     Active(String),
     Offline(String),
-    Blocked { display_key: String, reason: String },
-    Unavailable { display_key: String, reason: String },
+    Blocked {
+        display_key: String,
+        reason: String,
+    },
+    Unavailable {
+        display_key: String,
+        reason: String,
+    },
 }
 
 impl Access {
     pub fn allowed(&self) -> bool {
         matches!(self, Self::Active(_) | Self::Offline(_))
+            || self
+                .trial_remaining()
+                .is_some_and(|remaining| !remaining.is_zero())
+    }
+
+    pub fn trial_remaining(&self) -> Option<Duration> {
+        match self {
+            Self::Trial {
+                expires_at,
+                last_seen,
+                ..
+            } => {
+                let current = now();
+                if current.saturating_add(CLOCK_TOLERANCE) < *last_seen {
+                    return None;
+                }
+                Some(Duration::from_secs(
+                    expires_at.saturating_sub(current.max(*last_seen)).max(0) as u64,
+                ))
+            }
+            _ => None,
+        }
     }
 
     pub fn display_key(&self) -> Option<&str> {
@@ -43,9 +82,96 @@ impl Access {
             Self::Blocked { display_key, .. } | Self::Unavailable { display_key, .. } => {
                 Some(display_key)
             }
-            Self::Unlicensed | Self::Checking => None,
+            Self::Unlicensed | Self::Checking | Self::Trial { .. } | Self::TrialExpired => None,
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SavedTrial {
+    started_at: i64,
+    last_seen: i64,
+}
+
+fn trial_state(record: &SavedTrial, checked_at: i64) -> Access {
+    let expires_at = record.started_at.saturating_add(TRIAL_LENGTH);
+    if record.started_at <= 0
+        || record.last_seen < record.started_at
+        || checked_at.saturating_add(CLOCK_TOLERANCE) < record.last_seen
+        || checked_at.max(record.last_seen) >= expires_at
+    {
+        Access::TrialExpired
+    } else {
+        Access::Trial {
+            expires_at,
+            last_seen: record.last_seen.max(checked_at),
+            license_issue: None,
+        }
+    }
+}
+
+fn use_trial_if_available(trial: &Result<Access, String>, paid_failure: Access) -> Access {
+    if let Ok(Access::Trial {
+        expires_at,
+        last_seen,
+        ..
+    }) = trial
+    {
+        let trial_access = Access::Trial {
+            expires_at: *expires_at,
+            last_seen: *last_seen,
+            license_issue: None,
+        };
+        if trial_access.allowed() {
+            let reason = match &paid_failure {
+                Access::Blocked { reason, .. } | Access::Unavailable { reason, .. } => {
+                    reason.clone()
+                }
+                _ => return paid_failure,
+            };
+            return Access::Trial {
+                expires_at: *expires_at,
+                last_seen: *last_seen,
+                license_issue: Some(reason),
+            };
+        }
+    }
+    paid_failure
+}
+
+/// Starts on first launch, independently of any Polar activation. Never delete
+/// this credential when deactivating a paid key.
+pub fn start_trial() -> Result<Access, String> {
+    let _lock = TRIAL_LOCK
+        .lock()
+        .map_err(|_| "Could not read the trial state.")?;
+    let entry = keyring::Entry::new(KEYRING_SERVICE, TRIAL_USER)
+        .map_err(|err| format!("Could not open the system credential store: {err}"))?;
+    let checked_at = now();
+    let (mut record, created) = match entry.get_password() {
+        Ok(raw) => serde_json::from_str::<SavedTrial>(&raw)
+            .map(|record| (record, false))
+            .map_err(|_| "The saved trial could not be read.".to_string())?,
+        Err(keyring::Error::NoEntry) => (
+            SavedTrial {
+                started_at: checked_at,
+                last_seen: checked_at,
+            },
+            true,
+        ),
+        Err(err) => return Err(format!("Could not read the saved trial: {err}")),
+    };
+    let access = trial_state(&record, checked_at);
+    // Persist the highest observed time, including expiration. A restart or a
+    // small clock adjustment cannot create a fresh 72-hour window.
+    let observed = checked_at.max(record.last_seen);
+    if observed != record.last_seen || created {
+        record.last_seen = observed;
+        entry
+            .set_password(&serde_json::to_string(&record).map_err(|err| err.to_string())?)
+            .map_err(|err| format!("Could not save the trial in the credential store: {err}"))?;
+    }
+    Ok(access)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -209,24 +335,36 @@ fn offline_access(record: &SavedLicense, checked_at: i64) -> bool {
 
 /// Refreshes the saved key. A recent successful check permits short offline use.
 pub fn check_saved() -> Access {
+    let trial = start_trial();
     let record = match load() {
         Ok(Some(record)) => record,
-        Ok(None) => return Access::Unlicensed,
-        Err(reason) => {
-            return Access::Unavailable {
+        Ok(None) => {
+            return trial.unwrap_or_else(|reason| Access::Unavailable {
                 display_key: String::new(),
                 reason,
-            }
+            })
+        }
+        Err(reason) => {
+            return use_trial_if_available(
+                &trial,
+                Access::Unavailable {
+                    display_key: String::new(),
+                    reason,
+                },
+            )
         }
     };
     let checked_at = now();
     let client = match client() {
         Ok(client) => client,
         Err(reason) => {
-            return Access::Unavailable {
-                display_key: record.display_key,
-                reason,
-            }
+            return use_trial_if_available(
+                &trial,
+                Access::Unavailable {
+                    display_key: record.display_key,
+                    reason,
+                },
+            )
         }
     };
     let response = post(
@@ -250,7 +388,7 @@ pub fn check_saved() -> Access {
             }),
         Err(err) => Err(err),
     };
-    match result {
+    let paid = match result {
         Ok((display_key, expires_at)) => {
             let updated = SavedLicense {
                 display_key: display_key.clone(),
@@ -287,7 +425,8 @@ pub fn check_saved() -> Access {
             display_key: record.display_key,
             reason,
         },
-    }
+    };
+    use_trial_if_available(&trial, paid)
 }
 
 /// Activates a new key for this device and saves it after checking the grant.
@@ -303,7 +442,11 @@ pub fn activate(key: &str) -> Result<Access, String> {
     };
     if previous.as_ref().is_some_and(|saved| saved.key == key) {
         return match check_saved() {
-            status if status.allowed() => Ok(status),
+            status @ (Access::Active(_) | Access::Offline(_)) => Ok(status),
+            Access::Trial {
+                license_issue: Some(reason),
+                ..
+            } => Err(reason),
             Access::Blocked { reason, .. } | Access::Unavailable { reason, .. } => Err(reason),
             _ => Err("This license could not be validated.".into()),
         };
@@ -446,6 +589,89 @@ mod tests {
         assert!(!offline_access(&saved, 99));
         saved.expires_at = Some(200);
         assert!(!offline_access(&saved, 200));
+    }
+
+    #[test]
+    fn trial_ends_at_exactly_72_hours_and_never_restarts_from_last_seen() {
+        let mut trial = SavedTrial {
+            started_at: 1_000,
+            last_seen: 1_000,
+        };
+        assert!(matches!(trial_state(&trial, 1_000), Access::Trial { .. }));
+        trial.last_seen = 1_000 + TRIAL_LENGTH - 1;
+        assert!(matches!(
+            trial_state(&trial, 1_000 + TRIAL_LENGTH - 1),
+            Access::Trial { .. }
+        ));
+        assert_eq!(
+            trial_state(&trial, 1_000 + TRIAL_LENGTH),
+            Access::TrialExpired
+        );
+        trial.last_seen = 1_000 + TRIAL_LENGTH;
+        assert_eq!(trial_state(&trial, 1_000), Access::TrialExpired);
+    }
+
+    #[test]
+    fn trial_denies_large_clock_rollback_and_invalid_records() {
+        let mut trial = SavedTrial {
+            started_at: 1_000,
+            last_seen: 2_000,
+        };
+        assert!(matches!(
+            trial_state(&trial, 2_000 - CLOCK_TOLERANCE),
+            Access::Trial { .. }
+        ));
+        assert_eq!(
+            trial_state(&trial, 2_000 - CLOCK_TOLERANCE - 1),
+            Access::TrialExpired
+        );
+        trial.last_seen = 999;
+        assert_eq!(trial_state(&trial, 2_000), Access::TrialExpired);
+    }
+
+    #[test]
+    fn live_trial_access_checks_the_clock_instead_of_caching_permission() {
+        let current = now();
+        let valid = Access::Trial {
+            expires_at: current + 10,
+            last_seen: current,
+            license_issue: None,
+        };
+        assert!(valid.allowed());
+        assert!(!Access::Trial {
+            expires_at: current,
+            last_seen: current,
+            license_issue: None,
+        }
+        .allowed());
+        assert_eq!(Access::TrialExpired.trial_remaining(), None);
+    }
+
+    #[test]
+    fn invalid_paid_key_cannot_block_a_valid_trial_or_look_activated() {
+        let current = now();
+        let trial = Ok(Access::Trial {
+            expires_at: current + 60,
+            last_seen: current,
+            license_issue: None,
+        });
+        let failure = Access::Blocked {
+            display_key: "••••-1234".into(),
+            reason: "License revoked".into(),
+        };
+        assert!(matches!(
+            use_trial_if_available(&trial, failure.clone()),
+            Access::Trial {
+                license_issue: Some(reason),
+                ..
+            } if reason == "License revoked"
+        ));
+        let expired = Ok(Access::TrialExpired);
+        assert_eq!(use_trial_if_available(&expired, failure.clone()), failure);
+        assert_eq!(
+            use_trial_if_available(&trial, Access::Active("paid".into())),
+            Access::Active("paid".into())
+        );
     }
 
     #[test]

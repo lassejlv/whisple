@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::component::input::InputState;
 use gpui_kit::{
-    App, ClipboardItem, Context, Entity, FocusHandle, Focusable, KeyBinding, Keystroke, Menu,
-    MenuItem, WeakEntity,
+    AnyWindowHandle, App, ClipboardItem, Context, Entity, FocusHandle, Focusable, KeyBinding,
+    Keystroke, Menu, MenuItem, WeakEntity,
 };
 
 use crate::audio::{self, Mic};
@@ -23,7 +23,7 @@ use crate::startup;
 use crate::stt;
 use crate::tray;
 #[cfg(target_os = "macos")]
-use crate::updater::{self, PreparedUpdate};
+use crate::updater::{self, PreparedUpdate, UpdatePrompt};
 
 pub(crate) const WINDOW_WIDTH: f32 = 400.0;
 pub(crate) const WINDOW_RADIUS: f32 = 20.0;
@@ -38,7 +38,8 @@ pub(crate) const CLOUD_KEY_EXTRA: f32 = 278.0;
 pub(crate) const SETTINGS_EXTRA: f32 = 373.0;
 pub(crate) const LANGUAGE_EXTRA: f32 = 393.0;
 pub(crate) const MICROPHONE_EXTRA: f32 = LANGUAGE_EXTRA;
-pub(crate) const ERROR_EXTRA: f32 = 22.0;
+pub(crate) const ERROR_EXTRA: f32 = 100.0;
+pub(crate) const UPDATE_EXTRA: f32 = 224.0;
 
 /// Waveform bars across the bar while recording, oldest on the left.
 pub(crate) const BARS: usize = 19;
@@ -48,6 +49,7 @@ pub(crate) enum Reveal {
     Picker,
     Result,
     Settings,
+    Update,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -66,6 +68,39 @@ pub(crate) enum Phase {
     Result(String),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Recovery {
+    Microphone,
+    MicrophoneDisconnected,
+    MicrophonePermission,
+    Model,
+    NoSpeech,
+    CloudOffline,
+    CloudKey(Provider),
+    CloudRateLimited,
+    CloudOther,
+    LocalFallback,
+    UpdateCheck,
+}
+
+impl Recovery {
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Self::Microphone => "Microphone unavailable",
+            Self::MicrophoneDisconnected => "Microphone disconnected",
+            Self::MicrophonePermission => "Microphone access blocked",
+            Self::Model => "No ready model",
+            Self::NoSpeech => "No speech detected",
+            Self::CloudOffline => "Cloud unavailable",
+            Self::CloudKey(_) => "API key rejected",
+            Self::CloudRateLimited => "Too many requests",
+            Self::CloudOther => "Cloud transcription failed",
+            Self::LocalFallback => "Local transcription failed",
+            Self::UpdateCheck => "Update check failed",
+        }
+    }
+}
+
 pub(crate) struct InstalledModel {
     pub spec: &'static ModelSpec,
     pub ready: bool,
@@ -80,6 +115,7 @@ pub(crate) struct Download {
 
 pub(crate) struct Whisp {
     pub focus_handle: FocusHandle,
+    pub hud_window: AnyWindowHandle,
     pub phase: Phase,
     pub levels: VecDeque<f32>,
     pub picker_open: bool,
@@ -92,6 +128,10 @@ pub(crate) struct Whisp {
     pub download: Option<Download>,
     pub pending_uninstall: Option<String>,
     pub error: Option<String>,
+    pub recovery: Option<Recovery>,
+    /// Retained only after a cloud failure; never written to disk.
+    failed_audio: Option<(Arc<Vec<f32>>, u32)>,
+    pub transcribing_provider: Option<Provider>,
     pub copied: bool,
     pub chrome: Ease,
     pub press_id: Option<String>,
@@ -119,6 +159,8 @@ pub(crate) struct Whisp {
     pub open_on_startup: bool,
     #[cfg(target_os = "macos")]
     update: Option<PreparedUpdate>,
+    #[cfg(target_os = "macos")]
+    pub(crate) update_prompt: Option<UpdatePrompt>,
     #[cfg(target_os = "macos")]
     update_checking: bool,
     #[cfg(target_os = "macos")]
@@ -209,6 +251,7 @@ impl Whisp {
         .detach();
         let mut view = Self {
             focus_handle: cx.focus_handle(),
+            hud_window: window.window_handle(),
             phase: Phase::Idle,
             levels: VecDeque::new(),
             picker_open: false,
@@ -221,6 +264,9 @@ impl Whisp {
             download: None,
             pending_uninstall: None,
             error: hotkey_error,
+            recovery: None,
+            failed_audio: None,
+            transcribing_provider: None,
             copied: false,
             chrome: Ease::chrome(COLLAPSED_HEIGHT),
             press_id: None,
@@ -248,6 +294,8 @@ impl Whisp {
             open_on_startup: prefs.open_on_startup,
             #[cfg(target_os = "macos")]
             update: None,
+            #[cfg(target_os = "macos")]
+            update_prompt: updater::just_updated().then_some(UpdatePrompt::JustUpdated),
             #[cfg(target_os = "macos")]
             update_checking: false,
             #[cfg(target_os = "macos")]
@@ -279,6 +327,11 @@ impl Whisp {
     }
 
     pub(crate) fn tick(&mut self, window: &mut gpui_kit::Window, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        if let Some(prompt) = self.update_prompt {
+            self.update_prompt = Some(prompt.after_recording(self.visibility_locked()));
+        }
+        self.expire_trial_if_needed(cx);
         let now = Instant::now();
         let dt = now.saturating_duration_since(self.last_tick).as_secs_f32();
         self.last_tick = now;
@@ -303,12 +356,8 @@ impl Whisp {
             moving |= bar.step(dt);
         }
 
-        if self.settings_open {
-            self.reveal = Some(Reveal::Settings);
-        } else if self.picker_open {
-            self.reveal = Some(Reveal::Picker);
-        } else if matches!(self.phase, Phase::Result(_)) {
-            self.reveal = Some(Reveal::Result);
+        if let Some(reveal) = self.desired_reveal() {
+            self.reveal = Some(reveal);
         } else if !self.chrome.busy() {
             self.reveal = None;
         }
@@ -352,16 +401,7 @@ impl Whisp {
     }
 
     fn settled_height(&self) -> f32 {
-        let reveal = if self.settings_open {
-            Some(Reveal::Settings)
-        } else if self.picker_open {
-            Some(Reveal::Picker)
-        } else if matches!(self.phase, Phase::Result(_)) {
-            Some(Reveal::Result)
-        } else {
-            None
-        };
-        let mut height = COLLAPSED_HEIGHT + self.panel_height(reveal);
+        let mut height = COLLAPSED_HEIGHT + self.panel_height(self.desired_reveal());
         if self.error.is_some() {
             height += ERROR_EXTRA;
         }
@@ -388,6 +428,7 @@ impl Whisp {
     pub(crate) fn panel_height(&self, reveal: Option<Reveal>) -> f32 {
         match reveal {
             Some(Reveal::Result) => RESULT_EXTRA,
+            Some(Reveal::Update) => UPDATE_EXTRA,
             Some(Reveal::Picker) if self.cloud_config.is_some() => CLOUD_KEY_EXTRA,
             Some(Reveal::Picker) => PICKER_EXTRA,
             Some(Reveal::Settings) => match self.settings_page {
@@ -438,15 +479,7 @@ impl Whisp {
 
     fn snap_chrome(&mut self) {
         self.chrome.snap(self.settled_height());
-        if self.settings_open {
-            self.reveal = Some(Reveal::Settings);
-        } else if self.picker_open {
-            self.reveal = Some(Reveal::Picker);
-        } else if matches!(self.phase, Phase::Result(_)) {
-            self.reveal = Some(Reveal::Result);
-        } else {
-            self.reveal = None;
-        }
+        self.reveal = self.desired_reveal();
     }
 
     fn listen_for_commands(
@@ -477,7 +510,12 @@ impl Whisp {
                                     view.open_settings_window(cx);
                                 }
                                 #[cfg(target_os = "macos")]
-                                tray::Command::Update => view.install_or_check_for_updates(cx),
+                                tray::Command::Update => {
+                                    view.show_or_check_for_updates(cx);
+                                    if view.update.is_some() && !view.visibility_locked() {
+                                        view.set_visible(true, window, cx);
+                                    }
+                                }
                                 #[cfg(not(target_os = "macos"))]
                                 tray::Command::Update => {}
                                 tray::Command::Quit => cx.quit(),
@@ -546,14 +584,44 @@ impl Whisp {
             window.focus(&self.focus_handle, cx);
         } else {
             self.stop_recording();
-            #[cfg(target_os = "macos")]
-            cx.hide();
+            self.failed_audio = None;
         }
         cx.notify();
     }
 
     fn visibility_locked(&self) -> bool {
         matches!(self.phase, Phase::Listening(_) | Phase::Transcribing)
+    }
+
+    fn update_panel_visible(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            self.update_prompt.is_some() && !self.visibility_locked()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
+    }
+
+    fn desired_reveal(&self) -> Option<Reveal> {
+        #[cfg(target_os = "macos")]
+        let update_requested = self.update_prompt == Some(UpdatePrompt::Confirm);
+        #[cfg(not(target_os = "macos"))]
+        let update_requested = false;
+        if self.settings_open {
+            Some(Reveal::Settings)
+        } else if self.picker_open {
+            Some(Reveal::Picker)
+        } else if update_requested && self.update_panel_visible() {
+            Some(Reveal::Update)
+        } else if matches!(self.phase, Phase::Result(_)) {
+            Some(Reveal::Result)
+        } else if self.update_panel_visible() {
+            Some(Reveal::Update)
+        } else {
+            None
+        }
     }
 
     fn rest_bars(&mut self) {
@@ -585,12 +653,14 @@ impl Whisp {
             return;
         }
         self.error = None;
+        self.recovery = None;
         self.copied = false;
         self.close_settings();
         if !self.selected_ready() {
             self.picker_open = true;
             self.picker_opened_at = None;
             self.error = Some("Choose a ready model before recording.".into());
+            self.recovery = Some(Recovery::Model);
             self.snap_chrome();
             cx.notify();
             return;
@@ -615,6 +685,7 @@ impl Whisp {
             Phase::Transcribing => {}
             Phase::Idle | Phase::Result(_) => match Mic::start(&self.input_device) {
                 Ok(mic) => {
+                    self.failed_audio = None;
                     #[cfg(target_os = "macos")]
                     if self.dictation_target.is_none() {
                         dictation::request_access();
@@ -629,6 +700,21 @@ impl Whisp {
                     self.snap_chrome();
                 }
                 Err(err) => {
+                    self.recovery = Some(
+                        if err.to_ascii_lowercase().contains("permission")
+                            || err.to_ascii_lowercase().contains("denied")
+                        {
+                            Recovery::MicrophonePermission
+                        } else if !self.input_device.is_empty()
+                            && audio::input_names().is_ok_and(|names| {
+                                audio::known_input(&self.input_device, &names).is_err()
+                            })
+                        {
+                            Recovery::MicrophoneDisconnected
+                        } else {
+                            Recovery::Microphone
+                        },
+                    );
                     self.error = Some(err);
                     self.picker_open = true;
                     self.picker_opened_at = None;
@@ -644,9 +730,11 @@ impl Whisp {
             return;
         }
         self.error = None;
+        self.recovery = None;
         self.copied = false;
         if !self.selected_ready() {
             self.error = Some("Choose a ready model first.".into());
+            self.recovery = Some(Recovery::Model);
             cx.notify();
             return;
         }
@@ -656,6 +744,7 @@ impl Whisp {
         }
         match audio::decode_wav(include_bytes!("../assets/sample.wav")) {
             Ok((samples, rate)) => {
+                self.failed_audio = None;
                 self.recorded =
                     Duration::from_secs_f64(samples.len() as f64 / f64::from(rate.max(1)));
                 self.phase = Phase::Transcribing;
@@ -676,6 +765,7 @@ impl Whisp {
         };
         self.pending_uninstall = None;
         self.error = None;
+        self.recovery = None;
         if models::is_downloaded(spec) {
             self.selected = spec.id.to_string();
             models::save_selected(spec.id);
@@ -695,6 +785,7 @@ impl Whisp {
         self.selected = provider.id().to_string();
         self.pending_uninstall = None;
         self.error = None;
+        self.recovery = None;
         self.picker_open = false;
         self.cloud_config = None;
         self.persist();
@@ -708,6 +799,7 @@ impl Whisp {
         self.key_visible = false;
         self.picker_open = true;
         self.error = None;
+        self.recovery = None;
         cx.notify();
     }
 
@@ -749,6 +841,12 @@ impl Whisp {
                 self.cloud_keys[provider.index()] = true;
                 self.key_input = None;
                 self.choose_cloud(provider, cx);
+                if self.failed_audio.is_some() {
+                    self.error =
+                        Some("Key updated. Retry your recording or use local Turbo.".into());
+                    self.recovery = Some(Recovery::CloudOther);
+                    self.snap_chrome();
+                }
             }
             Err(err) => {
                 self.error = Some(err);
@@ -884,6 +982,19 @@ impl Whisp {
         self.open_settings_window_at(false, cx);
     }
 
+    pub(crate) fn open_license_window(&mut self, cx: &mut Context<Self>) {
+        self.open_settings_window_at(true, cx);
+    }
+
+    fn expire_trial_if_needed(&mut self, cx: &mut Context<Self>) -> bool {
+        if matches!(&self.license_access, Access::Trial { .. }) && !self.license_access.allowed() {
+            self.set_license_access(Access::TrialExpired, cx);
+            self.open_license_window(cx);
+            return true;
+        }
+        false
+    }
+
     fn open_settings_window_at(&mut self, license_page: bool, cx: &mut Context<Self>) {
         self.stop_recording();
         self.settings_open = false;
@@ -903,6 +1014,9 @@ impl Whisp {
     }
 
     fn require_license(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.expire_trial_if_needed(cx) {
+            return false;
+        }
         if self.license_access.allowed() {
             return true;
         }
@@ -921,6 +1035,8 @@ impl Whisp {
         if !access.allowed() && matches!(self.phase, Phase::Listening(_) | Phase::Transcribing) {
             self.transcription_id = self.transcription_id.wrapping_add(1);
             self.phase = Phase::Idle;
+            self.failed_audio = None;
+            self.transcribing_provider = None;
             self.listen_started = None;
             self.levels.clear();
             self.rest_bars();
@@ -1016,6 +1132,53 @@ impl Whisp {
         format!("Version {}", env!("CARGO_PKG_VERSION"))
     }
 
+    #[cfg(target_os = "macos")]
+    pub(crate) fn update_details(&self) -> (String, String) {
+        self.update
+            .as_ref()
+            .map(|update| (update.version.to_string(), update.notes.clone()))
+            .unwrap_or_default()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn dismiss_update(&mut self, cx: &mut Context<Self>) {
+        self.update_prompt = None;
+        cx.notify();
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn review_update(&mut self, cx: &mut Context<Self>) {
+        if self.update.is_some() {
+            self.update_prompt = Some(UpdatePrompt::Confirm);
+            cx.notify();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn install_update(&mut self, cx: &mut Context<Self>) {
+        let busy = self.visibility_locked();
+        if busy {
+            self.update_prompt = Some(UpdatePrompt::AfterRecording);
+            cx.notify();
+            return;
+        }
+        if !self
+            .update_prompt
+            .is_some_and(|prompt| prompt.may_install(busy))
+        {
+            return;
+        }
+        if let Some(update) = self.update.as_mut() {
+            match update.install() {
+                Ok(()) => cx.quit(),
+                Err(err) => {
+                    self.error = Some(format!("Could not install the update: {err}"));
+                    cx.notify();
+                }
+            }
+        }
+    }
+
     pub(crate) fn open_languages(&mut self, cx: &mut Context<Self>) {
         self.stop_recording();
         self.settings_page = SettingsPage::Language;
@@ -1060,6 +1223,8 @@ impl Whisp {
             return;
         }
         self.input_device = name.to_string();
+        self.error = None;
+        self.recovery = None;
         self.persist();
         self.show_main_page();
         cx.notify();
@@ -1211,6 +1376,8 @@ impl Whisp {
             self.set_visible(false, window, cx);
         }
         self.error = None;
+        self.recovery = None;
+        self.failed_audio = None;
         self.snap_chrome();
         cx.notify();
     }
@@ -1250,11 +1417,29 @@ impl Whisp {
     }
 
     fn transcribe(&mut self, samples: Vec<f32>, rate: u32, cx: &mut Context<Self>) {
+        self.transcribe_audio(Arc::new(samples), rate, None, false, cx);
+    }
+
+    fn transcribe_audio(
+        &mut self,
+        samples: Arc<Vec<f32>>,
+        rate: u32,
+        local_override: Option<&'static ModelSpec>,
+        retry: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.expire_trial_if_needed(cx) {
+            return;
+        }
         self.transcription_id = self.transcription_id.wrapping_add(1);
         let transcription_id = self.transcription_id;
-        let provider = Provider::from_id(&self.selected);
+        let provider = local_override
+            .is_none()
+            .then(|| Provider::from_id(&self.selected))
+            .flatten();
+        self.transcribing_provider = provider;
         let local = provider.is_none().then(|| {
-            let spec = self.selected_spec();
+            let spec = local_override.unwrap_or_else(|| self.selected_spec());
             (spec.id.to_string(), models::model_path(spec))
         });
         let language = settings::whisper_language(&self.language).map(str::to_string);
@@ -1262,31 +1447,41 @@ impl Whisp {
         let copy = self.copy_notes;
         #[cfg(target_os = "macos")]
         let target = self.dictation_target.take();
+        let task_samples = Arc::clone(&samples);
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let outcome = cx
                 .background_executor()
                 .spawn(async move {
                     if let Some(provider) = provider {
-                        cloud::transcribe(provider, &samples, rate, language.as_deref(), clean)
+                        cloud::transcribe(provider, &task_samples, rate, language.as_deref(), clean)
+                            .map_err(|err| (err.message().to_string(), Some(err)))
                     } else {
                         let (model_id, path) = local.expect("local model was selected");
                         stt::transcribe(
                             &model_id,
                             &path,
-                            &samples,
+                            &task_samples,
                             rate,
                             language.as_deref(),
                             clean,
                         )
+                        .map_err(|err| (err, None))
                     }
                 })
                 .await;
             this.update(cx, |view, cx| {
-                if view.transcription_id != transcription_id || !view.license_access.allowed() {
+                if view.transcription_id != transcription_id {
                     return;
                 }
+                if !view.license_access.allowed() {
+                    view.expire_trial_if_needed(cx);
+                    return;
+                }
+                view.transcribing_provider = None;
                 match outcome {
                     Ok(text) => {
+                        view.failed_audio = None;
+                        view.recovery = None;
                         #[cfg(target_os = "macos")]
                         let insert_error = target.and_then(|target| target.insert(&text).err());
                         if copy {
@@ -1306,8 +1501,29 @@ impl Whisp {
                             view.error = None;
                         }
                     }
-                    Err(err) => {
+                    Err((err, cloud_error)) => {
                         view.phase = Phase::Idle;
+                        view.recovery = Some(match cloud_error {
+                            Some(cloud::TranscriptionError::Offline(_)) => Recovery::CloudOffline,
+                            Some(cloud::TranscriptionError::Unauthorized(_)) => {
+                                Recovery::CloudKey(provider.expect("cloud request"))
+                            }
+                            Some(cloud::TranscriptionError::RateLimited(_)) => {
+                                Recovery::CloudRateLimited
+                            }
+                            Some(cloud::TranscriptionError::NoSpeech(_)) => Recovery::NoSpeech,
+                            Some(cloud::TranscriptionError::Other(_)) => Recovery::CloudOther,
+                            None if err == "No speech came through."
+                                || err == "That clip was too short to transcribe." =>
+                            {
+                                Recovery::NoSpeech
+                            }
+                            None if retry && local_override.is_some() => Recovery::LocalFallback,
+                            None => Recovery::Model,
+                        });
+                        view.failed_audio = ((provider.is_some() || retry)
+                            && !matches!(view.recovery, Some(Recovery::NoSpeech)))
+                        .then_some((samples, rate));
                         view.error = Some(err);
                     }
                 }
@@ -1316,6 +1532,46 @@ impl Whisp {
             .ok();
         })
         .detach();
+    }
+
+    pub(crate) fn dismiss_notice(&mut self, cx: &mut Context<Self>) {
+        self.error = None;
+        self.recovery = None;
+        self.snap_chrome();
+        cx.notify();
+    }
+
+    pub(crate) fn failed_audio_available(&self) -> bool {
+        self.failed_audio.is_some()
+    }
+
+    pub(crate) fn retry_audio(&mut self, local: bool, cx: &mut Context<Self>) {
+        if !self.require_license(cx) || !matches!(self.phase, Phase::Idle) {
+            return;
+        }
+        let Some((samples, rate)) = self.failed_audio.take() else {
+            return;
+        };
+        let local_override = if local {
+            let Some(spec) = self
+                .models
+                .iter()
+                .find(|model| model.ready && model.spec.id.starts_with("turbo"))
+                .map(|model| model.spec)
+            else {
+                self.failed_audio = Some((samples, rate));
+                return;
+            };
+            Some(spec)
+        } else {
+            None
+        };
+        self.error = None;
+        self.recovery = None;
+        self.phase = Phase::Transcribing;
+        self.transcribe_audio(samples, rate, local_override, true, cx);
+        self.snap_chrome();
+        cx.notify();
     }
 
     fn close_settings(&mut self) {
@@ -1428,12 +1684,24 @@ impl Whisp {
                 let failed = match outcome {
                     Ok(Some(update)) => {
                         view.update = Some(update);
+                        view.update_prompt = Some(UpdatePrompt::Ready);
+                        if view.recovery == Some(Recovery::UpdateCheck) {
+                            view.error = None;
+                            view.recovery = None;
+                        }
                         false
                     }
-                    Ok(None) => false,
+                    Ok(None) => {
+                        if view.recovery == Some(Recovery::UpdateCheck) {
+                            view.error = None;
+                            view.recovery = None;
+                        }
+                        false
+                    }
                     Err(err) => {
                         eprintln!("Whisple update check failed: {err}");
                         view.error = Some(format!("Update check failed: {err}"));
+                        view.recovery = Some(Recovery::UpdateCheck);
                         true
                     }
                 };
@@ -1455,23 +1723,22 @@ impl Whisp {
     }
 
     #[cfg(target_os = "macos")]
-    fn install_or_check_for_updates(&mut self, cx: &mut Context<Self>) {
+    fn show_or_check_for_updates(&mut self, cx: &mut Context<Self>) {
         if self.update.is_none() {
             self.check_for_updates(cx);
             return;
         }
-        if self.visibility_locked() {
-            self.error = Some("Finish recording before installing the update.".into());
-            cx.notify();
-            return;
+        let busy = self.visibility_locked();
+        self.update_prompt = Some(if busy {
+            UpdatePrompt::AfterRecording
+        } else {
+            UpdatePrompt::Confirm
+        });
+        if busy {
+            self.error =
+                Some("Update ready. Confirm installation after recording finishes.".into());
         }
-        match self.update.as_mut().unwrap().install() {
-            Ok(()) => cx.quit(),
-            Err(err) => {
-                self.error = Some(format!("Could not install the update: {err}"));
-                cx.notify();
-            }
-        }
+        cx.notify();
     }
 
     fn refresh_models(&mut self) {

@@ -48,6 +48,8 @@ pub fn dock(width: f32, height: f32, screen_x: f32, screen_y: f32, screen_w: f32
 }
 
 pub fn set_mapped(mapped: bool) {
+    #[cfg(target_os = "macos")]
+    macos::set_mapped(mapped);
     #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     let _ = mapped;
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -220,34 +222,27 @@ mod macos {
     /// animation, which eases the frame and leaves the panel clipped.
     const ANIMATION_NONE: isize = 2;
 
-    pub fn anchor(width: f32, height: f32) {
+    pub fn set_mapped(mapped: bool) {
         unsafe {
-            let app = NSApplication::sharedApplication(nil);
-            let windows: id = msg_send![app, windows];
-            let count: usize = msg_send![windows, count];
-            if count == 0 {
-                return;
-            }
-            // The menu bar and GPUI's helpers also own native windows. Only
-            // the voice panel has a Metal-backed content view; never resize
-            // whichever window happens to come first in AppKit's list.
-            let mut window: id = nil;
-            let mut view: id = nil;
-            for index in 0..count {
-                let candidate: id = msg_send![windows, objectAtIndex: index];
-                let visible: bool = msg_send![candidate, isVisible];
-                if visible {
-                    let content = metal_view(candidate);
-                    if !content.is_null() {
-                        window = candidate;
-                        view = content;
-                        break;
-                    }
-                }
-            }
+            let window = hud_window();
             if window.is_null() {
                 return;
             }
+            if mapped {
+                let _: () = msg_send![window, orderFront: nil];
+            } else {
+                let _: () = msg_send![window, orderOut: nil];
+            }
+        }
+    }
+
+    pub fn anchor(width: f32, height: f32) {
+        unsafe {
+            let window = hud_window();
+            if window.is_null() || window.isVisible() == NO {
+                return;
+            }
+            let view = metal_view(window);
             // GPUI creates a titled window even without a titlebar, with a
             // faint background to support AppKit's shadow. That native frame
             // outlines the empty space while our HUD closes inside it. Whisp
@@ -303,6 +298,20 @@ mod macos {
         }
     }
 
+    unsafe fn hud_window() -> id {
+        let app = NSApplication::sharedApplication(nil);
+        let windows: id = msg_send![app, windows];
+        let count: usize = msg_send![windows, count];
+        for index in 0..count {
+            let window: id = msg_send![windows, objectAtIndex: index];
+            let view = metal_view(window);
+            if !view.is_null() && is_hud_width(NSView::frame(window.contentView()).size.width) {
+                return window;
+            }
+        }
+        nil
+    }
+
     unsafe fn metal_view(window: id) -> id {
         let views: id = msg_send![window.contentView(), subviews];
         let count: usize = msg_send![views, count];
@@ -338,6 +347,21 @@ mod macos {
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 0.5
+    }
+
+    fn is_hud_width(width: f64) -> bool {
+        close(width, f64::from(crate::app::WINDOW_WIDTH))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::is_hud_width;
+
+        #[test]
+        fn settings_window_is_not_mistaken_for_voice_bar() {
+            assert!(is_hud_width(f64::from(crate::app::WINDOW_WIDTH)));
+            assert!(!is_hud_width(880.0));
+        }
     }
 }
 
