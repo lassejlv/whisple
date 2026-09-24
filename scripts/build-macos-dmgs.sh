@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build Apple silicon and Intel DMGs in target/dist/ (or one with --arch).
 # Requires Rust, Xcode command-line tools, and dmgbuild 1.6.7.
-# Bundles use ad hoc signing by default; the current workflow does not notarize.
+# Bundles use ad hoc signing by default. Set WHISPLE_CODESIGN_IDENTITY for
+# Developer ID signing; notarize and staple the finished DMG before upload.
 set -euo pipefail
 
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -90,6 +91,10 @@ for target_triple in aarch64-apple-darwin x86_64-apple-darwin; do
         -D "background=$background_tiff" \
         "Whisple" "$dmg"
     hdiutil verify -quiet "$dmg"
+    if [[ "${WHISPLE_CODESIGN_IDENTITY:--}" != "-" ]]; then
+        codesign --sign "$WHISPLE_CODESIGN_IDENTITY" --timestamp "$dmg"
+        codesign --verify --strict "$dmg"
+    fi
     zip="$dist_dir/Whisple-$version-macos-$arch.zip"
     rm -f "$zip"
     ditto -c -k --sequesterRsrc --keepParent "$app_bundle" "$zip"

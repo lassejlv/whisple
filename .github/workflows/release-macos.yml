@@ -32,6 +32,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      WHISPLE_APPLE_TEAM_ID: V62Z6SMR4K
     steps:
       - name: Check out release tag
         uses: actions/checkout@v4
@@ -70,11 +71,90 @@ jobs:
       - name: Run Rust tests
         run: cargo test --locked
 
+      - name: Import Developer ID certificate and prepare notarization
+        shell: bash
+        env:
+          CERTIFICATE_P12_BASE64: ${{ secrets.WHISPLE_DEVELOPER_ID_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.WHISPLE_DEVELOPER_ID_PASSWORD }}
+          NOTARY_KEY_P8_BASE64: ${{ secrets.WHISPLE_NOTARY_KEY_P8_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.WHISPLE_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.WHISPLE_NOTARY_ISSUER_ID }}
+          NOTARY_APPLE_ID: ${{ secrets.WHISPLE_NOTARY_APPLE_ID }}
+          NOTARY_APP_PASSWORD: ${{ secrets.WHISPLE_NOTARY_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in CERTIFICATE_P12_BASE64 CERTIFICATE_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              echo "Missing release secret: $name" >&2
+              exit 1
+            fi
+          done
+          if [[ -n "$NOTARY_KEY_P8_BASE64" && -n "$NOTARY_KEY_ID" ]]; then
+            notary_method=api-key
+          elif [[ -n "$NOTARY_APPLE_ID" && -n "$NOTARY_APP_PASSWORD" ]]; then
+            notary_method=apple-id
+          else
+            echo "Set a notarization API key or Apple ID and app-specific password." >&2
+            exit 1
+          fi
+          keychain="$RUNNER_TEMP/whisple-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+          certificate="$RUNNER_TEMP/whisple-developer-id.p12"
+          printf '%s' "$CERTIFICATE_P12_BASE64" | base64 -D > "$certificate"
+          chmod 600 "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain"
+          identity="$(security find-identity -v -p codesigning "$keychain" | \
+            awk -v team="$WHISPLE_APPLE_TEAM_ID" \
+              'index($0, "Developer ID Application:") && index($0, "(" team ")") { print $2 }')"
+          if [[ ! "$identity" =~ ^[0-9A-Fa-f]{40}$ ]]; then
+            echo "Expected exactly one Developer ID Application identity for team $WHISPLE_APPLE_TEAM_ID." >&2
+            exit 1
+          fi
+          echo "WHISPLE_CODESIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+          if [[ "$notary_method" == api-key ]]; then
+            notary_key="$RUNNER_TEMP/whisple-notary.p8"
+            printf '%s' "$NOTARY_KEY_P8_BASE64" | base64 -D > "$notary_key"
+            chmod 600 "$notary_key"
+          fi
+
       - name: Build app
         run: ./scripts/package-macos.sh
 
+      - name: Notarize and staple app
+        env:
+          WHISPLE_NOTARY_KEY_PATH: ${{ runner.temp }}/whisple-notary.p8
+          WHISPLE_NOTARY_KEY_ID: ${{ secrets.WHISPLE_NOTARY_KEY_ID }}
+          WHISPLE_NOTARY_ISSUER_ID: ${{ secrets.WHISPLE_NOTARY_ISSUER_ID }}
+          WHISPLE_NOTARY_APPLE_ID: ${{ secrets.WHISPLE_NOTARY_APPLE_ID }}
+          WHISPLE_NOTARY_APP_PASSWORD: ${{ secrets.WHISPLE_NOTARY_APP_PASSWORD }}
+        run: ./scripts/notarize-macos.sh app target/Whisple.app
+
       - name: Build DMG and updater archive
         run: ./scripts/build-macos-dmgs.sh --arch "${{ matrix.arch }}" --use-packaged-app
+
+      - name: Notarize and staple DMG
+        shell: bash
+        env:
+          WHISPLE_NOTARY_KEY_PATH: ${{ runner.temp }}/whisple-notary.p8
+          WHISPLE_NOTARY_KEY_ID: ${{ secrets.WHISPLE_NOTARY_KEY_ID }}
+          WHISPLE_NOTARY_ISSUER_ID: ${{ secrets.WHISPLE_NOTARY_ISSUER_ID }}
+          WHISPLE_NOTARY_APPLE_ID: ${{ secrets.WHISPLE_NOTARY_APPLE_ID }}
+          WHISPLE_NOTARY_APP_PASSWORD: ${{ secrets.WHISPLE_NOTARY_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+          prefix="Whisple-$version-macos-${{ matrix.arch }}"
+          ./scripts/notarize-macos.sh dmg "target/dist/$prefix.dmg"
+          (
+            cd target/dist
+            shasum -a 256 "$prefix.dmg" "$prefix.zip" > "$prefix.sha256"
+            shasum -a 256 -c "$prefix.sha256"
+          )
 
       - name: Attach assets to release
         shell: bash
