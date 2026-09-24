@@ -63,6 +63,8 @@ mod macos {
             .with_menu(Box::new(menu))
             .build()
             .map_err(|err| err.to_string())?;
+        icon.set_visible(crate::settings::load().show_in_menu_bar)
+            .map_err(|err| err.to_string())?;
         // GPUI sets Regular before running the launch callback. Change it
         // only after the status item exists, so Whisple is always reachable.
         unsafe {
@@ -96,6 +98,15 @@ mod macos {
         if let Some(menu) = cx.try_global::<MenuBar>() {
             menu.hide.set_enabled(visible);
         }
+    }
+
+    pub fn set_icon_visible(visible: bool, cx: &App) -> Result<(), String> {
+        if let Some(menu) = cx.try_global::<MenuBar>() {
+            menu._icon
+                .set_visible(visible)
+                .map_err(|err| err.to_string())?;
+        }
+        Ok(())
     }
 
     pub fn set_update(status: UpdateStatus<'_>, cx: &App) {
@@ -151,7 +162,7 @@ mod macos {
 pub fn install(cx: &mut App) -> bool {
     #[cfg(target_os = "macos")]
     match macos::install(cx) {
-        Ok(()) => return true,
+        Ok(()) => return crate::settings::load().show_in_menu_bar,
         Err(err) => eprintln!("could not create the menu bar icon: {err}"),
     }
     let _ = cx;
@@ -170,6 +181,15 @@ pub fn set_visible(visible: bool, cx: &App) {
     macos::set_visible(visible, cx);
     #[cfg(not(target_os = "macos"))]
     let _ = (visible, cx);
+}
+
+pub fn set_icon_visible(visible: bool, cx: &App) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    return macos::set_icon_visible(visible, cx);
+    #[cfg(not(target_os = "macos"))]
+    let _ = (visible, cx);
+    #[cfg(not(target_os = "macos"))]
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]

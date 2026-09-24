@@ -11,7 +11,10 @@ use gpui_kit::{
 
 use crate::audio::{self, Mic};
 use crate::cloud::{self, Provider};
+#[cfg(target_os = "macos")]
+use crate::dictation;
 use crate::hotkey;
+use crate::license::{self, Access};
 use crate::models::{self, ModelSpec};
 use crate::motion::{Ease, Spring};
 use crate::place;
@@ -97,11 +100,20 @@ pub(crate) struct Whisp {
     pub reveal: Option<Reveal>,
     pub picker_opened_at: Option<Instant>,
     pub settings_open: bool,
+    settings_window: Option<crate::settings_window::SettingsHandle>,
+    pub license_access: Access,
+    license_checking: bool,
+    license_generation: u64,
+    license_initial_check_done: bool,
+    last_license_check: Instant,
+    transcription_id: u64,
     pub settings_page: SettingsPage,
     pub settings_opened_at: Option<Instant>,
     pub language: String,
     pub show_hotkey: String,
     pub copy_notes: bool,
+    #[cfg(target_os = "macos")]
+    dictation_target: Option<dictation::Target>,
     pub clean_fillers: bool,
     pub input_device: String,
     pub open_on_startup: bool,
@@ -217,11 +229,20 @@ impl Whisp {
             reveal: None,
             picker_opened_at: None,
             settings_open: false,
+            settings_window: None,
+            license_access: Access::Checking,
+            license_checking: false,
+            license_generation: 0,
+            license_initial_check_done: false,
+            last_license_check: Instant::now(),
+            transcription_id: 0,
             settings_page: SettingsPage::Main,
             settings_opened_at: None,
             language: prefs.language,
             show_hotkey: prefs.show_hotkey,
             copy_notes: prefs.copy_notes,
+            #[cfg(target_os = "macos")]
+            dictation_target: None,
             clean_fillers: prefs.clean_fillers,
             input_device: prefs.input_device,
             open_on_startup: prefs.open_on_startup,
@@ -251,6 +272,7 @@ impl Whisp {
         };
         // A hidden window need not render, so start listening at creation.
         view.listen_for_commands(window.window_handle(), cx);
+        view.refresh_license(cx);
         #[cfg(target_os = "macos")]
         view.check_for_updates(cx);
         view
@@ -452,10 +474,7 @@ impl Whisp {
                                 tray::Command::Show => view.set_visible(true, window, cx),
                                 tray::Command::Hide => view.set_visible(false, window, cx),
                                 tray::Command::Settings => {
-                                    if !view.settings_open {
-                                        view.toggle_settings(cx);
-                                    }
-                                    view.set_visible(true, window, cx);
+                                    view.open_settings_window(cx);
                                 }
                                 #[cfg(target_os = "macos")]
                                 tray::Command::Update => view.install_or_check_for_updates(cx),
@@ -467,6 +486,9 @@ impl Whisp {
                         #[cfg(target_os = "macos")]
                         if view.last_update_check.elapsed() >= Duration::from_secs(6 * 60 * 60) {
                             view.check_for_updates(cx);
+                        }
+                        if view.last_license_check.elapsed() >= Duration::from_secs(6 * 60 * 60) {
+                            view.refresh_license(cx);
                         }
                         if view.bar_visible {
                             // Re-anchor the native size already chosen by tick;
@@ -501,6 +523,8 @@ impl Whisp {
         if !visible && self.visibility_locked() {
             return;
         }
+        #[cfg(target_os = "macos")]
+        let was_visible = self.bar_visible;
         self.bar_visible = visible;
         if !visible {
             self.pending_uninstall = None;
@@ -512,6 +536,11 @@ impl Whisp {
         tray::set_visible(visible, cx);
         place::set_mapped(visible);
         if visible {
+            // Capture the editor before the HUD takes keyboard focus.
+            #[cfg(target_os = "macos")]
+            if !was_visible {
+                self.dictation_target = dictation::Target::focused();
+            }
             window.activate_window();
             cx.activate(true);
             window.focus(&self.focus_handle, cx);
@@ -552,6 +581,9 @@ impl Whisp {
         if self.recording_hotkey || self.actions_suppressed() {
             return;
         }
+        if matches!(self.phase, Phase::Idle | Phase::Result(_)) && !self.require_license(cx) {
+            return;
+        }
         self.error = None;
         self.copied = false;
         self.close_settings();
@@ -583,6 +615,11 @@ impl Whisp {
             Phase::Transcribing => {}
             Phase::Idle | Phase::Result(_) => match Mic::start(&self.input_device) {
                 Ok(mic) => {
+                    #[cfg(target_os = "macos")]
+                    if self.dictation_target.is_none() {
+                        dictation::request_access();
+                        self.dictation_target = dictation::Target::focused();
+                    }
                     self.levels.clear();
                     self.rest_bars();
                     self.phase = Phase::Listening(mic);
@@ -603,6 +640,9 @@ impl Whisp {
     }
 
     pub(crate) fn transcribe_sample(&mut self, cx: &mut Context<Self>) {
+        if !self.require_license(cx) {
+            return;
+        }
         self.error = None;
         self.copied = false;
         if !self.selected_ready() {
@@ -840,6 +880,142 @@ impl Whisp {
         cx.notify();
     }
 
+    pub(crate) fn open_settings_window(&mut self, cx: &mut Context<Self>) {
+        self.open_settings_window_at(false, cx);
+    }
+
+    fn open_settings_window_at(&mut self, license_page: bool, cx: &mut Context<Self>) {
+        self.stop_recording();
+        self.settings_open = false;
+        self.settings_opened_at = None;
+        self.settings_page = SettingsPage::Main;
+        self.snap_chrome();
+        let hud = cx.entity();
+        let existing = self.settings_window.clone();
+        cx.defer(move |cx| {
+            let handle = crate::settings_window::open(cx, hud.clone(), existing, license_page);
+            hud.update(cx, |view, cx| {
+                view.settings_window = Some(handle);
+                cx.notify();
+            });
+        });
+        cx.notify();
+    }
+
+    fn require_license(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.license_access.allowed() {
+            return true;
+        }
+        self.error = Some(match &self.license_access {
+            Access::Checking => "Checking your license. Try again in a moment.".into(),
+            Access::Blocked { reason, .. } | Access::Unavailable { reason, .. } => reason.clone(),
+            _ => "Enter your license key to use Whisple.".into(),
+        });
+        self.open_settings_window_at(true, cx);
+        false
+    }
+
+    pub(crate) fn set_license_access(&mut self, access: Access, cx: &mut Context<Self>) {
+        let show_license = !self.license_initial_check_done && !access.allowed();
+        self.license_initial_check_done = true;
+        if !access.allowed() && matches!(self.phase, Phase::Listening(_) | Phase::Transcribing) {
+            self.transcription_id = self.transcription_id.wrapping_add(1);
+            self.phase = Phase::Idle;
+            self.listen_started = None;
+            self.levels.clear();
+            self.rest_bars();
+            #[cfg(target_os = "macos")]
+            {
+                self.dictation_target = None;
+            }
+            self.snap_chrome();
+        }
+        let previous_license_error = match &self.license_access {
+            Access::Blocked { reason, .. } | Access::Unavailable { reason, .. } => {
+                self.error.as_deref() == Some(reason.as_str())
+            }
+            _ => matches!(
+                self.error.as_deref(),
+                Some("Checking your license. Try again in a moment.")
+                    | Some("Enter your license key to use Whisple.")
+            ),
+        };
+        match &access {
+            Access::Blocked { reason, .. } | Access::Unavailable { reason, .. } => {
+                self.error = Some(reason.clone());
+            }
+            _ if previous_license_error => self.error = None,
+            _ => {}
+        }
+        self.license_access = access;
+        self.license_checking = false;
+        self.license_generation = self.license_generation.wrapping_add(1);
+        self.last_license_check = Instant::now();
+        cx.notify();
+        if show_license {
+            self.open_settings_window_at(true, cx);
+        }
+    }
+
+    pub(crate) fn refresh_license(&mut self, cx: &mut Context<Self>) {
+        if self.license_checking {
+            return;
+        }
+        self.license_checking = true;
+        self.last_license_check = Instant::now();
+        let generation = self.license_generation;
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let access = cx
+                .background_executor()
+                .spawn(async { license::check_saved() })
+                .await;
+            this.update(cx, |view, cx| {
+                if view.license_generation == generation {
+                    view.set_license_access(access, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn persist_settings(&self) {
+        self.persist();
+    }
+
+    pub(crate) fn remove_cloud_key_from_settings(
+        &mut self,
+        provider: Provider,
+        cx: &mut Context<Self>,
+    ) {
+        self.cloud_keys[provider.index()] = false;
+        if self.selected == provider.id() {
+            self.selected = models::recommended_id().to_string();
+            self.persist();
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn check_updates_from_settings(&mut self, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        self.check_for_updates(cx);
+        #[cfg(not(target_os = "macos"))]
+        let _ = cx;
+    }
+
+    pub(crate) fn update_summary(&self) -> String {
+        #[cfg(target_os = "macos")]
+        {
+            if self.update_checking {
+                return "Checking for updates…".into();
+            }
+            if let Some(update) = &self.update {
+                return format!("Whisple v{} is ready to install", update.version);
+            }
+        }
+        format!("Version {}", env!("CARGO_PKG_VERSION"))
+    }
+
     pub(crate) fn open_languages(&mut self, cx: &mut Context<Self>) {
         self.stop_recording();
         self.settings_page = SettingsPage::Language;
@@ -1074,6 +1250,8 @@ impl Whisp {
     }
 
     fn transcribe(&mut self, samples: Vec<f32>, rate: u32, cx: &mut Context<Self>) {
+        self.transcription_id = self.transcription_id.wrapping_add(1);
+        let transcription_id = self.transcription_id;
         let provider = Provider::from_id(&self.selected);
         let local = provider.is_none().then(|| {
             let spec = self.selected_spec();
@@ -1082,6 +1260,8 @@ impl Whisp {
         let language = settings::whisper_language(&self.language).map(str::to_string);
         let clean = self.clean_fillers;
         let copy = self.copy_notes;
+        #[cfg(target_os = "macos")]
+        let target = self.dictation_target.take();
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let outcome = cx
                 .background_executor()
@@ -1102,8 +1282,13 @@ impl Whisp {
                 })
                 .await;
             this.update(cx, |view, cx| {
+                if view.transcription_id != transcription_id || !view.license_access.allowed() {
+                    return;
+                }
                 match outcome {
                     Ok(text) => {
+                        #[cfg(target_os = "macos")]
+                        let insert_error = target.and_then(|target| target.insert(&text).err());
                         if copy {
                             cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
                             view.copied = true;
@@ -1112,7 +1297,14 @@ impl Whisp {
                         }
                         view.last_text.clone_from(&text);
                         view.phase = Phase::Result(text);
-                        view.error = None;
+                        #[cfg(target_os = "macos")]
+                        {
+                            view.error = insert_error;
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            view.error = None;
+                        }
                     }
                     Err(err) => {
                         view.phase = Phase::Idle;
@@ -1140,6 +1332,14 @@ impl Whisp {
         }
     }
 
+    pub(crate) fn cancel_hotkey_capture(&mut self, cx: &mut Context<Self>) {
+        if self.recording_hotkey {
+            self.stop_recording();
+            self.error = None;
+            cx.notify();
+        }
+    }
+
     fn actions_suppressed(&self) -> bool {
         self.suppress_actions_until
             .is_some_and(|until| Instant::now() < until)
@@ -1155,6 +1355,7 @@ impl Whisp {
             clean_fillers: self.clean_fillers,
             input_device: self.input_device.clone(),
             open_on_startup: self.open_on_startup,
+            show_in_menu_bar: settings::load().show_in_menu_bar,
         });
     }
 

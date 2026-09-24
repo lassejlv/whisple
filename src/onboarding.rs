@@ -951,7 +951,13 @@ impl Onboarding {
                     .gap(px(12.0))
                     .child(heading("Now try it", 30.0))
                     .child(description(
-                        "Press the shortcut, say a sentence, then press Space. Your words land on the clipboard.",
+                        {
+                            #[cfg(target_os = "macos")]
+                            let instructions = "Press the shortcut, say a sentence, then press Space. Your words go into the selected text field. Clipboard copying is optional.";
+                            #[cfg(not(target_os = "macos"))]
+                            let instructions = "Press the shortcut, say a sentence, then press Space. Your words land on the clipboard.";
+                            instructions
+                        },
                         440.0,
                         15.0,
                     )),

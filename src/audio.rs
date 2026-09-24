@@ -18,6 +18,15 @@ impl Mic {
     /// `preferred` is a device name from [`input_names`]. An empty name uses the
     /// system default.
     pub fn start(preferred: &str) -> Result<Self, String> {
+        Self::open(preferred, true)
+    }
+
+    /// Measures the input level without retaining audio while Settings is open.
+    pub fn monitor(preferred: &str) -> Result<Self, String> {
+        Self::open(preferred, false)
+    }
+
+    fn open(preferred: &str, capture_samples: bool) -> Result<Self, String> {
         let host = cpal::default_host();
         let device = choose_input(&host, preferred)?;
         let supported = device
@@ -37,7 +46,16 @@ impl Mic {
                 device
                     .build_input_stream(
                         &supported.into(),
-                        move |data: &[f32], _| push(&samples, &level, data, channels, max_samples),
+                        move |data: &[f32], _| {
+                            push(
+                                &samples,
+                                &level,
+                                data,
+                                channels,
+                                max_samples,
+                                capture_samples,
+                            )
+                        },
                         err_fn,
                         None,
                     )
@@ -54,7 +72,14 @@ impl Mic {
                                 .iter()
                                 .map(|sample| *sample as f32 / i16::MAX as f32)
                                 .collect();
-                            push(&samples, &level, &converted, channels, max_samples);
+                            push(
+                                &samples,
+                                &level,
+                                &converted,
+                                channels,
+                                max_samples,
+                                capture_samples,
+                            );
                         },
                         err_fn,
                         None,
@@ -72,7 +97,14 @@ impl Mic {
                                 .iter()
                                 .map(|sample| (*sample as f32 / u16::MAX as f32) * 2.0 - 1.0)
                                 .collect();
-                            push(&samples, &level, &converted, channels, max_samples);
+                            push(
+                                &samples,
+                                &level,
+                                &converted,
+                                channels,
+                                max_samples,
+                                capture_samples,
+                            );
                         },
                         err_fn,
                         None,
@@ -148,12 +180,21 @@ fn choose_input(host: &cpal::Host, preferred: &str) -> Result<cpal::Device, Stri
     Err(format!("Microphone \"{preferred}\" is not connected."))
 }
 
-fn push(samples: &Mutex<Vec<f32>>, level: &AtomicU32, data: &[f32], channels: usize, max: usize) {
+fn push(
+    samples: &Mutex<Vec<f32>>,
+    level: &AtomicU32,
+    data: &[f32],
+    channels: usize,
+    max: usize,
+    capture_samples: bool,
+) {
     let mono = downmix(data, channels);
     store_level(level, &mono);
-    if let Ok(mut guard) = samples.lock() {
-        let room = max.saturating_sub(guard.len());
-        guard.extend(mono.into_iter().take(room));
+    if capture_samples {
+        if let Ok(mut guard) = samples.lock() {
+            let room = max.saturating_sub(guard.len());
+            guard.extend(mono.into_iter().take(room));
+        }
     }
 }
 
@@ -224,7 +265,18 @@ pub fn to_whisper_pcm(samples: &[f32], rate: u32) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_wav, known_input, to_whisper_pcm};
+    use super::{decode_wav, known_input, push, to_whisper_pcm};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Mutex;
+
+    #[test]
+    fn level_monitor_does_not_retain_audio() {
+        let samples = Mutex::new(Vec::new());
+        let level = AtomicU32::new(0);
+        push(&samples, &level, &[0.5, 0.5, -0.5, -0.5], 2, 100, false);
+        assert!(f32::from_bits(level.load(Ordering::Relaxed)) > 0.0);
+        assert!(samples.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn a_missing_microphone_is_rejected() {

@@ -1,13 +1,17 @@
 mod app;
 mod audio;
 mod cloud;
+#[cfg(target_os = "macos")]
+mod dictation;
 mod hotkey;
+mod license;
 mod microphone_permission;
 mod models;
 mod motion;
 mod onboarding;
 mod place;
 mod settings;
+mod settings_window;
 mod startup;
 mod stt;
 mod text;
@@ -28,7 +32,24 @@ use gpui_kit::{
 struct Assets;
 
 // Lucide icons the panels use beyond the kit's default component bundle.
-gpui_kit::assets::icon_assets!(ExtraIcons, [Clipboard, Copy, Globe, Mic, Power, Sparkles]);
+gpui_kit::assets::icon_assets!(
+    ExtraIcons,
+    [
+        Check,
+        ChevronsUpDown,
+        Clipboard,
+        Copy,
+        Cpu,
+        Globe,
+        Info,
+        KeyRound,
+        Mic,
+        Power,
+        SlidersHorizontal,
+        Sparkles,
+        X,
+    ]
+);
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> gpui_kit::Result<Option<Cow<'static, [u8]>>> {

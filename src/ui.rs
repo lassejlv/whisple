@@ -324,7 +324,7 @@ impl Whisp {
                 .justify_center(),
             "settings",
             cx,
-            |this, cx| this.toggle_settings(cx),
+            |this, cx| this.open_settings_window(cx),
         )
         .child(
             div()

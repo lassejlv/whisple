@@ -21,6 +21,7 @@ pub struct Preferences {
     /// Empty means the system default input.
     pub input_device: String,
     pub open_on_startup: bool,
+    pub show_in_menu_bar: bool,
 }
 
 pub struct Language {
@@ -157,6 +158,8 @@ struct File {
     input_device: String,
     #[serde(default)]
     open_on_startup: bool,
+    #[serde(default = "yes")]
+    show_in_menu_bar: bool,
 }
 
 fn yes() -> bool {
@@ -174,6 +177,7 @@ impl Default for Preferences {
             clean_fillers: true,
             input_device: String::new(),
             open_on_startup: false,
+            show_in_menu_bar: true,
         }
     }
 }
@@ -245,6 +249,7 @@ pub fn decode(raw: &str) -> Preferences {
     prefs.clean_fillers = file.clean_fillers;
     prefs.input_device = clean_device(&file.input_device);
     prefs.open_on_startup = file.open_on_startup;
+    prefs.show_in_menu_bar = file.show_in_menu_bar;
     prefs
 }
 
@@ -278,6 +283,7 @@ impl From<&Preferences> for File {
             clean_fillers: prefs.clean_fillers,
             input_device: prefs.input_device.clone(),
             open_on_startup: prefs.open_on_startup,
+            show_in_menu_bar: prefs.show_in_menu_bar,
         }
     }
 }

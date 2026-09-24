@@ -8287,9 +8287,10 @@ dependencies = [
 
 [[package]]
 name = "whisple"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "block",
+ "chrono",
  "cocoa 0.26.0",
  "cpal",
  "dirs 6.0.0",

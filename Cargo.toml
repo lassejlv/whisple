@@ -1,12 +1,13 @@
 [package]
 name = "whisple"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Local-first voice dictation"
 license = "MIT"
 publish = false
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 cpal = "0.15"
 dirs = "6"
 gpui-kit = { version = "0.6", default-features = false, features = ["component", "assets"] }
