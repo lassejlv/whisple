@@ -46,6 +46,14 @@ jobs:
           test "$RELEASE_TAG" = "v$version"
           gh release view "$RELEASE_TAG" --json tagName --jq '.tagName' >/dev/null
 
+      - name: Set up Python for DMG layout
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install DMG layout tool
+        run: python -m pip install dmgbuild==1.6.7
+
       - name: Prepare macOS build tools
         shell: bash
         run: |
@@ -58,7 +66,6 @@ jobs:
               > "$RUNNER_TEMP/ggml-arm64.cmake"
             echo "CMAKE_TOOLCHAIN_FILE=$RUNNER_TEMP/ggml-arm64.cmake" >> "$GITHUB_ENV"
           fi
-          if ! command -v rsvg-convert >/dev/null; then brew install librsvg; fi
 
       - name: Run Rust tests
         run: cargo test --locked

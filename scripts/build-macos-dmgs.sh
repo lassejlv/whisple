@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build Apple silicon and Intel DMGs in target/dist/ (or one with --arch).
-# Requires Rust, Xcode command-line tools, and rsvg-convert (librsvg).
+# Requires Rust, Xcode command-line tools, and dmgbuild 1.6.7.
 # Bundles use ad hoc signing by default; the current workflow does not notarize.
 set -euo pipefail
 
@@ -38,6 +38,8 @@ command -v hdiutil >/dev/null || { echo "hdiutil is required." >&2; exit 1; }
 command -v ditto >/dev/null || { echo "ditto is required." >&2; exit 1; }
 command -v lipo >/dev/null || { echo "lipo is required." >&2; exit 1; }
 command -v rustup >/dev/null || { echo "rustup is required." >&2; exit 1; }
+command -v tiffutil >/dev/null || { echo "tiffutil is required." >&2; exit 1; }
+command -v dmgbuild >/dev/null || { echo "dmgbuild 1.6.7 is required (python3 -m pip install dmgbuild==1.6.7)." >&2; exit 1; }
 
 if [[ "$selected_arch" == "both" ]]; then
     rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -51,12 +53,11 @@ version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
 host_triple="$(rustc -vV | awk '/^host: / { print $2 }')"
 dist_dir="$project_dir/target/dist"
 mkdir -p "$dist_dir"
-stage=""
-cleanup() {
-    if [[ -n "$stage" ]]; then rm -rf "$stage"; fi
-}
-trap cleanup EXIT
-
+background_tiff="$project_dir/target/whisple-dmg-background.tiff"
+tiffutil -cathidpicheck \
+    "$project_dir/assets/whisple-dmg-background.png" \
+    "$project_dir/assets/whisple-dmg-background@2x.png" \
+    -out "$background_tiff" >/dev/null
 for target_triple in aarch64-apple-darwin x86_64-apple-darwin; do
     case "$target_triple" in
         aarch64-apple-darwin) arch="arm64" ;;
@@ -82,12 +83,12 @@ for target_triple in aarch64-apple-darwin x86_64-apple-darwin; do
         exit 1
     fi
 
-    stage="$(mktemp -d "$project_dir/target/.whisple-dmg.XXXXXX")"
-    ditto "$app_bundle" "$stage/Whisple.app"
-    ln -s /Applications "$stage/Applications"
-
     dmg="$dist_dir/Whisple-$version-macos-$arch.dmg"
-    hdiutil create -quiet -ov -volname "Whisple" -srcfolder "$stage" -fs HFS+ -format UDZO "$dmg"
+    rm -f "$dmg"
+    dmgbuild -s "$project_dir/scripts/dmg-settings.py" \
+        -D "application=$app_bundle" \
+        -D "background=$background_tiff" \
+        "Whisple" "$dmg"
     hdiutil verify -quiet "$dmg"
     zip="$dist_dir/Whisple-$version-macos-$arch.zip"
     rm -f "$zip"
@@ -96,8 +97,6 @@ for target_triple in aarch64-apple-darwin x86_64-apple-darwin; do
         cd "$dist_dir"
         shasum -a 256 "$(basename "$dmg")" "$(basename "$zip")"
     ) > "$dist_dir/Whisple-$version-macos-$arch.sha256"
-    rm -rf "$stage"
-    stage=""
     echo "$dmg"
     echo "$zip"
 done

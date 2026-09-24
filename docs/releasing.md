@@ -13,4 +13,12 @@ To rebuild an existing release, run the workflow manually with its tag. The uplo
 
 The current workflow uses ad hoc code signing and does not notarize the app or DMG. It needs no Apple credentials. macOS may require users to explicitly allow the downloaded app to open. To distribute with normal Gatekeeper trust later, add Developer ID signing and Apple notarization to the workflow. The updater checks the public release asset digest, bundle signature, app identity, and architecture before installing.
 
-For local test images, run `./scripts/build-macos-dmgs.sh`.
+The app icon and Finder DMG layout come from the [Release page in Paper](https://app.paper.design/file/01M391FYN8XXTW9JHFATBK4Q06/p-8-0). The DMG background includes light patches behind the item names because Finder renders those names in black over custom backgrounds. The builder combines the 1× and 2× artwork into one Retina-aware TIFF.
+
+For local test images:
+
+```sh
+python3 -m venv target/release-tools
+target/release-tools/bin/python -m pip install dmgbuild==1.6.7
+PATH="$PWD/target/release-tools/bin:$PATH" ./scripts/build-macos-dmgs.sh
+```

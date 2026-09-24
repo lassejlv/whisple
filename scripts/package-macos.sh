@@ -39,8 +39,8 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
     echo "macOS is required to package Whisple." >&2
     exit 1
 fi
-command -v rsvg-convert >/dev/null || { echo "rsvg-convert is required." >&2; exit 1; }
 command -v iconutil >/dev/null || { echo "iconutil is required." >&2; exit 1; }
+command -v sips >/dev/null || { echo "sips is required." >&2; exit 1; }
 
 cd "$project_dir"
 build_args=(build)
@@ -67,9 +67,9 @@ mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources" "$iconset"
 cp "$binary" "$bundle/Contents/MacOS/whisple"
 
 for size in 16 32 128 256 512; do
-    rsvg-convert -w "$size" -h "$size" assets/whisple-icon.svg -o "$iconset/icon_${size}x${size}.png"
+    sips -z "$size" "$size" assets/whisple-icon.png --out "$iconset/icon_${size}x${size}.png" >/dev/null
     double_size=$((size * 2))
-    rsvg-convert -w "$double_size" -h "$double_size" assets/whisple-icon.svg -o "$iconset/icon_${size}x${size}@2x.png"
+    sips -z "$double_size" "$double_size" assets/whisple-icon.png --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$iconset" -o "$bundle/Contents/Resources/Whisple.icns"
 rm -rf "$iconset"

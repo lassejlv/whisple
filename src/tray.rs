@@ -58,7 +58,7 @@ mod macos {
         .map_err(|err| err.to_string())?;
         let icon = TrayIconBuilder::new()
             .with_tooltip("Whisple")
-            .with_icon(waveform_icon())
+            .with_icon(waveform_icon(false))
             .with_icon_as_template(true)
             .with_menu(Box::new(menu))
             .build()
@@ -100,6 +100,7 @@ mod macos {
 
     pub fn set_update(status: UpdateStatus<'_>, cx: &App) {
         if let Some(menu) = cx.try_global::<MenuBar>() {
+            let update_ready = matches!(status, UpdateStatus::Available(_));
             let label = match status {
                 UpdateStatus::Checking => "Checking for Updates…".to_string(),
                 UpdateStatus::Available(version) => format!("Install Whisple v{version}…"),
@@ -109,12 +110,15 @@ mod macos {
             menu.update.set_text(label);
             menu.update
                 .set_enabled(!matches!(status, UpdateStatus::Checking));
+            if let Err(err) = menu._icon.set_icon(Some(waveform_icon(update_ready))) {
+                eprintln!("could not refresh the menu bar icon: {err}");
+            }
         }
     }
 
-    fn waveform_icon() -> Icon {
-        // Paper's five-bar Whisple mark, without its circular background, as
-        // an 18pt monochrome template. AppKit supplies light/dark appearance.
+    fn waveform_icon(update_ready: bool) -> Icon {
+        // Paper's five-bar Whisple mark as an 18pt monochrome template.
+        // AppKit supplies light/dark appearance, including the update dot.
         let mut rgba = vec![0; 36 * 36 * 4];
         for (bar, height) in [10.0_f32, 18.0, 24.0, 16.0, 8.0].into_iter().enumerate() {
             let center_x = 4.0 + bar as f32 * 7.0;
@@ -124,6 +128,17 @@ mod macos {
                     let dx = (x as f32 + 0.5 - center_x).abs();
                     let dy = ((y as f32 + 0.5 - 18.0).abs() - half_line).max(0.0);
                     let alpha = ((2.5 - dx.hypot(dy)).clamp(0.0, 1.0) * 255.0) as u8;
+                    let offset = (y * 36 + x) * 4 + 3;
+                    rgba[offset] = rgba[offset].max(alpha);
+                }
+            }
+        }
+        if update_ready {
+            for y in 4..12 {
+                for x in 29..36 {
+                    let distance =
+                        ((x as f32 + 0.5 - 32.5).powi(2) + (y as f32 + 0.5 - 7.5).powi(2)).sqrt();
+                    let alpha = ((3.5 - distance).clamp(0.0, 1.0) * 255.0) as u8;
                     let offset = (y * 36 + x) * 4 + 3;
                     rgba[offset] = rgba[offset].max(alpha);
                 }
