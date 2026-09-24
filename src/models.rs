@@ -27,12 +27,21 @@ const MIB: u64 = 1024 * 1024;
 
 pub const CATALOG: &[ModelSpec] = &[
     ModelSpec {
+        id: "preview",
+        name: "Quick preview",
+        chip: "Preview",
+        file_name: "ggml-tiny.en-q5_1.bin",
+        bytes: 31 * MIB,
+        blurb: "English only, lower accuracy",
+        recommended: false,
+    },
+    ModelSpec {
         id: "turbo-q5",
         name: "Turbo",
         chip: "Turbo",
         file_name: "ggml-large-v3-turbo-q5_0.bin",
         bytes: 547 * MIB,
-        blurb: "Best default. Large v3 Turbo accuracy, small enough to keep around.",
+        blurb: "Best balance of speed and accuracy",
         recommended: true,
     },
     ModelSpec {
@@ -41,7 +50,7 @@ pub const CATALOG: &[ModelSpec] = &[
         chip: "Precise",
         file_name: "ggml-large-v3-turbo-q8_0.bin",
         bytes: 834 * MIB,
-        blurb: "Same Turbo model at higher precision. Clearer names and punctuation.",
+        blurb: "Names and punctuation",
         recommended: false,
     },
     ModelSpec {
@@ -50,7 +59,7 @@ pub const CATALOG: &[ModelSpec] = &[
         chip: "Full",
         file_name: "ggml-large-v3-turbo.bin",
         bytes: 1536 * MIB,
-        blurb: "Full-precision Large v3 Turbo. The strongest model in this list.",
+        blurb: "Full precision, larger download",
         recommended: false,
     },
     ModelSpec {
@@ -59,7 +68,7 @@ pub const CATALOG: &[ModelSpec] = &[
         chip: "Small",
         file_name: "ggml-small.en-q5_1.bin",
         bytes: 181 * MIB,
-        blurb: "Best of the light English models. Comfortable on a laptop CPU.",
+        blurb: "Good accuracy on a laptop CPU",
         recommended: false,
     },
     ModelSpec {
@@ -68,16 +77,7 @@ pub const CATALOG: &[ModelSpec] = &[
         chip: "Base",
         file_name: "ggml-base.en.bin",
         bytes: 142 * MIB,
-        blurb: "A small English model for short notes, with a lighter download.",
-        recommended: false,
-    },
-    ModelSpec {
-        id: "preview",
-        name: "Quick preview",
-        chip: "Preview",
-        file_name: "ggml-tiny.en-q5_1.bin",
-        bytes: 31 * MIB,
-        blurb: "Fastest download, for trying the app. Not accurate enough for real notes.",
+        blurb: "Light, for short notes",
         recommended: false,
     },
 ];

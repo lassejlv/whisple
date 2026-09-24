@@ -3,8 +3,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use gpui_kit::component::input::InputState;
 use gpui_kit::{
-    App, ClipboardItem, Context, FocusHandle, Focusable, KeyBinding, Keystroke, WeakEntity,
+    App, ClipboardItem, Context, Entity, FocusHandle, Focusable, KeyBinding, Keystroke, Menu,
+    MenuItem, WeakEntity,
 };
 
 use crate::audio::{self, Mic};
@@ -17,17 +19,22 @@ use crate::startup;
 use crate::stt;
 
 pub(crate) const WINDOW_WIDTH: f32 = 400.0;
-pub(crate) const COLLAPSED_HEIGHT: f32 = 64.0;
-pub(crate) const PICKER_EXTRA: f32 = 360.0;
-pub(crate) const RESULT_EXTRA: f32 = 132.0;
-/// 14 top + 48 header + 8 gap + 342 list + 10 bottom + 1 separator.
-/// The list is 6 rows of 52 with 5 gaps of 6.
-pub(crate) const SETTINGS_LIST_H: f32 = 342.0;
-pub(crate) const SETTINGS_BODY_H: f32 = 398.0;
-pub(crate) const SETTINGS_EXTRA: f32 = 423.0;
+pub(crate) const WINDOW_RADIUS: f32 = 20.0;
+/// The bar row. The window adds its 1px border above and below.
+pub(crate) const BAR_HEIGHT: f32 = 56.0;
+pub(crate) const COLLAPSED_HEIGHT: f32 = BAR_HEIGHT + 2.0;
+/// Panel heights above the bar, each including its 1px hairline to the bar.
+/// With the bar they give the HUD heights measured in the design: result 175,
+/// model picker 503, settings 431, language 451.
+pub(crate) const RESULT_EXTRA: f32 = 117.0;
+pub(crate) const PICKER_EXTRA: f32 = 445.0;
+pub(crate) const SETTINGS_EXTRA: f32 = 373.0;
+pub(crate) const LANGUAGE_EXTRA: f32 = 393.0;
+pub(crate) const MICROPHONE_EXTRA: f32 = LANGUAGE_EXTRA;
 pub(crate) const ERROR_EXTRA: f32 = 22.0;
 
-const BARS: usize = 22;
+/// Waveform bars across the bar while recording, oldest on the left.
+pub(crate) const BARS: usize = 19;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Reveal {
@@ -43,7 +50,7 @@ pub(crate) enum SettingsPage {
     Microphone,
 }
 
-gpui_kit::actions!(whisp, [ToggleListen, CloseOverlay]);
+gpui_kit::actions!(whisp, [ToggleListen, CloseOverlay, CopyResult, QuitWhisp]);
 
 pub(crate) enum Phase {
     Idle,
@@ -91,6 +98,15 @@ pub(crate) struct Whisp {
     pub open_on_startup: bool,
     pub microphones: Vec<String>,
     pub recording_hotkey: bool,
+    /// When the current recording started, for the bar's timer.
+    pub listen_started: Option<Instant>,
+    /// The language page's search field, alive only while that page shows.
+    pub language_search: Option<Entity<InputState>>,
+    /// Length of the audio behind the last transcript.
+    pub recorded: Duration,
+    /// The last transcript, kept so the result panel can slide shut showing
+    /// it after a new recording has already replaced the phase.
+    pub last_text: String,
     pub page_fade: Ease,
     pub bar_visible: bool,
     suppress_actions_until: Option<Instant>,
@@ -173,6 +189,10 @@ impl Whisp {
             open_on_startup: prefs.open_on_startup,
             microphones: Vec::new(),
             recording_hotkey: false,
+            listen_started: None,
+            language_search: None,
+            recorded: Duration::ZERO,
+            last_text: String::new(),
             page_fade: Ease::at(1.0, Duration::from_millis(180), 0.02),
             bar_visible: true,
             suppress_actions_until: None,
@@ -231,7 +251,7 @@ impl Whisp {
         }
 
         if self.bar_visible {
-            let height = self.chrome.value;
+            let height = self.window_height();
             let actual = window.viewport_size().height.as_f32();
             // Windows' resize keeps the top-left fixed, so a taller panel grows
             // off the bottom of the screen and only the header stays visible.
@@ -240,32 +260,67 @@ impl Whisp {
             // holds the bottom edge on every platform.
             if (self.placed_height - height).abs() >= 0.5 || (actual - height).abs() >= 1.0 {
                 self.placed_height = height;
-                place::dock(
-                    WINDOW_WIDTH,
-                    height,
-                    self.screen_x,
-                    self.screen_y,
-                    self.screen_w,
-                    self.screen_h,
-                );
+                let (screen_x, screen_y, screen_w, screen_h) =
+                    (self.screen_x, self.screen_y, self.screen_w, self.screen_h);
+                // Resize before layout, in this frame. Deferring it past the
+                // draw left AppKit resizing a layer mid-present, and growing
+                // panels stalled for a second waiting on the next drawable.
+                place::dock(WINDOW_WIDTH, height, screen_x, screen_y, screen_w, screen_h);
                 apply_window_height(window, height, cx);
             }
         }
     }
 
     fn settled_height(&self) -> f32 {
-        let mut height = COLLAPSED_HEIGHT;
-        if self.settings_open {
-            height += SETTINGS_EXTRA;
+        let reveal = if self.settings_open {
+            Some(Reveal::Settings)
         } else if self.picker_open {
-            height += PICKER_EXTRA;
+            Some(Reveal::Picker)
         } else if matches!(self.phase, Phase::Result(_)) {
-            height += RESULT_EXTRA;
-        }
+            Some(Reveal::Result)
+        } else {
+            None
+        };
+        let mut height = COLLAPSED_HEIGHT + self.panel_height(reveal);
         if self.error.is_some() {
             height += ERROR_EXTRA;
         }
         height
+    }
+
+    /// The window's height for this frame, in whole points.
+    ///
+    /// On macOS every resize makes AppKit ask GPUI for a synchronous frame
+    /// that holds a Metal drawable until the run loop turns. Resizing on each
+    /// animation frame could exhaust the layer's drawables, and the next frame
+    /// then blocked for a full second. So the window jumps to its final
+    /// height when a panel grows, shrinks only once a panel has closed, and
+    /// the HUD animates inside it.
+    fn window_height(&self) -> f32 {
+        #[cfg(target_os = "macos")]
+        let height = self.chrome.value.max(self.chrome.target());
+        #[cfg(not(target_os = "macos"))]
+        let height = self.chrome.value;
+        height.round()
+    }
+
+    /// The settled height of a panel above the bar, hairline included.
+    pub(crate) fn panel_height(&self, reveal: Option<Reveal>) -> f32 {
+        match reveal {
+            Some(Reveal::Result) => RESULT_EXTRA,
+            Some(Reveal::Picker) => PICKER_EXTRA,
+            Some(Reveal::Settings) => match self.settings_page {
+                SettingsPage::Main => SETTINGS_EXTRA,
+                SettingsPage::Language => LANGUAGE_EXTRA,
+                SettingsPage::Microphone => MICROPHONE_EXTRA,
+            },
+            None => 0.0,
+        }
+    }
+
+    /// Time on the running recording, if one is running.
+    pub(crate) fn listening_for(&self) -> Option<Duration> {
+        self.listen_started.map(|started| started.elapsed())
     }
 
     fn staggering(&self) -> bool {
@@ -365,7 +420,9 @@ impl Whisp {
     }
 
     pub(crate) fn selected_spec(&self) -> &'static ModelSpec {
-        models::spec(&self.selected).unwrap_or(&models::CATALOG[0])
+        models::spec(&self.selected)
+            .or_else(|| models::spec(models::recommended_id()))
+            .expect("the catalog has a recommended model")
     }
 
     pub(crate) fn selected_ready(&self) -> bool {
@@ -397,6 +454,10 @@ impl Whisp {
                     return;
                 };
                 let (samples, rate) = mic.take();
+                self.recorded = self
+                    .listen_started
+                    .take()
+                    .map_or(Duration::ZERO, |started| started.elapsed());
                 self.levels.clear();
                 self.rest_bars();
                 self.transcribe(samples, rate, cx);
@@ -408,6 +469,7 @@ impl Whisp {
                     self.levels.clear();
                     self.rest_bars();
                     self.phase = Phase::Listening(mic);
+                    self.listen_started = Some(Instant::now());
                     self.picker_open = false;
                     self.picker_opened_at = None;
                     self.snap_chrome();
@@ -437,6 +499,8 @@ impl Whisp {
         }
         match audio::decode_wav(include_bytes!("../assets/sample.wav")) {
             Ok((samples, rate)) => {
+                self.recorded =
+                    Duration::from_secs_f64(samples.len() as f64 / f64::from(rate.max(1)));
                 self.phase = Phase::Transcribing;
                 self.close_settings();
                 self.picker_open = false;
@@ -463,6 +527,22 @@ impl Whisp {
             return;
         }
         self.start_download(spec, cx);
+    }
+
+    pub(crate) fn cancel_download(&mut self, cx: &mut Context<Self>) {
+        if let Some(download) = self.download.take() {
+            download.cancel.store(true, Ordering::Relaxed);
+            cx.notify();
+        }
+    }
+
+    /// Disk used by the downloaded models.
+    pub(crate) fn storage_used(&self) -> u64 {
+        self.models
+            .iter()
+            .filter(|model| model.ready)
+            .map(|model| model.spec.bytes)
+            .sum()
     }
 
     pub(crate) fn toggle_picker(&mut self, cx: &mut Context<Self>) {
@@ -512,20 +592,33 @@ impl Whisp {
 
     pub(crate) fn open_microphones(&mut self, cx: &mut Context<Self>) {
         self.stop_recording();
-        match audio::input_names() {
-            Ok(names) => {
-                self.microphones = names;
-                self.error = None;
-            }
-            Err(err) => {
-                self.microphones.clear();
-                self.error = Some(err);
-            }
-        }
         self.settings_page = SettingsPage::Microphone;
         self.page_fade.snap(0.0);
         self.page_fade.set(1.0);
         cx.notify();
+        // Listing CoreAudio devices takes tens of milliseconds, so the page
+        // opens with the last known list and refreshes once the scan is done.
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let listed = cx
+                .background_executor()
+                .spawn(async { audio::input_names() })
+                .await;
+            this.update(cx, |view, cx| {
+                match listed {
+                    Ok(names) => {
+                        view.microphones = names;
+                        view.error = None;
+                    }
+                    Err(err) => {
+                        view.microphones.clear();
+                        view.error = Some(err);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(crate) fn choose_microphone(&mut self, name: &str, cx: &mut Context<Self>) {
@@ -677,6 +770,10 @@ impl Whisp {
         cx.notify();
     }
 
+    pub(crate) fn quit(&mut self, cx: &mut Context<Self>) {
+        cx.quit();
+    }
+
     pub(crate) fn copy_result(&mut self, cx: &mut Context<Self>) {
         let Phase::Result(text) = &self.phase else {
             return;
@@ -730,6 +827,7 @@ impl Whisp {
                         } else {
                             view.copied = false;
                         }
+                        view.last_text.clone_from(&text);
                         view.phase = Phase::Result(text);
                         view.error = None;
                     }
@@ -847,14 +945,23 @@ impl Focusable for Whisp {
     }
 }
 
+#[cfg(target_os = "macos")]
+const COPY_KEYS: &str = "cmd-c";
+#[cfg(not(target_os = "macos"))]
+const COPY_KEYS: &str = "ctrl-c";
+
 pub(crate) fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("space", ToggleListen, Some("Whisp")),
         KeyBinding::new("escape", CloseOverlay, Some("Whisp")),
+        KeyBinding::new(COPY_KEYS, CopyResult, Some("Whisp")),
+        KeyBinding::new("cmd-q", QuitWhisp, None),
     ]);
+    cx.on_action::<QuitWhisp>(|_, cx| cx.quit());
+    cx.set_menus([Menu::new("Whisp").items([MenuItem::action("Quit Whisp", QuitWhisp)])]);
 }
 
-fn apply_window_height(window: &mut gpui_kit::Window, height: f32, cx: &mut Context<Whisp>) {
+fn apply_window_height(window: &mut gpui_kit::Window, height: f32, cx: &mut App) {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     {
         let _ = cx;

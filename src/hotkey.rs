@@ -104,29 +104,34 @@ impl Chord {
         parts.join("-")
     }
 
-    pub fn label(&self) -> String {
-        let mut parts = Vec::new();
-        if self.ctrl {
-            parts.push("Ctrl".to_string());
+    /// One keycap per modifier symbol, in macOS order (⌃⌥⇧⌘), then the key.
+    pub fn keycaps(&self) -> Vec<String> {
+        let mut caps = Vec::new();
+        for (held, symbol) in [
+            (self.ctrl, "⌃"),
+            (self.alt, "⌥"),
+            (self.shift, "⇧"),
+            (self.super_key, "⌘"),
+        ] {
+            if held {
+                caps.push(symbol.to_string());
+            }
         }
-        if self.alt {
-            parts.push("Alt".to_string());
-        }
-        if self.shift {
-            parts.push("Shift".to_string());
-        }
-        if self.super_key {
-            parts.push("Super".to_string());
-        }
-        parts.push(key_label(&self.key));
-        parts.join(" ")
+        caps.push(key_label(&self.key));
+        caps
     }
 }
 
-pub fn label(source: &str) -> String {
+/// The shortcut as keycaps, e.g. `["⌃", "⇧", "Space"]`.
+pub fn keycaps(source: &str) -> Vec<String> {
     parse(source)
-        .map(|chord| chord.label())
-        .unwrap_or_else(|| source.to_string())
+        .map(|chord| chord.keycaps())
+        .unwrap_or_else(|| vec![source.to_string()])
+}
+
+/// The shortcut in compact symbol form, e.g. `⌃⇧Space`.
+pub fn symbols(source: &str) -> String {
+    keycaps(source).concat()
 }
 
 fn key_label(key: &str) -> String {
@@ -369,7 +374,23 @@ mod tests {
         let chord = parse("ctrl-shift-space").unwrap();
         assert!(chord.has_modifier());
         assert_eq!(chord.canonical(), "ctrl-shift-space");
-        assert_eq!(chord.label(), "Ctrl Shift Space");
+        assert_eq!(chord.keycaps(), ["⌃", "⇧", "Space"]);
+    }
+
+    #[test]
+    fn shortcut_reads_as_symbols() {
+        assert_eq!(symbols("ctrl-shift-space"), "⌃⇧Space");
+        assert_eq!(symbols("super-alt-k"), "⌥⌘K");
+        assert_eq!(
+            keycaps("ctrl-alt-shift-super-f5"),
+            ["⌃", "⌥", "⇧", "⌘", "F5"]
+        );
+    }
+
+    #[test]
+    fn an_unreadable_shortcut_stays_as_typed() {
+        assert_eq!(symbols(""), "");
+        assert_eq!(keycaps("ctrl-"), ["ctrl-"]);
     }
 
     #[test]

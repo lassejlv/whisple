@@ -32,7 +32,7 @@ pub fn dock(width: f32, height: f32, screen_x: f32, screen_y: f32, screen_w: f32
         let Ok(_guard) = LOCK.lock() else {
             return;
         };
-        let radius = if height <= 88.0 { height / 2.0 } else { 22.0 };
+        let radius = crate::app::WINDOW_RADIUS;
         let x = screen_x + (screen_w - width) / 2.0;
         let y = screen_y + screen_h - height - 18.0;
         if let Err(err) = place(
@@ -226,7 +226,17 @@ mod macos {
             if count == 0 {
                 return;
             }
-            let window: id = msg_send![windows, objectAtIndex: count - 1];
+            // GPUI also owns hidden native windows. The last window in this
+            // array is usually one of those, not the voice panel.
+            let mut window: id = nil;
+            for index in 0..count {
+                let candidate: id = msg_send![windows, objectAtIndex: index];
+                let visible: bool = msg_send![candidate, isVisible];
+                if visible {
+                    window = candidate;
+                    break;
+                }
+            }
             if window.is_null() {
                 return;
             }
