@@ -1,56 +1,36 @@
 use std::time::Duration;
 
 use gpui_kit::assets::IconName as Lucide;
-use gpui_kit::component::input::{Input, InputContentType, InputEvent, InputState};
-use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{Icon, Sizable};
 use gpui_kit::{
-    div, prelude::*, px, Animation, AnimationExt, AnyElement, BoxShadow, Context, Div, Entity,
-    Focusable, FontWeight, IntoElement, ParentElement, Render, Rgba, SharedString, Stateful,
-    Styled, Window,
+    div, prelude::*, px, Animation, AnimationExt, AnyElement, BoxShadow, Context, Div, FontWeight,
+    IntoElement, ParentElement, Render, Rgba, SharedString, Stateful, Styled, Window,
 };
 
 use crate::app::{
-    Phase, Recovery, Reveal, SettingsPage, Whisp, BAR_HEIGHT, COLLAPSED_HEIGHT, ERROR_EXTRA,
-    WINDOW_RADIUS,
+    Phase, Recovery, Reveal, Whisp, BAR_HEIGHT, COLLAPSED_HEIGHT, MENU_DIVIDER, MENU_PAD, MENU_ROW,
+    NOTICE_EXTRA, WINDOW_RADIUS,
 };
 use crate::cloud::Provider;
 use crate::hotkey;
-use crate::models;
+use crate::license::{self, Access};
 use crate::motion;
-use crate::settings;
+use crate::settings_window::SettingsTarget;
 use crate::theme;
 #[cfg(target_os = "macos")]
 use crate::updater::UpdatePrompt;
 
-/// Language rows visible at once; the list scrolls past this.
-const LANGUAGE_LIST_H: f32 = 280.0;
-/// The microphone page has no search field, so its list takes that room too.
-const MICROPHONE_LIST_H: f32 = 324.0;
-
 impl Render for Whisp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.tick(window, cx);
-        self.sync_language_search(window, cx);
-        self.sync_key_input(window, cx);
 
         div()
             .id("whisp")
             .key_context("Whisp")
             .track_focus(&self.focus_handle)
-            .on_action(
-                cx.listener(|this, _: &crate::app::ToggleListen, window, cx| {
-                    // Space belongs to the search field while it has focus.
-                    if let Some(search) = this.focused_search(window, cx) {
-                        search.update(cx, |search, cx| search.insert(" ", window, cx));
-                        return;
-                    }
-                    if this.focused_key_input(window, cx).is_some() {
-                        return;
-                    }
-                    this.toggle_listen(cx);
-                }),
-            )
+            .on_action(cx.listener(|this, _: &crate::app::ToggleListen, _, cx| {
+                this.toggle_listen(cx);
+            }))
             .on_action(
                 cx.listener(|this, _: &crate::app::CloseOverlay, window, cx| {
                     this.close_overlay(window, cx);
@@ -85,7 +65,10 @@ impl Render for Whisp {
                     .when(self.reveal.is_some(), |column| column.child(self.panel(cx)))
                     .child(self.bar(cx))
                     .when(self.error.is_some(), |column| {
-                        column.child(self.notice_card(cx))
+                        column.child(self.error_notice(cx))
+                    })
+                    .when(self.update_line_visible(), |column| {
+                        column.child(self.update_notice(cx))
                     }),
             )
     }
@@ -93,227 +76,145 @@ impl Render for Whisp {
 
 #[derive(Clone, Copy)]
 enum NoticeAction {
-    Microphone,
-    Model,
+    Settings(SettingsTarget),
+    #[cfg(target_os = "macos")]
+    Privacy,
+    Models,
     Record,
-    Key(Provider),
     Retry,
     Local,
-    Update,
 }
 
 impl Whisp {
-    fn notice_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let kind = self.recovery;
-        let title = kind.map_or("Something went wrong", Recovery::title);
-        let message = if kind == Some(Recovery::MicrophonePermission) {
-            #[cfg(target_os = "macos")]
-            let guidance = "Allow Whisple in System Settings → Privacy & Security → Microphone.";
-            #[cfg(not(target_os = "macos"))]
-            let guidance = "Allow Whisple microphone access in system privacy settings.";
-            guidance.to_string()
-        } else {
-            self.error.clone().unwrap_or_default()
-        };
-        let mut actions = Vec::new();
-        match kind {
-            Some(
-                Recovery::Microphone
-                | Recovery::MicrophoneDisconnected
-                | Recovery::MicrophonePermission,
-            ) => {
-                actions.push(("Choose microphone", NoticeAction::Microphone));
-            }
-            Some(Recovery::Model) => actions.push(("Choose model", NoticeAction::Model)),
-            Some(Recovery::NoSpeech) => actions.push(("Record again", NoticeAction::Record)),
-            Some(Recovery::CloudKey(provider)) => {
-                actions.push(("Edit API key", NoticeAction::Key(provider)));
-            }
-            Some(Recovery::CloudOffline | Recovery::CloudRateLimited | Recovery::CloudOther) => {
-                if self.failed_audio_available() {
-                    actions.push(("Retry", NoticeAction::Retry));
-                }
-            }
-            Some(Recovery::LocalFallback) => {
-                if self.failed_audio_available() {
-                    actions.push(("Retry cloud", NoticeAction::Retry));
-                }
-            }
-            Some(Recovery::UpdateCheck) => actions.push(("Check again", NoticeAction::Update)),
-            None => {}
-        }
-        if self.failed_audio_available()
+    /// The single action a notice offers, if any.
+    fn notice_action(&self) -> Option<(&'static str, NoticeAction)> {
+        let retry = self
+            .failed_audio_available()
+            .then_some(("Retry", NoticeAction::Retry));
+        let local = (self.failed_audio_available()
             && self
                 .models
                 .iter()
-                .any(|model| model.ready && model.spec.id.starts_with("turbo"))
-        {
-            actions.push(("Use local Turbo", NoticeAction::Local));
+                .any(|model| model.ready && model.spec.id.starts_with("turbo")))
+        .then_some(("Use local Turbo", NoticeAction::Local));
+        match self.recovery? {
+            Recovery::Microphone | Recovery::MicrophoneDisconnected => {
+                Some(("Choose mic", NoticeAction::Settings(SettingsTarget::Audio)))
+            }
+            #[cfg(target_os = "macos")]
+            Recovery::MicrophonePermission => Some(("Open Privacy", NoticeAction::Privacy)),
+            #[cfg(not(target_os = "macos"))]
+            Recovery::MicrophonePermission => None,
+            Recovery::Model => Some(("Choose model", NoticeAction::Models)),
+            Recovery::NoSpeech => Some(("Try again", NoticeAction::Record)),
+            Recovery::CloudKey(provider) => Some((
+                "Fix key",
+                NoticeAction::Settings(SettingsTarget::CloudKey(provider)),
+            )),
+            Recovery::CloudOffline => local.or(retry),
+            Recovery::CloudRateLimited | Recovery::CloudOther => retry.or(local),
+            Recovery::LocalFallback => retry.map(|_| ("Retry cloud", NoticeAction::Retry)),
         }
-        div()
-            .h(px(ERROR_EXTRA))
-            .w_full()
-            .flex_shrink_0()
-            .px(px(14.0))
-            .py(px(8.0))
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .border_t_1()
-            .border_color(theme::HAIRLINE)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme::RED)
-                            .child(title),
-                    )
-                    .child(
-                        press_handlers(
-                            div().id("notice-dismiss").child("×"),
-                            "notice-dismiss",
-                            cx,
-                            |this, cx| this.dismiss_notice(cx),
-                        )
-                        .text_size(px(16.0))
-                        .text_color(theme::SECONDARY),
-                    ),
+    }
+
+    fn error_notice(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let message = self.error.clone().unwrap_or_default();
+        let (title, detail) = match self.recovery {
+            #[cfg(target_os = "macos")]
+            Some(kind @ Recovery::MicrophonePermission) => (
+                kind.title().to_string(),
+                Some("Allow Whisple under Privacy & Security › Microphone.".to_string()),
+            ),
+            Some(kind) => (kind.title().to_string(), Some(message)),
+            None => (message, None),
+        };
+        let action = self.notice_action().map(|(label, action)| {
+            (label, move |this: &mut Whisp, cx: &mut Context<Whisp>| {
+                this.perform_notice_action(action, cx)
+            })
+        });
+        notice_line(
+            title,
+            detail,
+            theme::RED,
+            action,
+            |this, cx| this.dismiss_notice(cx),
+            cx,
+        )
+    }
+
+    fn update_notice(&self, cx: &mut Context<Self>) -> AnyElement {
+        #[cfg(target_os = "macos")]
+        if self.update_prompt == Some(UpdatePrompt::JustUpdated) {
+            return notice_line(
+                format!("Updated to Whisple {}", env!("CARGO_PKG_VERSION")),
+                None,
+                theme::LABEL,
+                None::<(&str, fn(&mut Whisp, &mut Context<Whisp>))>,
+                |this, cx| this.dismiss_update(cx),
+                cx,
             )
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme::SECONDARY)
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(message),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap(px(12.0))
-                    .children(actions.into_iter().map(|(label, action)| {
-                        press_handlers(
-                            div().id(format!("notice-{label}")).child(label),
-                            label,
-                            cx,
-                            move |this, cx| this.perform_notice_action(action, cx),
-                        )
-                        .text_size(px(12.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme::AMBER)
-                    })),
-            )
+            .into_any_element();
+        }
+        let version = self.ready_update().unwrap_or_default();
+        notice_line(
+            format!("Whisple {version} is ready"),
+            Some("Installs and restarts in a few seconds.".to_string()),
+            theme::LABEL,
+            Some(("Install", |this: &mut Whisp, cx: &mut Context<Whisp>| {
+                this.install_update(cx)
+            })),
+            |this, cx| this.dismiss_update(cx),
+            cx,
+        )
+        .into_any_element()
     }
 
     fn perform_notice_action(&mut self, action: NoticeAction, cx: &mut Context<Self>) {
         match action {
-            NoticeAction::Microphone => {
-                if !self.settings_open {
-                    self.toggle_settings(cx);
+            NoticeAction::Settings(target) => {
+                self.open_settings_at(target, cx);
+                if !matches!(target, SettingsTarget::CloudKey(_)) {
+                    self.dismiss_notice(cx);
                 }
-                self.open_microphones(cx);
             }
-            NoticeAction::Model => {
-                if !self.picker_open {
-                    self.toggle_picker(cx);
-                }
+            #[cfg(target_os = "macos")]
+            NoticeAction::Privacy => {
+                cx.open_url(
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
+                );
                 self.dismiss_notice(cx);
             }
+            NoticeAction::Models => {
+                self.dismiss_notice(cx);
+                if !self.menu_open {
+                    self.toggle_menu(cx);
+                }
+            }
             NoticeAction::Record => self.toggle_listen(cx),
-            NoticeAction::Key(provider) => self.open_cloud_config(provider, cx),
             NoticeAction::Retry => self.retry_audio(false, cx),
             NoticeAction::Local => self.retry_audio(true, cx),
-            NoticeAction::Update => self.check_updates_from_settings(cx),
         }
-    }
-
-    /// Keep the language search field alive only while its page shows, so it
-    /// always opens empty.
-    fn sync_language_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let showing = self.settings_open && self.settings_page == SettingsPage::Language;
-        if !showing {
-            // Dropping a focused field would leave nothing focused, and the
-            // bar's Space and Escape bindings would go quiet.
-            if self.focused_search(window, cx).is_some() {
-                window.focus(&self.focus_handle, cx);
-            }
-            self.language_search = None;
-            return;
-        }
-        if self.language_search.is_some() {
-            return;
-        }
-        let count = settings::Preferences::languages()
-            .iter()
-            .filter(|language| language.id != "auto")
-            .count();
-        let state = cx
-            .new(|cx| InputState::new(window, cx).placeholder(format!("Search {count} languages")));
-        cx.subscribe(&state, |_, _, _: &InputEvent, cx| cx.notify())
-            .detach();
-        self.language_search = Some(state);
-    }
-
-    fn focused_search(&self, window: &Window, cx: &gpui_kit::App) -> Option<Entity<InputState>> {
-        self.language_search
-            .clone()
-            .filter(|search| search.focus_handle(cx).is_focused(window))
-    }
-
-    fn sync_key_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let showing = self.picker_open && self.cloud_config.is_some();
-        if !showing {
-            if self.focused_key_input(window, cx).is_some() {
-                window.focus(&self.focus_handle, cx);
-            }
-            self.key_input = None;
-            return;
-        }
-        if self.key_input.is_some() {
-            return;
-        }
-        let state = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Paste API key")
-                .masked(true)
-        });
-        cx.subscribe(&state, |_, _, _: &InputEvent, cx| cx.notify())
-            .detach();
-        self.key_input = Some(state);
-    }
-
-    fn focused_key_input(&self, window: &Window, cx: &gpui_kit::App) -> Option<Entity<InputState>> {
-        self.key_input
-            .clone()
-            .filter(|input| input.focus_handle(cx).is_focused(window))
     }
 
     fn panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let extra = self.panel_height(self.reveal);
-        let error_h = if self.error.is_some() {
-            ERROR_EXTRA
+        let notice_h = if self.error.is_some() || self.update_line_visible() {
+            NOTICE_EXTRA
         } else {
             0.0
         };
-        let shown = (self.chrome.value - COLLAPSED_HEIGHT - error_h).clamp(0.0, extra);
+        let shown = (self.chrome.value - COLLAPSED_HEIGHT - notice_h).clamp(0.0, extra);
         let fade = if extra > 0.0 {
             (shown / extra).clamp(0.0, 1.0)
         } else {
             1.0
         };
         let body = match self.reveal {
-            Some(Reveal::Picker) => self.picker(cx).into_any_element(),
+            Some(Reveal::Menu) => self.model_menu(extra - 1.0, cx).into_any_element(),
             Some(Reveal::Result) => self
                 .transcript_card(self.last_text.clone(), cx)
                 .into_any_element(),
-            Some(Reveal::Settings) => self.settings_panel(cx).into_any_element(),
-            Some(Reveal::Update) => self.update_panel(cx).into_any_element(),
             None => div().into_any_element(),
         };
 
@@ -338,131 +239,22 @@ impl Whisp {
             )
     }
 
-    #[cfg(not(target_os = "macos"))]
-    fn update_panel(&self, _cx: &mut Context<Self>) -> AnyElement {
-        div().into_any_element()
-    }
-
-    #[cfg(target_os = "macos")]
-    fn update_panel(&self, cx: &mut Context<Self>) -> AnyElement {
-        let prompt = self.update_prompt.unwrap_or(UpdatePrompt::Ready);
-        let (version, notes) = self.update_details();
-        let updated = prompt == UpdatePrompt::JustUpdated;
-        let ready = prompt == UpdatePrompt::Ready;
-        let title = if updated {
-            "Just updated".to_string()
-        } else if ready {
-            format!("Whisple v{version} is ready")
-        } else {
-            format!("Ready to install v{version}")
-        };
-        let description = if updated {
-            "You're running the latest installed version of Whisple.".to_string()
-        } else if ready {
-            "The update is ready. Review the release notes before installing.".to_string()
-        } else if notes.trim().is_empty() {
-            "Whisple will restart after installation.".to_string()
-        } else {
-            notes
-        };
-        let action = if updated {
-            "Done"
-        } else if ready {
-            "Release notes"
-        } else {
-            "Install now"
-        };
-        div()
-            .id("update-panel")
-            .h(px(crate::app::UPDATE_EXTRA - 1.0))
-            .px(px(20.0))
-            .pt(px(20.0))
-            .pb(px(18.0))
-            .flex()
-            .flex_col()
-            .gap(px(12.0))
-            .child(
-                div()
-                    .text_size(px(16.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(title),
-            )
-            .child(
-                div()
-                    .h(px(96.0))
-                    .overflow_hidden()
-                    .text_size(px(13.0))
-                    .line_height(px(19.0))
-                    .text_color(theme::SECONDARY)
-                    .line_clamp(5)
-                    .child(description),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .justify_end()
-                    .gap(px(10.0))
-                    .when(!updated, |row| {
-                        row.child(
-                            press_handlers(
-                                div()
-                                    .id("update-later")
-                                    .px(px(14.0))
-                                    .h(px(32.0))
-                                    .rounded_full()
-                                    .bg(theme::RAISED)
-                                    .flex()
-                                    .items_center()
-                                    .text_size(px(12.0)),
-                                "update-later",
-                                cx,
-                                |this, cx| this.dismiss_update(cx),
-                            )
-                            .child("Later"),
-                        )
-                    })
-                    .child(
-                        press_handlers(
-                            div()
-                                .id("update-action")
-                                .px(px(14.0))
-                                .h(px(32.0))
-                                .rounded_full()
-                                .bg(theme::AMBER_SOFT)
-                                .text_color(theme::AMBER)
-                                .flex()
-                                .items_center()
-                                .text_size(px(12.0))
-                                .font_weight(FontWeight::SEMIBOLD),
-                            "update-action",
-                            cx,
-                            |this, cx| match this.update_prompt {
-                                Some(UpdatePrompt::Ready) => this.review_update(cx),
-                                Some(UpdatePrompt::JustUpdated) => this.dismiss_update(cx),
-                                _ => this.install_update(cx),
-                            },
-                        )
-                        .child(action),
-                    ),
-            )
-            .into_any_element()
-    }
-
     // MARK: Bar
 
     fn bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let listening = matches!(self.phase, Phase::Listening(_));
-        let trial_ended = matches!(
-            &self.license_access,
-            crate::license::Access::Trial { .. } | crate::license::Access::TrialExpired
-        ) && !self.license_access.allowed();
+        let locked = self.locked();
+        let trial_over = matches!(
+            self.license_access,
+            Access::Trial { .. } | Access::TrialExpired | Access::Unlicensed
+        );
         let center = if listening {
             waveform(&self.bars).into_any_element()
         } else {
             let (label, color) = match &self.phase {
                 Phase::Transcribing => ("Transcribing…", theme::SECONDARY),
-                _ if trial_ended => ("Free trial ended", theme::LABEL),
+                _ if locked && trial_over => ("Free trial ended", theme::LABEL),
+                _ if locked => ("License needs attention", theme::LABEL),
                 Phase::Idle if self.selected_ready() => ("Start recording", theme::LABEL),
                 Phase::Result(_) if self.selected_ready() => ("Record again", theme::LABEL),
                 _ => ("Choose a model", theme::LABEL),
@@ -490,8 +282,12 @@ impl Whisp {
                 || "On device".to_string(),
                 |provider| provider.name().to_string(),
             ))),
-            _ if trial_ended => None,
-            _ => Some(hint_text(hotkey::symbols(&self.show_hotkey))),
+            _ if locked => None,
+            _ => Some(match self.trial_ending() {
+                Some(left) => hint_text(format!("Trial · {}", license::trial_left(left, true)))
+                    .text_color(theme::AMBER),
+                None => hint_text(hotkey::symbols(&self.show_hotkey)),
+            }),
         };
 
         div()
@@ -515,14 +311,14 @@ impl Whisp {
             )
             .children(hint)
             .child(self.settings_button(cx))
-            .child(if trial_ended {
-                self.unlock_capsule(cx).into_any_element()
+            .child(if locked {
+                self.unlock_capsule(trial_over, cx).into_any_element()
             } else {
                 self.model_capsule(cx).into_any_element()
             })
     }
 
-    fn unlock_capsule(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn unlock_capsule(&self, buy: bool, cx: &mut Context<Self>) -> impl IntoElement {
         press_handlers(
             div()
                 .id("unlock-license")
@@ -539,7 +335,11 @@ impl Whisp {
             cx,
             |this, cx| this.open_license_window(cx),
         )
-        .child("Unlock Whisple")
+        .child(if buy {
+            format!("Unlock · {}", license::PRICE)
+        } else {
+            "License".to_string()
+        })
     }
 
     fn voice_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -601,7 +401,6 @@ impl Whisp {
 
     fn settings_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let size = 28.0 * self.press_scale("settings");
-        let open = self.settings_open;
         press_handlers(
             div()
                 .id("settings")
@@ -621,11 +420,10 @@ impl Whisp {
                 .flex()
                 .items_center()
                 .justify_center()
-                .when(open, |circle| circle.bg(theme::AMBER_SOFT))
                 .child(
                     Icon::empty()
                         .path("icons/gear.svg")
-                        .text_color(if open { theme::AMBER } else { theme::SECONDARY })
+                        .text_color(theme::SECONDARY)
                         .with_size(px(15.0)),
                 ),
         )
@@ -633,13 +431,15 @@ impl Whisp {
 
     fn model_capsule(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let scale = self.press_scale("models");
-        let open = self.picker_open;
-        let label = if let Some(provider) = Provider::from_id(&self.selected) {
-            provider.name()
-        } else if self.selected_ready() {
-            self.selected_spec().chip
-        } else {
+        let open = self.menu_open;
+        let label = if !self.selected_ready() && self.menu_choices().is_empty() {
+            "Add a model"
+        } else if !self.selected_ready() {
             "Models"
+        } else if let Some(provider) = Provider::from_id(&self.selected) {
+            provider.name()
+        } else {
+            self.selected_spec().chip
         };
         let capsule = div()
             .h(px(28.0 * scale))
@@ -680,7 +480,7 @@ impl Whisp {
                 .justify_center(),
             "models",
             cx,
-            |this, cx| this.toggle_picker(cx),
+            |this, cx| this.toggle_menu(cx),
         )
         .child(capsule)
     }
@@ -779,952 +579,80 @@ impl Whisp {
         )
     }
 
-    // MARK: Model picker
+    // MARK: Model menu
 
-    fn picker(&self, cx: &mut Context<Self>) -> AnyElement {
-        if let Some(provider) = self.cloud_config {
-            return self.cloud_key_panel(provider, cx).into_any_element();
-        }
-        let rows = self
-            .models
-            .iter()
-            .enumerate()
-            .map(|(index, model)| {
-                model_row(
-                    self,
-                    model.spec,
-                    model.ready,
-                    index == 0,
-                    entrance(index, self.picker_opened_at),
-                    cx,
-                )
-            })
-            .collect::<Vec<_>>();
-        let used = self.storage_used();
-
-        div()
-            .px(px(10.0))
-            .pt(px(18.0))
-            .pb(px(12.0))
-            .flex()
-            .flex_col()
-            .gap(px(12.0))
-            .child(panel_header(
-                "Voice models",
-                Some("Choose a local model or connect a cloud provider."),
-            ))
-            .child(group().children(rows))
-            .child(
-                div()
-                    .h(px(28.0))
-                    .px(px(8.0))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        press_handlers(
-                            div()
-                                .id("sample")
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(6.0))
-                                .opacity(if self.press_id.as_deref() == Some("sample") {
-                                    0.6
-                                } else {
-                                    1.0
-                                }),
-                            "sample",
-                            cx,
-                            |this, cx| this.transcribe_sample(cx),
-                        )
-                        .child(asset_icon("play", theme::AMBER, 12.0))
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme::AMBER)
-                                .child("Transcribe a sample"),
-                        ),
-                    )
-                    .when(used > 0, |row| {
-                        row.child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(theme::TERTIARY)
-                                .child(format!("{} used", models::format_size(used))),
-                        )
-                    }),
+    /// A short dropdown above the capsule: ready models to switch between,
+    /// then Settings for downloads and API keys.
+    fn model_menu(&self, height: f32, cx: &mut Context<Self>) -> impl IntoElement {
+        let choices = self.menu_choices();
+        let any = !choices.is_empty();
+        let rows = choices.into_iter().map(|choice| {
+            let id = choice.id;
+            menu_row(
+                self,
+                format!("menu-{id}"),
+                choice.name,
+                Some(choice.detail),
+                self.selected == id,
+                cx,
+                move |this, cx| this.choose_from_menu(id, cx),
             )
-            .child(
-                div()
-                    .px(px(8.0))
-                    .pt(px(6.0))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme::SECONDARY)
-                            .child("CLOUD MODELS"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme::TERTIARY)
-                            .child("Uses your API key"),
-                    ),
-            )
-            .child(group().children(Provider::ALL.map(|provider| self.cloud_row(provider, cx))))
-            .child(
-                div()
-                    .px(px(8.0))
-                    .pb(px(2.0))
-                    .text_size(px(12.0))
-                    .line_height(px(16.0))
-                    .text_color(theme::TERTIARY)
-                    .child("Cloud recordings are sent to the selected provider."),
-            )
-            .into_any_element()
-    }
-
-    fn cloud_row(&self, provider: Provider, cx: &mut Context<Self>) -> AnyElement {
-        let connected = self.cloud_keys[provider.index()];
-        let selected = connected && self.selected == provider.id();
-        let id = provider.id();
-        let edit_id = format!("edit-{id}");
-        let action = press_handlers(
-            div()
-                .id(SharedString::from(edit_id.clone()))
-                .accessibility_id(edit_id.clone())
-                .role(gpui_kit::Role::Button)
-                .aria_label(format!(
-                    "{} {} API key",
-                    if connected { "Edit" } else { "Add" },
-                    provider.name()
-                ))
-                .h(px(26.0))
-                .w(px(68.0))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(theme::RAISED)
-                .text_size(px(11.0))
-                .font_weight(FontWeight::BOLD)
-                .text_color(theme::AMBER),
-            &edit_id,
-            cx,
-            move |this, cx| this.open_cloud_config(provider, cx),
-        )
-        .child(if connected { "EDIT" } else { "ADD KEY" });
-
-        press_handlers(
-            div()
-                .id(id)
-                .accessibility_id(id)
-                .role(gpui_kit::Role::Button)
-                .aria_label(format!("Use {} cloud model", provider.name()))
-                .h(px(62.0))
-                .w_full()
-                .px(px(12.0))
-                .flex()
-                .items_center()
-                .gap(px(10.0))
-                .when(provider == Provider::Groq, |row| {
-                    row.border_t_1().border_color(theme::HAIRLINE)
-                })
-                .when(selected, |row| row.bg(theme::AMBER_WASH)),
-            id,
-            cx,
-            move |this, cx| this.choose_cloud(provider, cx),
-        )
-        .child(provider_icon(provider))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .text_size(px(14.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme::LABEL)
-                        .child(provider.name()),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .line_height(px(16.0))
-                        .text_color(theme::SECONDARY)
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .child(provider.description()),
-                ),
-        )
-        .when(selected, |row| {
-            row.child(asset_icon("check-bold", theme::AMBER, 16.0))
-        })
-        .child(action)
-        .into_any_element()
-    }
-
-    fn cloud_key_panel(&self, provider: Provider, cx: &mut Context<Self>) -> impl IntoElement {
-        let connected = self.cloud_keys[provider.index()];
-        let input = self.key_input.clone();
-        let key_toggle = cx.weak_entity();
-
-        div()
-            .px(px(18.0))
-            .pt(px(18.0))
-            .pb(px(18.0))
-            .flex()
-            .flex_col()
-            .gap(px(18.0))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(12.0))
-                    .child(
-                        press_handlers(
-                            div()
-                                .id("cloud-back")
-                                .role(gpui_kit::Role::Button)
-                                .aria_label("Back to voice models")
-                                .size(px(28.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(8.0))
-                                .bg(theme::RAISED),
-                            "cloud-back",
-                            cx,
-                            |this, cx| this.back_from_cloud_config(cx),
-                        )
-                        .child(asset_icon("chevron-left-bold", theme::SECONDARY, 15.0)),
-                    )
-                    .child(provider_icon(provider))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(1.0))
-                            .child(
-                                div()
-                                    .text_size(px(16.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme::LABEL)
-                                    .child(format!("Connect {}", provider.name())),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .text_color(theme::SECONDARY)
-                                    .child(provider.model()),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme::SECONDARY)
-                            .child("API KEY"),
-                    )
-                    .child(
-                        div()
-                            .h(px(40.0))
-                            .px(px(12.0))
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap(px(8.0))
-                            .rounded(px(9.0))
-                            .bg(theme::INSET)
-                            .border_1()
-                            .border_color(theme::EDGE)
-                            .children(input.map(|state| {
-                                div().flex_1().min_w_0().child(
-                                    Input::new(&state)
-                                        .content_type(InputContentType::Password)
-                                        .appearance(false)
-                                        .px_0()
-                                        .py_0()
-                                        .h(px(20.0))
-                                        .text_size(px(13.0)),
-                                )
-                            }))
-                            .child(
-                                div()
-                                    .id("cloud-key-visibility")
-                                    .role(gpui_kit::Role::Button)
-                                    .aria_label(if self.key_visible { "Hide API key" } else { "Show API key" })
-                                    .text_size(px(12.0))
-                                    .text_color(theme::SECONDARY)
-                                    .cursor_pointer()
-                                    .on_click(move |_, window, cx| {
-                                        key_toggle.update(cx, |this, cx| this.toggle_key_visibility(window, cx)).ok();
-                                    })
-                                    .child(if self.key_visible { "Hide" } else { "Show" }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .line_height(px(17.0))
-                            .text_color(theme::SECONDARY)
-                            .child(if connected {
-                                format!("A key is saved on this device. Paste a new one to replace it. Audio goes to {} when selected.", provider.name())
-                            } else {
-                                format!("Your key stays on this device. Audio goes to {} only when this model is selected.", provider.name())
-                            }),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(10.0))
-                    .child(if connected {
-                        press_handlers(
-                            div()
-                                .id("cloud-remove-key")
-                                .role(gpui_kit::Role::Button)
-                                .aria_label(format!("Remove {} API key", provider.name()))
-                                .text_size(px(12.0))
-                                .text_color(theme::RED),
-                            "cloud-remove-key",
-                            cx,
-                            |this, cx| this.remove_cloud_key(cx),
-                        )
-                        .child("Remove key")
-                        .into_any_element()
-                    } else {
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme::TERTIARY)
-                            .child(format!("Billed by {}", provider.name()))
-                            .into_any_element()
-                    })
-                    .child(
-                        press_handlers(
-                            div()
-                                .id("cloud-save-key")
-                                .role(gpui_kit::Role::Button)
-                                .aria_label(format!("Save and use {}", provider.name()))
-                                .h(px(34.0))
-                                .px(px(16.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(9.0))
-                                .bg(theme::AMBER)
-                                .text_size(px(13.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme::HUD),
-                            "cloud-save-key",
-                            cx,
-                            |this, cx| this.save_cloud_key(cx),
-                        )
-                        .child(if connected { "Use model" } else { "Save & use" }),
-                    ),
-            )
-    }
-
-    // MARK: Settings
-
-    fn settings_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let page = match self.settings_page {
-            SettingsPage::Language => self.language_page(cx).into_any_element(),
-            SettingsPage::Microphone => self.microphone_page(cx).into_any_element(),
-            SettingsPage::Main => self.settings_main(cx).into_any_element(),
-        };
-        div().opacity(self.page_fade.value).child(page)
-    }
-
-    fn settings_main(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let opened = self.settings_opened_at;
-        let shortcut = if self.recording_hotkey {
-            div()
-                .text_size(px(13.0))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme::AMBER)
-                .child("Press shortcut")
-                .into_any_element()
-        } else {
-            keycaps(hotkey::keycaps(&self.show_hotkey)).into_any_element()
-        };
-        let quit_view = cx.weak_entity();
-
-        div()
-            .px(px(10.0))
-            .pt(px(18.0))
-            .pb(px(14.0))
-            .flex()
-            .flex_col()
-            .gap(px(12.0))
-            .child(
-                div()
-                    .px(px(8.0))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .child(title("Settings"))
-                    .child(
-                        div()
-                            .id("quit")
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .text_size(px(12.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .cursor_pointer()
-                            .on_click(move |_, _, cx| {
-                                quit_view.update(cx, |this, cx| this.quit(cx)).ok();
-                            })
-                            .child(div().text_color(theme::SECONDARY).child("Quit Whisple"))
-                            .child(div().text_color(theme::TERTIARY).child("⌘Q")),
-                    ),
-            )
-            .child(
-                group()
-                    .child(self.settings_row(
-                        "hotkey",
-                        asset_icon("keyboard", theme::LABEL, 15.0),
-                        true,
-                        entrance(0, opened),
-                        row_title("Show Whisple"),
-                        shortcut,
-                        cx,
-                        |this, cx| this.begin_hotkey_capture(cx),
-                    ))
-                    .child(self.settings_row(
-                        "startup",
-                        lucide(Lucide::Power, theme::LABEL, 14.0),
-                        false,
-                        entrance(1, opened),
-                        row_title("Open at login"),
-                        switch(self.open_on_startup).into_any_element(),
-                        cx,
-                        |this, cx| this.toggle_open_on_startup(cx),
-                    )),
-            )
-            .child(
-                group()
-                    .child(self.settings_row(
-                        "microphone",
-                        lucide(Lucide::Mic, theme::LABEL, 14.0),
-                        true,
-                        entrance(2, opened),
-                        row_title("Microphone"),
-                        drill_value(settings::microphone_label(&self.input_device).to_string()),
-                        cx,
-                        |this, cx| this.open_microphones(cx),
-                    ))
-                    .child(self.settings_row(
-                        "language",
-                        lucide(Lucide::Globe, theme::LABEL, 14.0),
-                        false,
-                        entrance(3, opened),
-                        row_title("Language"),
-                        drill_value(settings::language_name(&self.language).to_string()),
-                        cx,
-                        |this, cx| this.open_languages(cx),
-                    )),
-            )
-            .child(
-                group()
-                    .child(self.settings_row(
-                        "copy-notes",
-                        lucide(Lucide::Clipboard, theme::LABEL, 14.0),
-                        true,
-                        entrance(4, opened),
-                        row_title("Copy to clipboard"),
-                        switch(self.copy_notes).into_any_element(),
-                        cx,
-                        |this, cx| this.toggle_copy_notes(cx),
-                    ))
-                    .child(
-                        self.settings_row(
-                            "clean",
-                            lucide(Lucide::Sparkles, theme::LABEL, 14.0),
-                            false,
-                            entrance(5, opened),
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(1.0))
-                                .child(row_title("Clean up notes"))
-                                .child(
-                                    div()
-                                        .text_size(px(12.0))
-                                        .line_height(px(16.0))
-                                        .text_color(theme::SECONDARY)
-                                        .child("Removes “um”, “uh” and repeats"),
-                                )
-                                .into_any_element(),
-                            switch(self.clean_fillers).into_any_element(),
-                            cx,
-                            |this, cx| this.toggle_clean_fillers(cx),
-                        ),
-                    ),
-            )
-    }
-
-    /// A System Settings row: icon tile, then a content lane whose hairline
-    /// starts past the tile.
-    #[allow(clippy::too_many_arguments)]
-    fn settings_row(
-        &self,
-        id: &str,
-        icon: Icon,
-        first: bool,
-        opacity: f32,
-        label: AnyElement,
-        trailing: AnyElement,
-        cx: &mut Context<Self>,
-        action: impl Fn(&mut Whisp, &mut Context<Whisp>) + 'static,
-    ) -> impl IntoElement {
-        let pressed = self.press_scale(id) < 1.0;
-        press_handlers(
-            div()
-                .id(SharedString::from(id.to_string()))
-                .w_full()
-                .pl(px(12.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(10.0))
-                .opacity(opacity)
-                .when(pressed, |row| row.bg(theme::HAIRLINE)),
-            id,
-            cx,
-            action,
-        )
-        .child(tile(icon))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .min_h(px(46.0))
-                .py(px(9.0))
-                .pr(px(12.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap(px(8.0))
-                .when(!first, |lane| {
-                    lane.border_t_1().border_color(theme::HAIRLINE)
-                })
-                .child(label)
-                .child(trailing),
-        )
-    }
-
-    fn language_page(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let query = self
-            .language_search
-            .as_ref()
-            .map(|search| search.read(cx).value().to_lowercase())
-            .unwrap_or_default();
-        let selected = self.language.clone();
-        let rows = settings::Preferences::languages()
-            .iter()
-            .filter(|language| {
-                query.is_empty()
-                    || language.name.to_lowercase().contains(&query)
-                    || language.native.to_lowercase().contains(&query)
-            })
-            .enumerate()
-            .map(|(index, language)| {
-                let id = language.id.to_string();
-                choice_row(
-                    self,
-                    format!("lang-{id}"),
-                    language.name.to_string(),
-                    language.native,
-                    selected == language.id,
-                    index == 0,
-                    cx,
-                    move |this, cx| this.choose_language(&id, cx),
-                )
-            })
-            .collect::<Vec<_>>();
-
-        let search = self.language_search.as_ref().map(|state| {
-            div()
-                .h(px(32.0))
-                .px(px(10.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(7.0))
-                .rounded(px(9.0))
-                .bg(theme::INSET)
-                .shadow(vec![theme::inner_ring(theme::HAIRLINE)])
-                .text_size(px(13.0))
-                .child(asset_icon("search", theme::TERTIARY, 13.0))
-                .child(
-                    div().flex_1().child(
-                        Input::new(state)
-                            .appearance(false)
-                            .px_0()
-                            .py_0()
-                            .h(px(18.0))
-                            .text_size(px(13.0))
-                            .line_height(px(18.0)),
-                    ),
-                )
         });
-
         div()
-            .px(px(10.0))
-            .pt(px(14.0))
-            .pb(px(14.0))
+            .h(px(height))
+            .px(px(MENU_PAD))
+            .py(px(MENU_PAD))
             .flex()
             .flex_col()
-            .gap(px(12.0))
-            .child(self.nav_bar("lang-back", "Language", cx))
-            .children(search)
-            .child(scroll_group("language-list", LANGUAGE_LIST_H, rows))
-    }
-
-    fn microphone_page(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let selected = self.input_device.clone();
-        let mut choices = vec![(String::new(), "System default".to_string())];
-        for name in &self.microphones {
-            choices.push((name.clone(), name.clone()));
-        }
-        let rows = choices
-            .into_iter()
-            .enumerate()
-            .map(|(index, (name, label))| {
-                let on = selected == name;
-                choice_row(
-                    self,
-                    format!("mic-{index}"),
-                    label,
-                    "",
-                    on,
-                    index == 0,
-                    cx,
-                    move |this, cx| this.choose_microphone(&name, cx),
+            .children(rows)
+            .when(any, |menu| {
+                menu.child(
+                    div()
+                        .h(px(MENU_DIVIDER))
+                        .flex()
+                        .items_center()
+                        .px(px(8.0))
+                        .child(separator()),
                 )
             })
-            .collect::<Vec<_>>();
-
-        div()
-            .px(px(10.0))
-            .pt(px(14.0))
-            .pb(px(14.0))
-            .flex()
-            .flex_col()
-            .gap(px(12.0))
-            .child(self.nav_bar("mic-back", "Microphone", cx))
-            .child(scroll_group("microphone-list", MICROPHONE_LIST_H, rows))
-    }
-
-    /// A centered title with a "‹ Settings" back control on the left.
-    fn nav_bar(&self, id: &'static str, heading: &str, cx: &mut Context<Self>) -> impl IntoElement {
-        let dim = self.press_scale(id) < 1.0;
-        div()
-            .relative()
-            .h(px(28.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(title(heading))
-            .child(
-                press_handlers(
-                    div()
-                        .id(id)
-                        .absolute()
-                        .left(px(2.0))
-                        .top(px(4.0))
-                        .h(px(20.0))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(2.0))
-                        .opacity(if dim { 0.6 } else { 1.0 }),
-                    id,
-                    cx,
-                    |this, cx| {
-                        this.show_main_page();
-                        cx.notify();
-                    },
-                )
-                .child(asset_icon("chevron-left-bold", theme::AMBER, 16.0))
-                .child(
-                    div()
-                        .text_size(px(14.0))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme::AMBER)
-                        .child("Settings"),
-                ),
-            )
+            .child(menu_row(
+                self,
+                "menu-manage".to_string(),
+                "Manage models…",
+                None,
+                false,
+                cx,
+                |this, cx| this.open_settings_at(SettingsTarget::Models, cx),
+            ))
     }
 }
 
-fn model_row(
-    app: &Whisp,
-    spec: &'static models::ModelSpec,
-    ready: bool,
-    first: bool,
-    opacity: f32,
-    cx: &mut Context<Whisp>,
-) -> AnyElement {
-    let selected = app.selected == spec.id && ready;
-    let download = app
-        .download
-        .as_ref()
-        .filter(|download| download.id == spec.id);
-    let received = download.map(|download| {
-        download
-            .received
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .min(download.total)
-    });
-    let meta = match received {
-        Some(got) => format!(
-            "{} of {} · {}",
-            models::format_size(got),
-            models::format_size(spec.bytes),
-            spec.blurb
-        ),
-        None => format!("{} · {}", models::format_size(spec.bytes), spec.blurb),
-    };
-    let id = spec.id.to_string();
-    let press_id = format!("model-{id}");
-
-    let trailing = if let (Some(download), Some(got)) = (download, received) {
-        let fraction = got as f32 / download.total.max(1) as f32;
-        press_handlers(
-            div()
-                .id("cancel-download")
-                .relative()
-                .size(px(26.0))
-                .flex()
-                .items_center()
-                .justify_center(),
-            "cancel-download",
-            cx,
-            |this, cx| this.cancel_download(cx),
-        )
-        .child(
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .child(ring(1.0, theme::EDGE)),
-        )
-        .child(
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .child(ring(fraction, theme::AMBER)),
-        )
-        .child(div().size(px(8.0)).rounded(px(2.0)).bg(theme::AMBER))
-        .into_any_element()
-    } else if ready {
-        let confirming = app.pending_uninstall.as_deref() == Some(spec.id);
-        let remove_id = format!("uninstall-{}", spec.id);
-        let model_id = spec.id.to_string();
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .when(selected && !confirming, |trailing| {
-                trailing.child(asset_icon("check-bold", theme::AMBER, 16.0))
-            })
-            .child(
-                press_handlers(
-                    div()
-                        .id(SharedString::from(remove_id.clone()))
-                        .accessibility_id(remove_id.clone())
-                        .role(gpui_kit::Role::Button)
-                        .aria_label(if confirming {
-                            format!("Confirm removal of {}", spec.name)
-                        } else {
-                            format!("Remove {}", spec.name)
-                        })
-                        .h(px(26.0))
-                        .w(px(if confirming { 60.0 } else { 26.0 }))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(7.0))
-                        .bg(if confirming {
-                            theme::RED_RING
-                        } else {
-                            theme::RAISED
-                        })
-                        .text_size(px(10.0))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(theme::RED),
-                    &remove_id,
-                    cx,
-                    move |this, cx| this.uninstall_model(&model_id, cx),
-                )
-                .child(if confirming {
-                    div().child("REMOVE?").into_any_element()
-                } else {
-                    div()
-                        .child(asset_icon("trash", theme::SECONDARY, 15.0))
-                        .into_any_element()
-                }),
-            )
-            .into_any_element()
-    } else {
-        div()
-            .w(px(56.0))
-            .h(px(26.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_full()
-            .bg(theme::RAISED)
-            .shadow(vec![theme::top_edge(theme::SHEEN)])
-            .text_size(px(12.0))
-            .font_weight(FontWeight::BOLD)
-            .text_color(theme::AMBER)
-            .child("GET")
-            .into_any_element()
-    };
-
-    let pressed = app.press_scale(&press_id) < 1.0;
-    press_handlers(
-        div()
-            .id(SharedString::from(press_id.clone()))
-            .h(px(54.0))
-            .w_full()
-            .px(px(14.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(12.0))
-            .opacity(opacity)
-            .when(!first, |row| row.border_t_1().border_color(theme::HAIRLINE))
-            .when(selected, |row| row.bg(theme::AMBER_WASH))
-            .when(pressed && !selected, |row| row.bg(theme::HAIRLINE)),
-        &press_id,
-        cx,
-        move |this, cx| this.choose_model(&id, cx),
-    )
-    .child(
-        div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .gap(px(1.0))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(7.0))
-                    .child(
-                        div()
-                            .text_size(px(14.0))
-                            .line_height(px(19.0))
-                            .font_weight(if selected {
-                                FontWeight::SEMIBOLD
-                            } else {
-                                FontWeight::MEDIUM
-                            })
-                            .text_color(theme::LABEL)
-                            .child(spec.name),
-                    )
-                    .when(spec.recommended, |name| {
-                        name.child(
-                            div()
-                                .h(px(16.0))
-                                .px(px(6.0))
-                                .flex()
-                                .items_center()
-                                .rounded_full()
-                                .bg(theme::AMBER_BADGE)
-                                .text_size(px(10.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme::AMBER)
-                                .child("RECOMMENDED"),
-                        )
-                    }),
-            )
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .line_height(px(16.0))
-                    .font_features(theme::tabular())
-                    .text_color(theme::SECONDARY)
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(meta),
-            ),
-    )
-    .child(
-        div()
-            .w(px(60.0))
-            .flex_shrink_0()
-            .flex()
-            .justify_end()
-            .child(trailing),
-    )
-    .into_any_element()
-}
-
-#[allow(clippy::too_many_arguments)]
-fn choice_row(
+fn menu_row(
     app: &Whisp,
     press_id: String,
-    label: String,
-    native: &'static str,
-    on: bool,
-    first: bool,
+    label: &'static str,
+    detail: Option<&'static str>,
+    selected: bool,
     cx: &mut Context<Whisp>,
     action: impl Fn(&mut Whisp, &mut Context<Whisp>) + 'static,
 ) -> AnyElement {
     let pressed = app.press_scale(&press_id) < 1.0;
-    let trailing = if on {
-        Some(asset_icon("check-bold", theme::AMBER, 15.0).into_any_element())
-    } else if !native.is_empty() {
-        Some(
-            div()
-                .text_size(px(12.0))
-                .text_color(theme::TERTIARY)
-                .child(native)
-                .into_any_element(),
-        )
-    } else {
-        None
-    };
     press_handlers(
         div()
             .id(SharedString::from(press_id.clone()))
+            .role(gpui_kit::Role::MenuItem)
+            .aria_label(label)
+            .h(px(MENU_ROW))
             .w_full()
             .flex_shrink_0()
-            .pl(px(14.0))
+            .px(px(8.0))
             .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .rounded(px(8.0))
+            .cursor_pointer()
+            .hover(|row| row.bg(theme::HAIRLINE))
             .when(pressed, |row| row.bg(theme::HAIRLINE)),
         &press_id,
         cx,
@@ -1732,28 +660,130 @@ fn choice_row(
     )
     .child(
         div()
+            .w(px(16.0))
+            .flex_shrink_0()
+            .flex()
+            .justify_center()
+            .when(selected, |slot| {
+                slot.child(asset_icon("check-bold", theme::AMBER, 14.0))
+            }),
+    )
+    .child(
+        div()
             .flex_1()
             .min_w_0()
-            .h(px(40.0))
-            .pr(px(14.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .gap(px(8.0))
-            .when(!first, |lane| {
-                lane.border_t_1().border_color(theme::HAIRLINE)
+            .text_size(px(13.0))
+            .font_weight(if selected {
+                FontWeight::SEMIBOLD
+            } else {
+                FontWeight::MEDIUM
             })
-            .child(
-                div()
-                    .min_w_0()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(row_title(&label)),
-            )
-            .children(trailing),
+            .text_color(theme::LABEL)
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .child(label),
     )
+    .children(detail.map(|detail| {
+        div()
+            .flex_shrink_0()
+            .text_size(px(12.0))
+            .text_color(theme::TERTIARY)
+            .child(detail)
+    }))
     .into_any_element()
+}
+
+/// One line under the bar: a title, an optional detail, at most one action,
+/// and a dismiss control.
+fn notice_line(
+    title: String,
+    detail: Option<String>,
+    title_color: Rgba,
+    action: Option<(
+        &'static str,
+        impl Fn(&mut Whisp, &mut Context<Whisp>) + 'static,
+    )>,
+    dismiss: impl Fn(&mut Whisp, &mut Context<Whisp>) + 'static,
+    cx: &mut Context<Whisp>,
+) -> Div {
+    div()
+        .h(px(NOTICE_EXTRA))
+        .w_full()
+        .flex_shrink_0()
+        .pl(px(16.0))
+        .pr(px(10.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(12.0))
+        .border_t_1()
+        .border_color(theme::HAIRLINE)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(1.0))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(title_color)
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(title),
+                )
+                .children(detail.map(|detail| {
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme::SECONDARY)
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(detail)
+                })),
+        )
+        .children(action.map(|(label, action)| {
+            press_handlers(
+                div()
+                    .id("notice-action")
+                    .role(gpui_kit::Role::Button)
+                    .aria_label(label)
+                    .flex_shrink_0()
+                    .h(px(26.0))
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .rounded_full()
+                    .bg(theme::AMBER_SOFT)
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme::AMBER)
+                    .cursor_pointer(),
+                "notice-action",
+                cx,
+                action,
+            )
+            .child(label)
+        }))
+        .child(
+            press_handlers(
+                div()
+                    .id("notice-dismiss")
+                    .role(gpui_kit::Role::Button)
+                    .aria_label("Dismiss")
+                    .size(px(22.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer(),
+                "notice-dismiss",
+                cx,
+                dismiss,
+            )
+            .child(lucide(Lucide::X, theme::TERTIARY, 13.0)),
+        )
 }
 
 fn press_handlers(
@@ -1788,37 +818,10 @@ fn press_handlers(
     )
 }
 
-fn entrance(index: usize, opened: Option<std::time::Instant>) -> f32 {
-    let Some(opened) = opened else {
-        return 1.0;
-    };
-    let t = (opened.elapsed().as_secs_f32() - index as f32 * 0.03) / 0.18;
-    motion::ease_out(t.clamp(0.0, 1.0))
-}
-
 /// `m:ss`, the way a recording timer reads.
 fn clock(elapsed: Duration) -> String {
     let secs = elapsed.as_secs();
     format!("{}:{:02}", secs / 60, secs % 60)
-}
-
-fn title(text: &str) -> Div {
-    div()
-        .text_size(px(15.0))
-        .font_weight(FontWeight::SEMIBOLD)
-        .line_height(px(20.0))
-        .text_color(theme::LABEL)
-        .child(text.to_string())
-}
-
-fn row_title(text: &str) -> AnyElement {
-    div()
-        .text_size(px(14.0))
-        .font_weight(FontWeight::MEDIUM)
-        .line_height(px(19.0))
-        .text_color(theme::LABEL)
-        .child(text.to_string())
-        .into_any_element()
 }
 
 fn hint_text(text: String) -> Div {
@@ -1831,162 +834,8 @@ fn hint_text(text: String) -> Div {
         .child(text)
 }
 
-fn panel_header(heading: &str, subtitle: Option<&str>) -> Div {
-    div()
-        .px(px(8.0))
-        .flex()
-        .flex_col()
-        .gap(px(2.0))
-        .child(title(heading))
-        .children(subtitle.map(|subtitle| {
-            div()
-                .text_size(px(12.0))
-                .line_height(px(16.0))
-                .text_color(theme::SECONDARY)
-                .child(subtitle.to_string())
-        }))
-}
-
-/// A grouped inset section, as in System Settings.
-fn group() -> Div {
-    div()
-        .w_full()
-        .flex()
-        .flex_col()
-        .rounded(px(12.0))
-        .bg(theme::INSET)
-        .overflow_hidden()
-}
-
-/// A grouped section of fixed height whose rows scroll.
-fn scroll_group(id: &'static str, height: f32, rows: Vec<AnyElement>) -> impl IntoElement {
-    div()
-        .h(px(height))
-        .w_full()
-        .rounded(px(12.0))
-        .bg(theme::INSET)
-        .overflow_hidden()
-        .child(
-            div()
-                .id(id)
-                .size_full()
-                .overflow_y_scrollbar()
-                .flex()
-                .flex_col()
-                .children(rows),
-        )
-}
-
-fn tile(icon: Icon) -> Div {
-    div()
-        .size(px(26.0))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(7.0))
-        .bg(theme::RAISED)
-        .shadow(vec![theme::top_edge(theme::TILE_SHEEN)])
-        .child(icon)
-}
-
-fn keycaps(caps: Vec<String>) -> Div {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(4.0))
-        .children(caps.into_iter().map(|cap| {
-            let wide = cap.chars().count() > 1;
-            div()
-                .h(px(22.0))
-                .min_w(px(22.0))
-                .px(px(if wide { 8.0 } else { 6.0 }))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(6.0))
-                .bg(theme::RAISED)
-                .shadow(vec![
-                    theme::top_edge(theme::TILE_SHEEN),
-                    BoxShadow::new(px(0.0), px(-1.0), theme::tone(theme::KEY_BASE)).inset(),
-                ])
-                .text_size(px(12.0))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme::SECONDARY)
-                .child(cap)
-        }))
-}
-
-fn drill_value(value: String) -> AnyElement {
-    div()
-        .min_w_0()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(4.0))
-        .mr(px(-2.0))
-        .child(
-            div()
-                .max_w(px(180.0))
-                .text_size(px(13.0))
-                .text_color(theme::SECONDARY)
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .child(value),
-        )
-        .child(asset_icon("chevron-right-bold", theme::TERTIARY, 13.0))
-        .into_any_element()
-}
-
-/// A macOS switch: amber when on, the knob riding to the lit side.
-fn switch(on: bool) -> Div {
-    div()
-        .w(px(34.0))
-        .h(px(20.0))
-        .flex_shrink_0()
-        .p(px(2.0))
-        .flex()
-        .when(on, |track| track.justify_end())
-        .rounded_full()
-        .bg(if on { theme::AMBER } else { theme::TRACK })
-        .child(
-            div()
-                .size(px(16.0))
-                .rounded_full()
-                .bg(theme::KNOB)
-                .shadow(vec![BoxShadow::new(
-                    px(0.0),
-                    px(1.0),
-                    theme::tone(gpui_kit::rgba(0x00000059)),
-                )
-                .blur_radius(px(3.0))]),
-        )
-}
-
 fn lucide(name: Lucide, color: Rgba, size: f32) -> Icon {
     Icon::new(name).text_color(color).with_size(px(size))
-}
-
-fn provider_icon(provider: Provider) -> impl IntoElement {
-    let (background, foreground) = match provider {
-        Provider::OpenAi => (theme::LABEL, gpui_kit::rgb(0x000000)),
-        Provider::Groq => (gpui_kit::rgba(0xf54f35ff), gpui_kit::rgb(0xffffff)),
-    };
-    div()
-        .size(px(30.0))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(8.0))
-        .bg(background)
-        .child(
-            Icon::empty()
-                .path(provider.icon())
-                .text_color(foreground)
-                .with_size(px(29.0)),
-        )
 }
 
 /// One of the app's own glyphs under `icons/whisp/`.
@@ -1995,31 +844,6 @@ fn asset_icon(name: &str, color: Rgba, size: f32) -> Icon {
         .path(format!("icons/whisp/{name}.svg"))
         .text_color(color)
         .with_size(px(size))
-}
-
-/// A 26px progress ring. The arc starts at twelve o'clock and runs clockwise.
-fn ring(fraction: f32, color: Rgba) -> Icon {
-    // Whole percents, so a download redraws a bounded set of shapes.
-    let fraction = (fraction.clamp(0.0, 1.0) * 100.0).round() / 100.0;
-    let (c, r) = (13.0_f32, 11.5_f32);
-    let shape = if fraction >= 1.0 {
-        format!(r#"<circle cx="{c}" cy="{c}" r="{r}"/>"#)
-    } else {
-        let angle = fraction.max(0.02) * std::f32::consts::TAU;
-        let (x, y) = (c + r * angle.sin(), c - r * angle.cos());
-        let large = u8::from(fraction > 0.5);
-        format!(
-            r#"<path d="M{c} {top} A{r} {r} 0 {large} 1 {x:.2} {y:.2}"/>"#,
-            top = c - r
-        )
-    };
-    let svg = format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 26 26" fill="none" stroke="#000" stroke-width="2.2" stroke-linecap="round">{shape}</svg>"##
-    );
-    Icon::default()
-        .data(svg.as_bytes())
-        .text_color(color)
-        .with_size(px(26.0))
 }
 
 fn separator() -> Div {

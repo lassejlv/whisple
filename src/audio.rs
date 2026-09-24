@@ -1,4 +1,3 @@
-use std::io::Cursor;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -216,32 +215,6 @@ fn store_level(level: &AtomicU32, samples: &[f32]) {
     level.store(boosted.to_bits(), Ordering::Relaxed);
 }
 
-pub fn decode_wav(bytes: &[u8]) -> Result<(Vec<f32>, u32), String> {
-    let mut reader = hound::WavReader::new(Cursor::new(bytes)).map_err(|err| err.to_string())?;
-    let spec = reader.spec();
-    let channels = spec.channels as usize;
-    let interleaved = match spec.sample_format {
-        hound::SampleFormat::Float => reader
-            .samples::<f32>()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|err| err.to_string())?,
-        hound::SampleFormat::Int if spec.bits_per_sample <= 16 => reader
-            .samples::<i16>()
-            .map(|sample| sample.map(|value| value as f32 / i16::MAX as f32))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|err| err.to_string())?,
-        hound::SampleFormat::Int => {
-            let denom = (1i64 << spec.bits_per_sample.saturating_sub(1)) as f32;
-            reader
-                .samples::<i32>()
-                .map(|sample| sample.map(|value| value as f32 / denom))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|err| err.to_string())?
-        }
-    };
-    Ok((downmix(&interleaved, channels), spec.sample_rate))
-}
-
 pub fn to_whisper_pcm(samples: &[f32], rate: u32) -> Vec<f32> {
     if samples.is_empty() {
         return Vec::new();
@@ -265,7 +238,7 @@ pub fn to_whisper_pcm(samples: &[f32], rate: u32) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_wav, known_input, push, to_whisper_pcm};
+    use super::{known_input, push, to_whisper_pcm};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Mutex;
 
@@ -292,12 +265,5 @@ mod tests {
         let output = to_whisper_pcm(&input, 8_000);
         assert_eq!(output.len(), 8);
         assert!(output.iter().all(|sample| sample.abs() <= 1.0));
-    }
-
-    #[test]
-    fn reads_the_bundled_sample() {
-        let (samples, rate) = decode_wav(include_bytes!("../assets/sample.wav")).unwrap();
-        assert_eq!(rate, 22_050);
-        assert!(samples.len() > 16_000);
     }
 }

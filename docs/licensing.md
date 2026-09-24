@@ -42,10 +42,18 @@ ended, deactivating returns the app to trial access. A saved paid key that
 fails validation does not block remaining trial time: the License page still
 shows its validation issue, but dictation uses the trial until it expires.
 
-The License page shows remaining trial hours and minutes when the trial is
-active, or explains that it has ended. It links to the hosted Polar checkout
-and customer portal. The current Polar product remains a one-time Lifetime
-purchase; this three-day trial is local and is not configured in Polar.
+Whisple costs $19 once after the trial (`PRICE` in `src/license.rs`). Change
+that constant together with the Polar product price and the website.
+
+When the trial ends, nothing opens by itself. The voice bar says "Free trial
+ended" and replaces the model capsule with "Unlock · $19", which opens the
+License page. Pressing record on a locked bar also opens the License page.
+On the trial's last day the bar shows the time left next to the gear.
+
+The License page shows the time left ("2 days 4 hours left") or explains that
+the trial has ended. It links to the hosted Polar checkout and customer portal.
+The current Polar product remains a one-time Lifetime purchase; this three-day
+trial is local and is not configured in Polar.
 
 ## Release check
 

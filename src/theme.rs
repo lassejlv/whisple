@@ -27,7 +27,6 @@ pub const SHEEN: Rgba = color(0xffffff0f);
 /// White 7%: the lit top edge of an icon tile or keycap.
 pub const TILE_SHEEN: Rgba = color(0xffffff12);
 /// Black 40%: the shaded bottom edge of a keycap.
-pub const KEY_BASE: Rgba = color(0x00000066);
 pub const LABEL: Rgba = color(0xf5f5f7ff);
 pub const SECONDARY: Rgba = color(0x98989fff);
 pub const TERTIARY: Rgba = color(0x5e5e65ff);

@@ -15,6 +15,8 @@ use serde_json::json;
 pub const CHECKOUT_URL: &str =
     "https://buy.polar.sh/polar_cl_jvWJVAZBAHpctw43ZsWUNlIfBCYx0f6jizX8x4Hoqud";
 pub const CUSTOMER_PORTAL_URL: &str = "https://polar.sh/whisple/portal";
+/// The one-time price shown in the app. Keep it in step with the Polar product.
+pub const PRICE: &str = "$19";
 
 const ORGANIZATION_ID: &str = "9c7736ba-52be-460e-ae28-a9c5bc2e5b26";
 const BENEFIT_ID: &str = "41af04ce-d991-4575-af1d-b216fe69ce2d";
@@ -84,6 +86,26 @@ impl Access {
             }
             Self::Unlicensed | Self::Checking | Self::Trial { .. } | Self::TrialExpired => None,
         }
+    }
+}
+
+/// Trial time left in words: "2 days 4 hours left", or "5h" when `compact`.
+/// Minutes round up, so the last minute never reads as zero.
+pub fn trial_left(remaining: Duration, compact: bool) -> String {
+    let total_minutes = remaining.as_secs().div_ceil(60).max(1);
+    let days = total_minutes / (24 * 60);
+    let hours = total_minutes % (24 * 60) / 60;
+    let minutes = total_minutes % 60;
+    let plural =
+        |count: u64, unit: &str| format!("{count} {unit}{}", if count == 1 { "" } else { "s" });
+    match (compact, days, hours) {
+        (true, 1.., _) => format!("{days}d {hours}h"),
+        (true, 0, 1..) => format!("{hours}h"),
+        (true, 0, 0) => format!("{minutes}m"),
+        (false, 1.., 0) => format!("{} left", plural(days, "day")),
+        (false, 1.., _) => format!("{} {} left", plural(days, "day"), plural(hours, "hour")),
+        (false, 0, 1..) => format!("{hours}h {minutes}m left"),
+        (false, 0, 0) => format!("{} left", plural(minutes, "minute")),
     }
 }
 
@@ -589,6 +611,26 @@ mod tests {
         assert!(!offline_access(&saved, 99));
         saved.expires_at = Some(200);
         assert!(!offline_access(&saved, 200));
+    }
+
+    #[test]
+    fn trial_time_left_reads_in_days_then_hours_then_minutes() {
+        let hours = |h: u64| Duration::from_secs(h * 3600);
+        assert_eq!(trial_left(hours(72), false), "3 days left");
+        assert_eq!(trial_left(hours(52), false), "2 days 4 hours left");
+        assert_eq!(trial_left(hours(25), false), "1 day 1 hour left");
+        assert_eq!(
+            trial_left(hours(5) + Duration::from_secs(50 * 60), false),
+            "5h 50m left"
+        );
+        assert_eq!(trial_left(Duration::from_secs(61), false), "2 minutes left");
+        assert_eq!(trial_left(Duration::ZERO, false), "1 minute left");
+        assert_eq!(trial_left(hours(52), true), "2d 4h");
+        assert_eq!(
+            trial_left(hours(5) + Duration::from_secs(50 * 60), true),
+            "5h"
+        );
+        assert_eq!(trial_left(Duration::from_secs(42 * 60), true), "42m");
     }
 
     #[test]

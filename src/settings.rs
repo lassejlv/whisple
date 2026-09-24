@@ -27,115 +27,92 @@ pub struct Preferences {
 pub struct Language {
     pub id: &'static str,
     pub name: &'static str,
-    /// The language's own name, empty where it matches `name`.
-    pub native: &'static str,
 }
 
 const LANGUAGES: &[Language] = &[
     Language {
         id: "auto",
         name: "Detect automatically",
-        native: "",
     },
     Language {
         id: "en",
         name: "English",
-        native: "",
     },
     Language {
         id: "es",
         name: "Spanish",
-        native: "Español",
     },
     Language {
         id: "fr",
         name: "French",
-        native: "Français",
     },
     Language {
         id: "de",
         name: "German",
-        native: "Deutsch",
     },
     Language {
         id: "it",
         name: "Italian",
-        native: "Italiano",
     },
     Language {
         id: "pt",
         name: "Portuguese",
-        native: "Português",
     },
     Language {
         id: "nl",
         name: "Dutch",
-        native: "Nederlands",
     },
     Language {
         id: "sv",
         name: "Swedish",
-        native: "Svenska",
     },
     Language {
         id: "da",
         name: "Danish",
-        native: "Dansk",
     },
     Language {
         id: "no",
         name: "Norwegian",
-        native: "Norsk",
     },
     Language {
         id: "fi",
         name: "Finnish",
-        native: "Suomi",
     },
     Language {
         id: "pl",
         name: "Polish",
-        native: "Polski",
     },
     Language {
         id: "ru",
         name: "Russian",
-        native: "Русский",
     },
     Language {
         id: "uk",
         name: "Ukrainian",
-        native: "Українська",
     },
     Language {
         id: "ja",
         name: "Japanese",
-        native: "日本語",
     },
     Language {
         id: "zh",
         name: "Chinese",
-        native: "中文",
     },
     Language {
         id: "ko",
         name: "Korean",
-        native: "한국어",
     },
     Language {
         id: "ar",
         name: "Arabic",
-        native: "العربية",
     },
     Language {
         id: "hi",
         name: "Hindi",
-        native: "हिन्दी",
     },
     Language {
         id: "tr",
         name: "Turkish",
-        native: "Türkçe",
     },
 ];
 
@@ -217,14 +194,6 @@ pub fn whisper_language(id: &str) -> Option<&str> {
     }
 }
 
-pub fn language_name(id: &str) -> &'static str {
-    LANGUAGES
-        .iter()
-        .find(|language| language.id == id)
-        .map(|language| language.name)
-        .unwrap_or("English")
-}
-
 pub fn decode(raw: &str) -> Preferences {
     let Ok(file) = serde_json::from_str::<File>(raw) else {
         return Preferences::default();
@@ -251,14 +220,6 @@ pub fn decode(raw: &str) -> Preferences {
     prefs.open_on_startup = file.open_on_startup;
     prefs.show_in_menu_bar = file.show_in_menu_bar;
     prefs
-}
-
-pub fn microphone_label(name: &str) -> &str {
-    if name.is_empty() {
-        "System default"
-    } else {
-        name
-    }
 }
 
 fn clean_device(name: &str) -> String {
@@ -303,7 +264,6 @@ mod tests {
         assert!(prefs.input_device.is_empty());
         assert!(!prefs.open_on_startup);
         assert!(prefs.onboarding_complete);
-        assert_eq!(microphone_label(""), "System default");
     }
 
     #[test]
@@ -313,7 +273,6 @@ mod tests {
         );
         assert!(prefs.open_on_startup);
         assert_eq!(prefs.input_device, "Studio Mic");
-        assert_eq!(microphone_label(&prefs.input_device), "Studio Mic");
         let raw = serde_json::to_string(&File::from(&prefs)).unwrap();
         let again = decode(&raw);
         assert!(again.open_on_startup);
@@ -341,6 +300,5 @@ mod tests {
         let prefs = decode(r#"{"show_hotkey":"a","language":"fr"}"#);
         assert_eq!(prefs.show_hotkey, DEFAULT_HOTKEY);
         assert_eq!(prefs.language, "fr");
-        assert_eq!(language_name("fr"), "French");
     }
 }

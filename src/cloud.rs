@@ -345,8 +345,14 @@ mod tests {
     #[test]
     fn upload_audio_is_mono_16_khz_pcm() {
         let bytes = encode_wav(&vec![0.25; 8_000], 16_000).unwrap();
-        let (samples, rate) = crate::audio::decode_wav(&bytes).unwrap();
-        assert_eq!(rate, 16_000);
+        let mut reader = hound::WavReader::new(std::io::Cursor::new(bytes)).unwrap();
+        let spec = reader.spec();
+        assert_eq!(spec.channels, 1);
+        assert_eq!(spec.sample_rate, 16_000);
+        let samples = reader
+            .samples::<i16>()
+            .map(|sample| f32::from(sample.unwrap()) / f32::from(i16::MAX))
+            .collect::<Vec<_>>();
         assert_eq!(samples.len(), 8_000);
         assert!((samples[0] - 0.25).abs() < 0.001);
     }

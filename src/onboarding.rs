@@ -575,7 +575,7 @@ impl Onboarding {
                     .gap(px(8.0))
                     .child(heading("Pick a voice model", 30.0))
                     .child(description(if self.source == ModelSource::OnDevice {
-                        "It downloads once and runs entirely on your Mac. You can switch any time from the bar."
+                        "It downloads once and runs entirely on your Mac. Switch models any time from the bar."
                     } else {
                         "Use an online model with your own API key. No model download needed."
                     }, 440.0, 15.0)),
@@ -605,7 +605,7 @@ impl Onboarding {
                     .text_size(px(12.0))
                     .text_color(theme::TERTIARY)
                     .child(if self.source == ModelSource::OnDevice {
-                        "Three more models live in the picker, from 142 MB to 1.5 GB."
+                        "More models are in Settings › Models, from 142 MB to 1.5 GB."
                     } else {
                         "Recordings are sent to the selected provider. Provider charges may apply."
                     }),
@@ -1058,9 +1058,26 @@ impl Onboarding {
             )
             .child(
                 div()
-                    .text_size(px(13.0))
-                    .text_color(theme::TERTIARY)
-                    .child("You can change the shortcut any time in Settings."),
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme::AMBER)
+                            .child(format!(
+                                "Your 3-day free trial has started. After that, Whisple is {} once.",
+                                license::PRICE
+                            )),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(theme::TERTIARY)
+                            .child("You can change the shortcut any time in Settings."),
+                    ),
             )
     }
 

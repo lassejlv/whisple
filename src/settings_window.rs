@@ -28,6 +28,28 @@ use crate::tray;
 
 const WIDTH: f32 = 880.0;
 const SIDEBAR_WIDTH: f32 = 232.0;
+const RELEASES_URL: &str = "https://github.com/lassejlv/whisple/releases";
+
+/// Where the bar sends people: a page, or a provider's API key dialog.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsTarget {
+    General,
+    Audio,
+    Models,
+    CloudKey(Provider),
+    License,
+}
+
+impl SettingsTarget {
+    fn page(self) -> Page {
+        match self {
+            Self::General => Page::General,
+            Self::Audio => Page::Audio,
+            Self::Models | Self::CloudKey(_) => Page::Models,
+            Self::License => Page::License,
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -138,16 +160,17 @@ pub(crate) fn open(
     cx: &mut App,
     hud: Entity<Whisp>,
     existing: Option<SettingsHandle>,
-    license_page: bool,
+    target: SettingsTarget,
 ) -> SettingsHandle {
     if let Some(existing) = existing {
         if existing
             .window
             .update(cx, |_, window, cx| {
-                if license_page {
+                // Opening from the gear keeps whatever page was last shown.
+                if target != SettingsTarget::General {
                     existing
                         .view
-                        .update(cx, |view, cx| view.select_page(Page::License, window, cx));
+                        .update(cx, |view, cx| view.show_target(target, window, cx));
                 }
                 window.activate_window();
                 cx.activate(true);
@@ -157,12 +180,7 @@ pub(crate) fn open(
             return existing;
         }
     }
-    let initial_page = if license_page {
-        Page::License
-    } else {
-        Page::General
-    };
-    let window_size = size(px(WIDTH), px(initial_page.height()));
+    let window_size = size(px(WIDTH), px(target.page().height()));
     let bounds = cx
         .primary_display()
         .map(|display| {
@@ -202,7 +220,8 @@ pub(crate) fn open(
                 tabbing_identifier: None,
             },
             |window, cx| {
-                let view = cx.new(|cx| SettingsWindow::new(window, hud, initial_page, cx));
+                let view = cx.new(|cx| SettingsWindow::new(window, hud, Page::General, cx));
+                view.update(cx, |view, cx| view.show_target(target, window, cx));
                 settings_view = Some(view.clone());
                 window.focus(&view.focus_handle(cx), cx);
                 cx.new(|cx| {
@@ -358,6 +377,13 @@ impl SettingsWindow {
         }
         window.focus(&self.focus_handle, cx);
         cx.notify();
+    }
+
+    fn show_target(&mut self, target: SettingsTarget, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_page(target.page(), window, cx);
+        if let SettingsTarget::CloudKey(provider) = target {
+            self.open_cloud(provider, window, cx);
+        }
     }
 
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1272,11 +1298,20 @@ impl SettingsWindow {
     fn license(&self, cx: &mut Context<Self>) -> Div {
         let status = self.hud.read(cx).license_access.clone();
         let trial_detail = status.trial_remaining().map(|remaining| {
-            let total_minutes = remaining.as_secs().div_ceil(60);
-            let hours = total_minutes / 60;
-            let minutes = total_minutes % 60;
-            format!("{hours}h {minutes}m left of your 3-day free trial. Dictation is ready.")
+            format!(
+                "{} of your 3-day free trial. Then {} once to keep Whisple.",
+                license::trial_left(remaining, false),
+                license::PRICE
+            )
         });
+        let ended_detail = format!(
+            "Your 3-day free trial has ended. Buy Whisple for {} once to keep dictating.",
+            license::PRICE
+        );
+        let unlicensed_detail = format!(
+            "Buy Whisple for {} once, then paste the key from your purchase email.",
+            license::PRICE
+        );
         let trial_license_issue = match &status {
             Access::Trial {
                 license_issue: Some(reason),
@@ -1285,18 +1320,14 @@ impl SettingsWindow {
             _ => None,
         };
         let (title, detail) = match &status {
-            Access::Unlicensed => (
-                "No license on this device",
-                "Enter the key from your Polar purchase to unlock dictation.",
-            ),
+            Access::Unlicensed => ("No license on this device", unlicensed_detail.as_str()),
             Access::Checking => ("Checking license", "Contacting Polar to verify access."),
             Access::Trial { .. } if status.allowed() => {
                 ("Free trial", trial_detail.as_deref().unwrap_or_default())
             }
-            Access::Trial { .. } | Access::TrialExpired => (
-                "Free trial ended",
-                "Your 3-day trial has ended. Activate a license to keep dictating.",
-            ),
+            Access::Trial { .. } | Access::TrialExpired => {
+                ("Free trial ended", ended_detail.as_str())
+            }
             Access::Active(_) => ("License active", "Whisple is ready to use on this device."),
             Access::Offline(_) => (
                 "License active offline",
@@ -1409,7 +1440,7 @@ impl SettingsWindow {
                 vec![link_row(
                     "license-buy",
                     "Buy Whisple",
-                    "One payment · opens Polar checkout ↗",
+                    format!("{} once · opens Polar checkout ↗", license::PRICE),
                     license::CHECKOUT_URL,
                     false,
                     cx,
@@ -1539,7 +1570,70 @@ impl SettingsWindow {
     }
 
     fn about(&self, cx: &mut Context<Self>) -> Div {
-        let update_summary = self.hud.read(cx).update_summary();
+        let (update_summary, ready) = {
+            let hud = self.hud.read(cx);
+            (hud.update_summary(), hud.ready_update().is_some())
+        };
+        let mut update_rows = vec![div()
+            .h(px(58.0))
+            .px(px(16.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(12.0))
+            .child(label_stack(
+                &update_summary,
+                Some(if ready {
+                    "Whisple restarts in a few seconds after installing."
+                } else {
+                    "Updates are checked against GitHub releases."
+                }),
+            ))
+            .child(
+                div()
+                    .id("settings-update-action")
+                    .role(gpui_kit::Role::Button)
+                    .aria_label(if ready {
+                        "Install and restart"
+                    } else {
+                        "Check for updates"
+                    })
+                    .h(px(28.0))
+                    .px(px(12.0))
+                    .rounded(px(8.0))
+                    .bg(if ready { theme::AMBER } else { theme::RAISED })
+                    .flex()
+                    .items_center()
+                    .text_size(px(12.0))
+                    .when(ready, |button| button.font_weight(FontWeight::SEMIBOLD))
+                    .text_color(if ready { theme::HUD } else { theme::LABEL })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |view, _, _, cx| {
+                        view.hud.update(cx, |hud, cx| {
+                            if ready {
+                                hud.install_update(cx)
+                            } else {
+                                hud.check_updates_from_settings(cx)
+                            }
+                        })
+                    }))
+                    .child(if ready {
+                        "Install & restart"
+                    } else {
+                        "Check now"
+                    }),
+            )
+            .into_any_element()];
+        if ready {
+            update_rows.push(link_row(
+                "settings-release-notes",
+                "What’s new",
+                "Release notes on GitHub ↗",
+                RELEASES_URL,
+                true,
+                cx,
+            ));
+        }
         div()
             .flex()
             .flex_col()
@@ -1585,41 +1679,7 @@ impl SettingsWindow {
                             )),
                     ),
             )
-            .child(section(
-                "Updates",
-                vec![div()
-                    .h(px(58.0))
-                    .px(px(16.0))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(12.0))
-                    .child(label_stack(
-                        &update_summary,
-                        Some("Updates are checked against GitHub releases."),
-                    ))
-                    .child(
-                        div()
-                            .id("settings-check-updates")
-                            .role(gpui_kit::Role::Button)
-                            .aria_label("Check for updates")
-                            .h(px(28.0))
-                            .px(px(12.0))
-                            .rounded(px(8.0))
-                            .bg(theme::RAISED)
-                            .flex()
-                            .items_center()
-                            .text_size(px(12.0))
-                            .text_color(theme::LABEL)
-                            .cursor_pointer()
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.hud
-                                    .update(cx, |hud, cx| hud.check_updates_from_settings(cx))
-                            }))
-                            .child("Check now"),
-                    )
-                    .into_any_element()],
-            ))
+            .child(section("Updates", update_rows))
             .child(section(
                 "More",
                 vec![
@@ -1944,7 +2004,7 @@ fn modal_backdrop() -> Div {
 fn link_row(
     id: &'static str,
     title: &'static str,
-    detail: &'static str,
+    detail: impl Into<SharedString>,
     url: &'static str,
     divider: bool,
     _cx: &mut Context<SettingsWindow>,
@@ -1973,7 +2033,7 @@ fn link_row(
             div()
                 .text_size(px(12.0))
                 .text_color(theme::SECONDARY)
-                .child(detail),
+                .child(detail.into()),
         )
         .into_any_element()
 }
