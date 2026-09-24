@@ -56,8 +56,11 @@ jobs:
       - name: Run Rust tests
         run: cargo test --locked
 
+      - name: Build app
+        run: ./scripts/package-macos.sh
+
       - name: Build DMG and updater archive
-        run: ./scripts/build-macos-dmgs.sh --arch "${{ matrix.arch }}"
+        run: ./scripts/build-macos-dmgs.sh --arch "${{ matrix.arch }}" --use-packaged-app
 
       - name: Attach assets to release
         shell: bash

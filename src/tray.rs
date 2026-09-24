@@ -8,7 +8,17 @@ pub enum Command {
     Show,
     Hide,
     Settings,
+    Update,
     Quit,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+pub enum UpdateStatus<'a> {
+    Checking,
+    Available(&'a str),
+    UpToDate,
+    Error,
 }
 
 #[cfg(target_os = "macos")]
@@ -25,6 +35,7 @@ mod macos {
     struct MenuBar {
         _icon: TrayIcon,
         hide: MenuItem,
+        update: MenuItem,
     }
 
     impl Global for MenuBar {}
@@ -34,11 +45,13 @@ mod macos {
         let show = MenuItem::with_id("show", "Show Whisple", true, None);
         let hide = MenuItem::with_id("hide", "Hide Whisple", false, None);
         let settings = MenuItem::with_id("settings", "Settings…", true, None);
+        let update = MenuItem::with_id("update", "Check for Updates…", true, None);
         let quit = MenuItem::with_id("quit", "Quit Whisple", true, None);
         menu.append_items(&[
             &show,
             &hide,
             &settings,
+            &update,
             &PredefinedMenuItem::separator(),
             &quit,
         ])
@@ -57,7 +70,11 @@ mod macos {
                 NSApplicationActivationPolicy::NSApplicationActivationPolicyAccessory,
             );
         }
-        cx.set_global(MenuBar { _icon: icon, hide });
+        cx.set_global(MenuBar {
+            _icon: icon,
+            hide,
+            update,
+        });
         Ok(())
     }
 
@@ -67,6 +84,7 @@ mod macos {
                 "show" => return Some(Command::Show),
                 "hide" => return Some(Command::Hide),
                 "settings" => return Some(Command::Settings),
+                "update" => return Some(Command::Update),
                 "quit" => return Some(Command::Quit),
                 _ => {}
             }
@@ -77,6 +95,20 @@ mod macos {
     pub fn set_visible(visible: bool, cx: &App) {
         if let Some(menu) = cx.try_global::<MenuBar>() {
             menu.hide.set_enabled(visible);
+        }
+    }
+
+    pub fn set_update(status: UpdateStatus<'_>, cx: &App) {
+        if let Some(menu) = cx.try_global::<MenuBar>() {
+            let label = match status {
+                UpdateStatus::Checking => "Checking for Updates…".to_string(),
+                UpdateStatus::Available(version) => format!("Install Whisple v{version}…"),
+                UpdateStatus::UpToDate => "Whisple is Up to Date".to_string(),
+                UpdateStatus::Error => "Update Check Failed — Retry".to_string(),
+            };
+            menu.update.set_text(label);
+            menu.update
+                .set_enabled(!matches!(status, UpdateStatus::Checking));
         }
     }
 
@@ -123,4 +155,9 @@ pub fn set_visible(visible: bool, cx: &App) {
     macos::set_visible(visible, cx);
     #[cfg(not(target_os = "macos"))]
     let _ = (visible, cx);
+}
+
+#[cfg(target_os = "macos")]
+pub fn set_update(status: UpdateStatus<'_>, cx: &App) {
+    macos::set_update(status, cx);
 }

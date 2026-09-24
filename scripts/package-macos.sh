@@ -56,6 +56,12 @@ else
     bundle="$project_dir/target/$bundle_name.app"
 fi
 version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+bundle_version="${version%%[-+]*}"
+build_number="${WHISPLE_BUILD_NUMBER:-${GITHUB_RUN_NUMBER:-1}}"
+if [[ ! "$build_number" =~ ^[0-9]+$ ]]; then
+    echo "WHISPLE_BUILD_NUMBER must contain only digits." >&2
+    exit 2
+fi
 iconset="$project_dir/target/Whisple.iconset"
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources" "$iconset"
 cp "$binary" "$bundle/Contents/MacOS/whisple"
@@ -79,14 +85,22 @@ cat > "$bundle/Contents/Info.plist" <<PLIST
     <key>CFBundleDisplayName</key><string>Whisple</string>
     <key>CFBundleIconFile</key><string>Whisple.icns</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>$version</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>$bundle_version</string>
+    <key>CFBundleVersion</key><string>$build_number</string>
+    <key>WhispleSemanticVersion</key><string>$version</string>
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
-    <key>NSMicrophoneUsageDescription</key><string>Whisple uses the microphone for local dictation.</string>
+    <key>NSMicrophoneUsageDescription</key><string>Whisple uses the microphone for dictation. Audio goes to OpenAI or Groq only when you select a cloud model.</string>
 </dict>
 </plist>
 PLIST
 
 plutil -lint "$bundle/Contents/Info.plist"
+signing_identity="${WHISPLE_CODESIGN_IDENTITY:--}"
+sign_args=(--force --sign "$signing_identity" --entitlements assets/whisple.entitlements)
+if [[ "$signing_identity" != "-" ]]; then
+    sign_args+=(--options runtime --timestamp)
+fi
+codesign "${sign_args[@]}" "$bundle"
+codesign --verify --deep --strict "$bundle"
 echo "$bundle"

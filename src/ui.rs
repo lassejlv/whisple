@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use gpui_kit::assets::IconName as Lucide;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{Input, InputContentType, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{Icon, Sizable};
 use gpui_kit::{
@@ -13,6 +13,7 @@ use gpui_kit::{
 use crate::app::{
     Phase, Reveal, SettingsPage, Whisp, BAR_HEIGHT, COLLAPSED_HEIGHT, ERROR_EXTRA, WINDOW_RADIUS,
 };
+use crate::cloud::Provider;
 use crate::hotkey;
 use crate::models;
 use crate::motion;
@@ -28,6 +29,7 @@ impl Render for Whisp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.tick(window, cx);
         self.sync_language_search(window, cx);
+        self.sync_key_input(window, cx);
         let error = self.error.clone();
 
         div()
@@ -39,6 +41,9 @@ impl Render for Whisp {
                     // Space belongs to the search field while it has focus.
                     if let Some(search) = this.focused_search(window, cx) {
                         search.update(cx, |search, cx| search.insert(" ", window, cx));
+                        return;
+                    }
+                    if this.focused_key_input(window, cx).is_some() {
                         return;
                     }
                     this.toggle_listen(cx);
@@ -116,6 +121,34 @@ impl Whisp {
         self.language_search
             .clone()
             .filter(|search| search.focus_handle(cx).is_focused(window))
+    }
+
+    fn sync_key_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let showing = self.picker_open && self.cloud_config.is_some();
+        if !showing {
+            if self.focused_key_input(window, cx).is_some() {
+                window.focus(&self.focus_handle, cx);
+            }
+            self.key_input = None;
+            return;
+        }
+        if self.key_input.is_some() {
+            return;
+        }
+        let state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Paste API key")
+                .masked(true)
+        });
+        cx.subscribe(&state, |_, _, _: &InputEvent, cx| cx.notify())
+            .detach();
+        self.key_input = Some(state);
+    }
+
+    fn focused_key_input(&self, window: &Window, cx: &gpui_kit::App) -> Option<Entity<InputState>> {
+        self.key_input
+            .clone()
+            .filter(|input| input.focus_handle(cx).is_focused(window))
     }
 
     fn panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -313,7 +346,9 @@ impl Whisp {
     fn model_capsule(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let scale = self.press_scale("models");
         let open = self.picker_open;
-        let label = if self.selected_ready() {
+        let label = if let Some(provider) = Provider::from_id(&self.selected) {
+            provider.name()
+        } else if self.selected_ready() {
             self.selected_spec().chip
         } else {
             "Models"
@@ -458,7 +493,10 @@ impl Whisp {
 
     // MARK: Model picker
 
-    fn picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn picker(&self, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(provider) = self.cloud_config {
+            return self.cloud_key_panel(provider, cx).into_any_element();
+        }
         let rows = self
             .models
             .iter()
@@ -485,7 +523,7 @@ impl Whisp {
             .gap(px(12.0))
             .child(panel_header(
                 "Voice models",
-                Some("Runs on your Mac. Nothing leaves it."),
+                Some("Choose a local model or connect a cloud provider."),
             ))
             .child(group().children(rows))
             .child(
@@ -530,6 +568,291 @@ impl Whisp {
                                 .child(format!("{} used", models::format_size(used))),
                         )
                     }),
+            )
+            .child(
+                div()
+                    .px(px(8.0))
+                    .pt(px(6.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::SECONDARY)
+                            .child("CLOUD MODELS"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme::TERTIARY)
+                            .child("Uses your API key"),
+                    ),
+            )
+            .child(group().children(Provider::ALL.map(|provider| self.cloud_row(provider, cx))))
+            .child(
+                div()
+                    .px(px(8.0))
+                    .pb(px(2.0))
+                    .text_size(px(12.0))
+                    .line_height(px(16.0))
+                    .text_color(theme::TERTIARY)
+                    .child("Cloud recordings are sent to the selected provider."),
+            )
+            .into_any_element()
+    }
+
+    fn cloud_row(&self, provider: Provider, cx: &mut Context<Self>) -> AnyElement {
+        let connected = self.cloud_keys[provider.index()];
+        let selected = connected && self.selected == provider.id();
+        let id = provider.id();
+        let edit_id = format!("edit-{id}");
+        let action = press_handlers(
+            div()
+                .id(SharedString::from(edit_id.clone()))
+                .accessibility_id(edit_id.clone())
+                .role(gpui_kit::Role::Button)
+                .aria_label(format!(
+                    "{} {} API key",
+                    if connected { "Edit" } else { "Add" },
+                    provider.name()
+                ))
+                .h(px(26.0))
+                .w(px(68.0))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(theme::RAISED)
+                .text_size(px(11.0))
+                .font_weight(FontWeight::BOLD)
+                .text_color(theme::AMBER),
+            &edit_id,
+            cx,
+            move |this, cx| this.open_cloud_config(provider, cx),
+        )
+        .child(if connected { "EDIT" } else { "ADD KEY" });
+
+        press_handlers(
+            div()
+                .id(id)
+                .accessibility_id(id)
+                .role(gpui_kit::Role::Button)
+                .aria_label(format!("Use {} cloud model", provider.name()))
+                .h(px(62.0))
+                .w_full()
+                .px(px(12.0))
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .when(provider == Provider::Groq, |row| {
+                    row.border_t_1().border_color(theme::HAIRLINE)
+                })
+                .when(selected, |row| row.bg(theme::AMBER_WASH)),
+            id,
+            cx,
+            move |this, cx| this.choose_cloud(provider, cx),
+        )
+        .child(provider_icon(provider))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .text_size(px(14.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::LABEL)
+                        .child(provider.name()),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .line_height(px(16.0))
+                        .text_color(theme::SECONDARY)
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(provider.description()),
+                ),
+        )
+        .when(selected, |row| {
+            row.child(asset_icon("check-bold", theme::AMBER, 16.0))
+        })
+        .child(action)
+        .into_any_element()
+    }
+
+    fn cloud_key_panel(&self, provider: Provider, cx: &mut Context<Self>) -> impl IntoElement {
+        let connected = self.cloud_keys[provider.index()];
+        let input = self.key_input.clone();
+        let key_toggle = cx.weak_entity();
+
+        div()
+            .px(px(18.0))
+            .pt(px(18.0))
+            .pb(px(18.0))
+            .flex()
+            .flex_col()
+            .gap(px(18.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.0))
+                    .child(
+                        press_handlers(
+                            div()
+                                .id("cloud-back")
+                                .role(gpui_kit::Role::Button)
+                                .aria_label("Back to voice models")
+                                .size(px(28.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(8.0))
+                                .bg(theme::RAISED),
+                            "cloud-back",
+                            cx,
+                            |this, cx| this.back_from_cloud_config(cx),
+                        )
+                        .child(asset_icon("chevron-left-bold", theme::SECONDARY, 15.0)),
+                    )
+                    .child(provider_icon(provider))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.0))
+                            .child(
+                                div()
+                                    .text_size(px(16.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme::LABEL)
+                                    .child(format!("Connect {}", provider.name())),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(theme::SECONDARY)
+                                    .child(provider.model()),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::SECONDARY)
+                            .child("API KEY"),
+                    )
+                    .child(
+                        div()
+                            .h(px(40.0))
+                            .px(px(12.0))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(8.0))
+                            .rounded(px(9.0))
+                            .bg(theme::INSET)
+                            .border_1()
+                            .border_color(theme::EDGE)
+                            .children(input.map(|state| {
+                                div().flex_1().min_w_0().child(
+                                    Input::new(&state)
+                                        .content_type(InputContentType::Password)
+                                        .appearance(false)
+                                        .px_0()
+                                        .py_0()
+                                        .h(px(20.0))
+                                        .text_size(px(13.0)),
+                                )
+                            }))
+                            .child(
+                                div()
+                                    .id("cloud-key-visibility")
+                                    .role(gpui_kit::Role::Button)
+                                    .aria_label(if self.key_visible { "Hide API key" } else { "Show API key" })
+                                    .text_size(px(12.0))
+                                    .text_color(theme::SECONDARY)
+                                    .cursor_pointer()
+                                    .on_click(move |_, window, cx| {
+                                        key_toggle.update(cx, |this, cx| this.toggle_key_visibility(window, cx)).ok();
+                                    })
+                                    .child(if self.key_visible { "Hide" } else { "Show" }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .line_height(px(17.0))
+                            .text_color(theme::SECONDARY)
+                            .child(if connected {
+                                format!("A key is saved on this device. Paste a new one to replace it. Audio goes to {} when selected.", provider.name())
+                            } else {
+                                format!("Your key stays on this device. Audio goes to {} only when this model is selected.", provider.name())
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(10.0))
+                    .child(if connected {
+                        press_handlers(
+                            div()
+                                .id("cloud-remove-key")
+                                .role(gpui_kit::Role::Button)
+                                .aria_label(format!("Remove {} API key", provider.name()))
+                                .text_size(px(12.0))
+                                .text_color(theme::RED),
+                            "cloud-remove-key",
+                            cx,
+                            |this, cx| this.remove_cloud_key(cx),
+                        )
+                        .child("Remove key")
+                        .into_any_element()
+                    } else {
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme::TERTIARY)
+                            .child(format!("Billed by {}", provider.name()))
+                            .into_any_element()
+                    })
+                    .child(
+                        press_handlers(
+                            div()
+                                .id("cloud-save-key")
+                                .role(gpui_kit::Role::Button)
+                                .aria_label(format!("Save and use {}", provider.name()))
+                                .h(px(34.0))
+                                .px(px(16.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(9.0))
+                                .bg(theme::AMBER)
+                                .text_size(px(13.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme::HUD),
+                            "cloud-save-key",
+                            cx,
+                            |this, cx| this.save_cloud_key(cx),
+                        )
+                        .child(if connected { "Use model" } else { "Save & use" }),
+                    ),
             )
     }
 
@@ -1355,6 +1678,27 @@ fn switch(on: bool) -> Div {
 
 fn lucide(name: Lucide, color: Rgba, size: f32) -> Icon {
     Icon::new(name).text_color(color).with_size(px(size))
+}
+
+fn provider_icon(provider: Provider) -> impl IntoElement {
+    let (background, foreground) = match provider {
+        Provider::OpenAi => (theme::LABEL, gpui_kit::rgb(0x000000)),
+        Provider::Groq => (gpui_kit::rgba(0xf54f35ff), gpui_kit::rgb(0xffffff)),
+    };
+    div()
+        .size(px(30.0))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(8.0))
+        .bg(background)
+        .child(
+            Icon::empty()
+                .path(provider.icon())
+                .text_color(foreground)
+                .with_size(px(29.0)),
+        )
 }
 
 /// One of the app's own glyphs under `icons/whisp/`.
