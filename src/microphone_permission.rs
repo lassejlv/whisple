@@ -6,7 +6,7 @@ mod macos {
     use std::time::Duration;
 
     use block::ConcreteBlock;
-    use cocoa::base::{id, nil, BOOL};
+    use cocoa::base::{id, nil, BOOL, NO};
     use cocoa::foundation::NSString;
     use objc::runtime::Class;
     use objc::{msg_send, sel, sel_impl};
@@ -47,7 +47,7 @@ mod macos {
             }
             let (sender, receiver) = mpsc::channel();
             let block = ConcreteBlock::new(move |granted: BOOL| {
-                let _ = sender.send(granted);
+                let _ = sender.send(granted != NO);
             })
             .copy();
             let _: () =
