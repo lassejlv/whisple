@@ -21,6 +21,7 @@ whisper-rs = "0.14"
 x11rb = { version = "0.13", features = ["shape"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+block = "0.1"
 cocoa = "0.26"
 objc = "0.2"
 global-hotkey = "0.8"

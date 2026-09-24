@@ -8289,6 +8289,7 @@ dependencies = [
 name = "whisple"
 version = "0.1.0"
 dependencies = [
+ "block",
  "cocoa 0.26.0",
  "cpal",
  "dirs 6.0.0",

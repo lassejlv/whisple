@@ -2,8 +2,10 @@ mod app;
 mod audio;
 mod cloud;
 mod hotkey;
+mod microphone_permission;
 mod models;
 mod motion;
+mod onboarding;
 mod place;
 mod settings;
 mod startup;
@@ -65,6 +67,9 @@ impl AssetSource for Assets {
             "icons/whisp/groq-mark.svg" => {
                 Some(Cow::Borrowed(include_bytes!("../assets/groq-mark.svg")))
             }
+            "icons/whisp/onboarding-mic.svg" => Some(Cow::Borrowed(include_bytes!(
+                "../assets/onboarding-mic.svg"
+            ))),
             _ => None,
         };
         if ours.is_some() {
@@ -94,50 +99,57 @@ fn main() {
             theme::install(cx);
             app::bind_keys(cx);
             let menu_bar = tray::install(cx);
-
-            let window_size = size(px(app::WINDOW_WIDTH), px(app::COLLAPSED_HEIGHT));
-            let bounds = bottom_center(window_size, cx);
-            cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: None,
-                    focus: !menu_bar,
-                    show: !menu_bar,
-                    kind: WindowKind::PopUp,
-                    is_movable: false,
-                    // AppKit only adds the resizable style bit when a titlebar is
-                    // present, and setContentSize keeps the top-left fixed. The
-                    // bottom edge is pinned in `place` instead.
-                    app_owns_titlebar_drag: false,
-                    inactive_frame_interval: None,
-                    is_resizable: false,
-                    is_minimizable: false,
-                    display_id: None,
-                    window_background: WindowBackgroundAppearance::Transparent,
-                    icon: None,
-                    app_id: Some("whisple".into()),
-                    window_min_size: Some(size(px(320.0), px(app::COLLAPSED_HEIGHT))),
-                    window_decorations: Some(WindowDecorations::Client),
-                    tabbing_identifier: None,
-                },
-                |window, cx| {
-                    let view = cx.new(|cx| app::Whisp::new(window, !menu_bar, cx));
-                    window.focus(&view.focus_handle(cx), cx);
-                    // Only the rounded HUD paints. The kit root would otherwise fill
-                    // the whole window, square corners included.
-                    cx.new(|cx| {
-                        use gpui_kit::Styled as _;
-                        Root::new(view, window, cx)
-                            .bordered(false)
-                            .bg(gpui_kit::transparent_black())
-                    })
-                },
-            )
-            .expect("open the voice window");
-            if !menu_bar {
-                cx.activate(true);
+            if settings::needs_onboarding() {
+                onboarding::open(cx);
+            } else {
+                open_hud(cx, !menu_bar);
             }
         });
+}
+
+pub(crate) fn open_hud(cx: &mut App, visible: bool) {
+    let window_size = size(px(app::WINDOW_WIDTH), px(app::COLLAPSED_HEIGHT));
+    let bounds = bottom_center(window_size, cx);
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: None,
+            focus: visible,
+            show: visible,
+            kind: WindowKind::PopUp,
+            is_movable: false,
+            // AppKit only adds the resizable style bit when a titlebar is
+            // present, and setContentSize keeps the top-left fixed. The
+            // bottom edge is pinned in `place` instead.
+            app_owns_titlebar_drag: false,
+            inactive_frame_interval: None,
+            is_resizable: false,
+            is_minimizable: false,
+            display_id: None,
+            window_background: WindowBackgroundAppearance::Transparent,
+            icon: None,
+            app_id: Some("whisple".into()),
+            window_min_size: Some(size(px(320.0), px(app::COLLAPSED_HEIGHT))),
+            window_decorations: Some(WindowDecorations::Client),
+            tabbing_identifier: None,
+        },
+        |window, cx| {
+            let view = cx.new(|cx| app::Whisp::new(window, visible, cx));
+            window.focus(&view.focus_handle(cx), cx);
+            // Only the rounded HUD paints. The kit root would otherwise fill
+            // the whole window, square corners included.
+            cx.new(|cx| {
+                use gpui_kit::Styled as _;
+                Root::new(view, window, cx)
+                    .bordered(false)
+                    .bg(gpui_kit::transparent_black())
+            })
+        },
+    )
+    .expect("open the voice window");
+    if visible {
+        cx.activate(true);
+    }
 }
 
 fn bottom_center(

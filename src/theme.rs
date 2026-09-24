@@ -34,6 +34,8 @@ pub const TERTIARY: Rgba = color(0x5e5e65ff);
 /// Amber LED: the only accent.
 pub const AMBER: Rgba = color(0xffb340ff);
 pub const AMBER_SOFT: Rgba = color(0x2a1f0cff);
+pub const AMBER_HALO_INNER: Rgba = color(0xffb3400d);
+pub const AMBER_HALO_OUTER: Rgba = color(0xffb34006);
 /// Amber 7%: the selected-row wash.
 pub const AMBER_WASH: Rgba = color(0xffb34012);
 /// Amber 16%: badge fill.

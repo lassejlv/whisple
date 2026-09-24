@@ -1147,6 +1147,7 @@ impl Whisp {
 
     fn persist(&self) {
         settings::save(&Preferences {
+            onboarding_complete: settings::load().onboarding_complete,
             selected: self.selected.clone(),
             language: self.language.clone(),
             show_hotkey: self.show_hotkey.clone(),

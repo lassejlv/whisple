@@ -12,6 +12,7 @@ pub const DEFAULT_HOTKEY: &str = "ctrl-shift-space";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Preferences {
+    pub onboarding_complete: bool,
     pub selected: String,
     pub language: String,
     pub show_hotkey: String,
@@ -139,6 +140,9 @@ const LANGUAGES: &[Language] = &[
 
 #[derive(Serialize, Deserialize)]
 struct File {
+    // Files written before onboarding existed belong to existing users.
+    #[serde(default = "yes")]
+    onboarding_complete: bool,
     #[serde(default)]
     selected: String,
     #[serde(default)]
@@ -162,6 +166,7 @@ fn yes() -> bool {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
+            onboarding_complete: false,
             selected: String::new(),
             language: "en".into(),
             show_hotkey: DEFAULT_HOTKEY.into(),
@@ -196,6 +201,10 @@ pub fn save(prefs: &Preferences) {
     }
 }
 
+pub fn needs_onboarding() -> bool {
+    !load().onboarding_complete
+}
+
 pub fn whisper_language(id: &str) -> Option<&str> {
     if id == "auto" {
         None
@@ -217,6 +226,7 @@ pub fn decode(raw: &str) -> Preferences {
         return Preferences::default();
     };
     let mut prefs = Preferences::default();
+    prefs.onboarding_complete = file.onboarding_complete;
     if !file.selected.is_empty() {
         prefs.selected = file.selected;
     }
@@ -260,6 +270,7 @@ fn path() -> PathBuf {
 impl From<&Preferences> for File {
     fn from(prefs: &Preferences) -> Self {
         Self {
+            onboarding_complete: prefs.onboarding_complete,
             selected: prefs.selected.clone(),
             language: prefs.language.clone(),
             show_hotkey: prefs.show_hotkey.clone(),
@@ -285,6 +296,7 @@ mod tests {
         assert!(prefs.clean_fillers);
         assert!(prefs.input_device.is_empty());
         assert!(!prefs.open_on_startup);
+        assert!(prefs.onboarding_complete);
         assert_eq!(microphone_label(""), "System default");
     }
 
@@ -301,6 +313,15 @@ mod tests {
         assert!(again.open_on_startup);
         assert_eq!(again.input_device, "Studio Mic");
         assert_eq!(again.selected, "small-en");
+        assert!(again.onboarding_complete);
+    }
+
+    #[test]
+    fn unfinished_onboarding_survives_a_round_trip() {
+        let prefs = Preferences::default();
+        assert!(!prefs.onboarding_complete);
+        let raw = serde_json::to_string(&File::from(&prefs)).unwrap();
+        assert!(!decode(&raw).onboarding_complete);
     }
 
     #[test]
