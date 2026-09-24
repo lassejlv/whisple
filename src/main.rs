@@ -9,6 +9,7 @@ mod startup;
 mod stt;
 mod text;
 mod theme;
+mod tray;
 mod ui;
 
 use std::borrow::Cow;
@@ -55,6 +56,7 @@ impl AssetSource for Assets {
             }
             "icons/whisp/play.svg" => Some(Cow::Borrowed(include_bytes!("../assets/play.svg"))),
             "icons/whisp/search.svg" => Some(Cow::Borrowed(include_bytes!("../assets/search.svg"))),
+            "icons/whisp/trash.svg" => Some(Cow::Borrowed(include_bytes!("../assets/trash.svg"))),
             _ => None,
         };
         if ours.is_some() {
@@ -83,6 +85,7 @@ fn main() {
             gpui_kit::init(cx);
             theme::install(cx);
             app::bind_keys(cx);
+            let menu_bar = tray::install(cx);
 
             let window_size = size(px(app::WINDOW_WIDTH), px(app::COLLAPSED_HEIGHT));
             let bounds = bottom_center(window_size, cx);
@@ -90,8 +93,8 @@ fn main() {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     titlebar: None,
-                    focus: true,
-                    show: true,
+                    focus: !menu_bar,
+                    show: !menu_bar,
                     kind: WindowKind::PopUp,
                     is_movable: false,
                     // AppKit only adds the resizable style bit when a titlebar is
@@ -104,13 +107,13 @@ fn main() {
                     display_id: None,
                     window_background: WindowBackgroundAppearance::Transparent,
                     icon: None,
-                    app_id: Some("whisp".into()),
+                    app_id: Some("whisple".into()),
                     window_min_size: Some(size(px(320.0), px(app::COLLAPSED_HEIGHT))),
                     window_decorations: Some(WindowDecorations::Client),
                     tabbing_identifier: None,
                 },
                 |window, cx| {
-                    let view = cx.new(app::Whisp::new);
+                    let view = cx.new(|cx| app::Whisp::new(window, !menu_bar, cx));
                     window.focus(&view.focus_handle(cx), cx);
                     // Only the rounded HUD paints. The kit root would otherwise fill
                     // the whole window, square corners included.
@@ -123,7 +126,9 @@ fn main() {
                 },
             )
             .expect("open the voice window");
-            cx.activate(true);
+            if !menu_bar {
+                cx.activate(true);
+            }
         });
 }
 

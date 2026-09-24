@@ -44,9 +44,11 @@ impl Render for Whisp {
                     this.toggle_listen(cx);
                 }),
             )
-            .on_action(cx.listener(|this, _: &crate::app::CloseOverlay, _, cx| {
-                this.close_overlay(cx);
-            }))
+            .on_action(
+                cx.listener(|this, _: &crate::app::CloseOverlay, window, cx| {
+                    this.close_overlay(window, cx);
+                }),
+            )
             .on_action(cx.listener(|this, _: &crate::app::CopyResult, _, cx| {
                 this.copy_result(cx);
             }))
@@ -584,7 +586,7 @@ impl Whisp {
                             .on_click(move |_, _, cx| {
                                 quit_view.update(cx, |this, cx| this.quit(cx)).ok();
                             })
-                            .child(div().text_color(theme::SECONDARY).child("Quit Whisp"))
+                            .child(div().text_color(theme::SECONDARY).child("Quit Whisple"))
                             .child(div().text_color(theme::TERTIARY).child("⌘Q")),
                     ),
             )
@@ -595,7 +597,7 @@ impl Whisp {
                         asset_icon("keyboard", theme::LABEL, 15.0),
                         true,
                         entrance(0, opened),
-                        row_title("Show Whisp"),
+                        row_title("Show Whisple"),
                         shortcut,
                         cx,
                         |this, cx| this.begin_hotkey_capture(cx),
@@ -930,9 +932,58 @@ fn model_row(
         )
         .child(div().size(px(8.0)).rounded(px(2.0)).bg(theme::AMBER))
         .into_any_element()
-    } else if selected {
-        asset_icon("check-bold", theme::AMBER, 16.0).into_any_element()
-    } else if !ready {
+    } else if ready {
+        let confirming = app.pending_uninstall.as_deref() == Some(spec.id);
+        let remove_id = format!("uninstall-{}", spec.id);
+        let model_id = spec.id.to_string();
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .when(selected && !confirming, |trailing| {
+                trailing.child(asset_icon("check-bold", theme::AMBER, 16.0))
+            })
+            .child(
+                press_handlers(
+                    div()
+                        .id(SharedString::from(remove_id.clone()))
+                        .accessibility_id(remove_id.clone())
+                        .role(gpui_kit::Role::Button)
+                        .aria_label(if confirming {
+                            format!("Confirm removal of {}", spec.name)
+                        } else {
+                            format!("Remove {}", spec.name)
+                        })
+                        .h(px(26.0))
+                        .w(px(if confirming { 60.0 } else { 26.0 }))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(7.0))
+                        .bg(if confirming {
+                            theme::RED_RING
+                        } else {
+                            theme::RAISED
+                        })
+                        .text_size(px(10.0))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(theme::RED),
+                    &remove_id,
+                    cx,
+                    move |this, cx| this.uninstall_model(&model_id, cx),
+                )
+                .child(if confirming {
+                    div().child("REMOVE?").into_any_element()
+                } else {
+                    div()
+                        .child(asset_icon("trash", theme::SECONDARY, 15.0))
+                        .into_any_element()
+                }),
+            )
+            .into_any_element()
+    } else {
         div()
             .w(px(56.0))
             .h(px(26.0))
@@ -947,8 +998,6 @@ fn model_row(
             .text_color(theme::AMBER)
             .child("GET")
             .into_any_element()
-    } else {
-        div().into_any_element()
     };
 
     let pressed = app.press_scale(&press_id) < 1.0;

@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Build Apple silicon and Intel DMGs in target/dist/ (or one with --arch).
+# Requires Rust, Xcode command-line tools, and rsvg-convert (librsvg).
+# The bundles are not Developer ID signed or notarized.
+set -euo pipefail
+
+project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$project_dir"
+
+selected_arch="both"
+if [[ $# -eq 2 && "$1" == "--arch" ]]; then
+    selected_arch="$2"
+elif [[ $# -ne 0 ]]; then
+    echo "Usage: $0 [--arch arm64|x86_64]" >&2
+    exit 2
+fi
+case "$selected_arch" in
+    both|arm64|x86_64) ;;
+    *) echo "Unsupported architecture: $selected_arch" >&2; exit 2 ;;
+esac
+if [[ "$(uname -s)" != "Darwin" ]]; then
+    echo "macOS is required to build DMGs." >&2
+    exit 1
+fi
+command -v hdiutil >/dev/null || { echo "hdiutil is required." >&2; exit 1; }
+command -v ditto >/dev/null || { echo "ditto is required." >&2; exit 1; }
+command -v lipo >/dev/null || { echo "lipo is required." >&2; exit 1; }
+command -v rustup >/dev/null || { echo "rustup is required." >&2; exit 1; }
+
+if [[ "$selected_arch" == "both" ]]; then
+    rustup target add aarch64-apple-darwin x86_64-apple-darwin
+elif [[ "$selected_arch" == "arm64" ]]; then
+    rustup target add aarch64-apple-darwin
+else
+    rustup target add x86_64-apple-darwin
+fi
+
+version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+host_triple="$(rustc -vV | awk '/^host: / { print $2 }')"
+dist_dir="$project_dir/target/dist"
+mkdir -p "$dist_dir"
+stage=""
+cleanup() {
+    if [[ -n "$stage" ]]; then rm -rf "$stage"; fi
+}
+trap cleanup EXIT
+
+for target_triple in aarch64-apple-darwin x86_64-apple-darwin; do
+    case "$target_triple" in
+        aarch64-apple-darwin) arch="arm64" ;;
+        x86_64-apple-darwin) arch="x86_64" ;;
+    esac
+    if [[ "$selected_arch" != "both" && "$selected_arch" != "$arch" ]]; then
+        continue
+    fi
+
+    if [[ "$target_triple" == "$host_triple" ]]; then
+        app_bundle="$("$project_dir/scripts/package-macos.sh" | tail -n 1)"
+    else
+        app_bundle="$("$project_dir/scripts/package-macos.sh" --target "$target_triple" | tail -n 1)"
+    fi
+    binary_arch="$(lipo -archs "$app_bundle/Contents/MacOS/whisple")"
+    if [[ "$binary_arch" != "$arch" ]]; then
+        echo "Expected $arch binary in $app_bundle; got $binary_arch." >&2
+        exit 1
+    fi
+
+    stage="$(mktemp -d "$project_dir/target/.whisple-dmg.XXXXXX")"
+    ditto "$app_bundle" "$stage/Whisple.app"
+    ln -s /Applications "$stage/Applications"
+
+    dmg="$dist_dir/Whisple-$version-macos-$arch.dmg"
+    hdiutil create -quiet -ov -volname "Whisple" -srcfolder "$stage" -fs HFS+ -format UDZO "$dmg"
+    hdiutil verify -quiet "$dmg"
+    zip="$dist_dir/Whisple-$version-macos-$arch.zip"
+    rm -f "$zip"
+    ditto -c -k --sequesterRsrc --keepParent "$app_bundle" "$zip"
+    shasum -a 256 "$dmg" "$zip" > "$dist_dir/Whisple-$version-macos-$arch.sha256"
+    rm -rf "$stage"
+    stage=""
+    echo "$dmg"
+    echo "$zip"
+done

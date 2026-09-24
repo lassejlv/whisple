@@ -7,7 +7,7 @@
 
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const HF: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
@@ -105,6 +105,26 @@ pub fn model_path(spec: &ModelSpec) -> PathBuf {
     models_dir().join(spec.file_name)
 }
 
+/// Remove only the files belonging to a catalog model. Callers must first
+/// stop any download for this model, since its partial file is also removed.
+pub fn uninstall(spec: &ModelSpec) -> Result<(), String> {
+    uninstall_in(&models_dir(), spec)
+}
+
+fn uninstall_in(dir: &Path, spec: &ModelSpec) -> Result<(), String> {
+    let model = dir.join(spec.file_name);
+    remove_if_present(&model)?;
+    remove_if_present(&model.with_extension("bin.partial"))
+}
+
+fn remove_if_present(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!("Could not remove {}: {err}", path.display())),
+    }
+}
+
 pub fn is_downloaded(spec: &ModelSpec) -> bool {
     let path = model_path(spec);
     fs::metadata(&path)
@@ -182,4 +202,30 @@ pub fn download(
     }
     fs::rename(&partial, &dest).map_err(|err| err.to_string())?;
     Ok(dest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uninstall_removes_only_the_catalog_models_files() {
+        let dir = std::env::temp_dir().join(format!("whisp-uninstall-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let spec = &CATALOG[0];
+        let model = dir.join(spec.file_name);
+        let partial = model.with_extension("bin.partial");
+        let other = dir.join(CATALOG[1].file_name);
+        fs::write(&model, b"model").unwrap();
+        fs::write(&partial, b"partial").unwrap();
+        fs::write(&other, b"keep").unwrap();
+
+        uninstall_in(&dir, spec).unwrap();
+        assert!(!model.exists());
+        assert!(!partial.exists());
+        assert_eq!(fs::read(&other).unwrap(), b"keep");
+        uninstall_in(&dir, spec).unwrap();
+
+        fs::remove_dir_all(dir).unwrap();
+    }
 }

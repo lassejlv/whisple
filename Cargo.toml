@@ -1,5 +1,5 @@
 [package]
-name = "whisp"
+name = "whisple"
 version = "0.1.0"
 edition = "2021"
 description = "Local-first voice dictation"
@@ -20,6 +20,8 @@ x11rb = { version = "0.13", features = ["shape"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.26"
 objc = "0.2"
+global-hotkey = "0.8"
+tray-icon = { version = "0.24", default-features = false }
 
 [profile.dev.package.gpui-pre]
 opt-level = 3

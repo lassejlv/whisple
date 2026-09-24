@@ -1,0 +1,69 @@
+name: Build macOS release assets
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing GitHub release tag to rebuild and attach
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-macos-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Validate release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+          test "$RELEASE_TAG" = "v$version"
+          gh release view "$RELEASE_TAG" --json tagName --jq '.tagName' >/dev/null
+
+      - name: Prepare macOS build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+          if ! command -v rsvg-convert >/dev/null; then brew install librsvg; fi
+
+      - name: Run Rust tests
+        run: cargo test --locked
+
+      - name: Build DMG and updater archive
+        run: ./scripts/build-macos-dmgs.sh --arch "${{ matrix.arch }}"
+
+      - name: Attach assets to release
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+          prefix="target/dist/Whisple-$version-macos-${{ matrix.arch }}"
+          gh release upload "$RELEASE_TAG" \
+            "$prefix.dmg" "$prefix.zip" "$prefix.sha256" --clobber

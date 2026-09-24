@@ -208,10 +208,12 @@ fn rounded_rects(width: u16, height: u16, radius: u16) -> Vec<Rectangle> {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use cocoa::appkit::NSApplication;
+    use cocoa::appkit::{
+        NSApplication, NSColor, NSView, NSViewLayerContentsPlacement, NSWindow, NSWindowStyleMask,
+    };
     use cocoa::base::{id, nil, NO};
     use cocoa::foundation::{NSPoint, NSRect, NSSize};
-    use objc::{msg_send, sel, sel_impl};
+    use objc::{class, msg_send, sel, sel_impl};
 
     const MARGIN: f64 = 18.0;
     /// `NSWindowAnimationBehaviorNone`. Popups default to utility-window
@@ -226,21 +228,48 @@ mod macos {
             if count == 0 {
                 return;
             }
-            // GPUI also owns hidden native windows. The last window in this
-            // array is usually one of those, not the voice panel.
+            // The menu bar and GPUI's helpers also own native windows. Only
+            // the voice panel has a Metal-backed content view; never resize
+            // whichever window happens to come first in AppKit's list.
             let mut window: id = nil;
+            let mut view: id = nil;
             for index in 0..count {
                 let candidate: id = msg_send![windows, objectAtIndex: index];
                 let visible: bool = msg_send![candidate, isVisible];
                 if visible {
-                    window = candidate;
-                    break;
+                    let content = metal_view(candidate);
+                    if !content.is_null() {
+                        window = candidate;
+                        view = content;
+                        break;
+                    }
                 }
             }
             if window.is_null() {
                 return;
             }
+            // GPUI creates a titled window even without a titlebar, with a
+            // faint background to support AppKit's shadow. That native frame
+            // outlines the empty space while our HUD closes inside it. Whisp
+            // paints its own rounded border, so the host must be truly clear
+            // and borderless. Apply this once, before anchoring the content.
+            let style = window.styleMask();
+            if style.contains(NSWindowStyleMask::NSTitledWindowMask) {
+                let was_key = window.isKeyWindow() != NO;
+                let responder = window.firstResponder();
+                window.setStyleMask_(style & !NSWindowStyleMask::NSTitledWindowMask);
+                window.setHasShadow_(NO);
+                window.setBackgroundColor_(NSColor::clearColor(nil));
+                // AppKit resets keyboard focus when its style changes.
+                if was_key {
+                    window.makeKeyWindow();
+                }
+                if !responder.is_null() {
+                    window.makeFirstResponder_(responder);
+                }
+            }
             let _: () = msg_send![window, setAnimationBehavior: ANIMATION_NONE];
+            anchor_drawable(window, view);
 
             let screen: id = msg_send![window, screen];
             if screen.is_null() {
@@ -271,6 +300,39 @@ mod macos {
             // already drawing this frame. The view's resize callback and
             // `bounds_changed` pick up the new content size.
             let _: () = msg_send![window, setFrame: frame display: NO animate: NO];
+        }
+    }
+
+    unsafe fn metal_view(window: id) -> id {
+        let views: id = msg_send![window.contentView(), subviews];
+        let count: usize = msg_send![views, count];
+        for index in 0..count {
+            let view: id = msg_send![views, objectAtIndex: index];
+            let layer = view.layer();
+            if layer.is_null() {
+                continue;
+            }
+            let is_metal: bool = msg_send![layer, isKindOfClass: class!(CAMetalLayer)];
+            if is_metal {
+                return view;
+            }
+        }
+        nil
+    }
+
+    unsafe fn anchor_drawable(window: id, view: id) {
+        // Keep the last presented frame at its original size and pinned
+        // to the bar while Metal prepares a drawable for the new bounds.
+        // AppKit's default stretches it, producing a one-frame flash.
+        let placement = NSViewLayerContentsPlacement::NSViewLayerContentsPlacementBottom;
+        if view.layerContentsPlacement() != placement {
+            view.setLayerContentsPlacement(placement);
+        }
+        let layer = view.layer();
+        let scale = window.backingScaleFactor();
+        let current_scale: f64 = msg_send![layer, contentsScale];
+        if (current_scale - scale).abs() > f64::EPSILON {
+            let _: () = msg_send![layer, setContentsScale: scale];
         }
     }
 
