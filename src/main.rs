@@ -21,6 +21,9 @@ use gpui_kit::{
 
 struct Assets;
 
+// Lucide icons the panels use beyond the kit's default component bundle.
+gpui_kit::assets::icon_assets!(ExtraIcons, [Clipboard, Copy, Globe, Mic, Power, Sparkles]);
+
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> gpui_kit::Result<Option<Cow<'static, [u8]>>> {
         let ours: Option<Cow<'static, [u8]>> = match path {
@@ -29,10 +32,36 @@ impl AssetSource for Assets {
             "icons/chevron-left.svg" => {
                 Some(Cow::Borrowed(include_bytes!("../assets/chevron-left.svg")))
             }
+            "icons/whisp/chevrons-up-down.svg" => Some(Cow::Borrowed(include_bytes!(
+                "../assets/chevrons-up-down.svg"
+            ))),
+            "icons/whisp/ring-arc.svg" => {
+                Some(Cow::Borrowed(include_bytes!("../assets/ring-arc.svg")))
+            }
+            "icons/whisp/ring-track.svg" => {
+                Some(Cow::Borrowed(include_bytes!("../assets/ring-track.svg")))
+            }
+            "icons/whisp/check-bold.svg" => {
+                Some(Cow::Borrowed(include_bytes!("../assets/check-bold.svg")))
+            }
+            "icons/whisp/chevron-left-bold.svg" => Some(Cow::Borrowed(include_bytes!(
+                "../assets/chevron-left-bold.svg"
+            ))),
+            "icons/whisp/chevron-right-bold.svg" => Some(Cow::Borrowed(include_bytes!(
+                "../assets/chevron-right-bold.svg"
+            ))),
+            "icons/whisp/keyboard.svg" => {
+                Some(Cow::Borrowed(include_bytes!("../assets/keyboard.svg")))
+            }
+            "icons/whisp/play.svg" => Some(Cow::Borrowed(include_bytes!("../assets/play.svg"))),
+            "icons/whisp/search.svg" => Some(Cow::Borrowed(include_bytes!("../assets/search.svg"))),
             _ => None,
         };
         if ours.is_some() {
             return Ok(ours);
+        }
+        if let Ok(Some(bytes)) = ExtraIcons.load(path) {
+            return Ok(Some(bytes));
         }
         // Kit icons (settings, chevrons, check) live in the component bundle.
         // A missing path is empty, not a hard error, so our own names still resolve.
@@ -76,14 +105,21 @@ fn main() {
                     window_background: WindowBackgroundAppearance::Transparent,
                     icon: None,
                     app_id: Some("whisp".into()),
-                    window_min_size: Some(size(px(320.0), px(56.0))),
+                    window_min_size: Some(size(px(320.0), px(app::COLLAPSED_HEIGHT))),
                     window_decorations: Some(WindowDecorations::Client),
                     tabbing_identifier: None,
                 },
                 |window, cx| {
                     let view = cx.new(app::Whisp::new);
                     window.focus(&view.focus_handle(cx), cx);
-                    cx.new(|cx| Root::new(view, window, cx).bordered(false))
+                    // Only the rounded HUD paints. The kit root would otherwise fill
+                    // the whole window, square corners included.
+                    cx.new(|cx| {
+                        use gpui_kit::Styled as _;
+                        Root::new(view, window, cx)
+                            .bordered(false)
+                            .bg(gpui_kit::transparent_black())
+                    })
                 },
             )
             .expect("open the voice window");

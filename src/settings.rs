@@ -25,92 +25,115 @@ pub struct Preferences {
 pub struct Language {
     pub id: &'static str,
     pub name: &'static str,
+    /// The language's own name, empty where it matches `name`.
+    pub native: &'static str,
 }
 
 const LANGUAGES: &[Language] = &[
     Language {
         id: "auto",
-        name: "Detect",
+        name: "Detect automatically",
+        native: "",
     },
     Language {
         id: "en",
         name: "English",
+        native: "",
     },
     Language {
         id: "es",
         name: "Spanish",
+        native: "Español",
     },
     Language {
         id: "fr",
         name: "French",
+        native: "Français",
     },
     Language {
         id: "de",
         name: "German",
+        native: "Deutsch",
     },
     Language {
         id: "it",
         name: "Italian",
+        native: "Italiano",
     },
     Language {
         id: "pt",
         name: "Portuguese",
+        native: "Português",
     },
     Language {
         id: "nl",
         name: "Dutch",
+        native: "Nederlands",
     },
     Language {
         id: "sv",
         name: "Swedish",
+        native: "Svenska",
     },
     Language {
         id: "da",
         name: "Danish",
+        native: "Dansk",
     },
     Language {
         id: "no",
         name: "Norwegian",
+        native: "Norsk",
     },
     Language {
         id: "fi",
         name: "Finnish",
+        native: "Suomi",
     },
     Language {
         id: "pl",
         name: "Polish",
+        native: "Polski",
     },
     Language {
         id: "ru",
         name: "Russian",
+        native: "Русский",
     },
     Language {
         id: "uk",
         name: "Ukrainian",
+        native: "Українська",
     },
     Language {
         id: "ja",
         name: "Japanese",
+        native: "日本語",
     },
     Language {
         id: "zh",
         name: "Chinese",
+        native: "中文",
     },
     Language {
         id: "ko",
         name: "Korean",
+        native: "한국어",
     },
     Language {
         id: "ar",
         name: "Arabic",
+        native: "العربية",
     },
     Language {
         id: "hi",
         name: "Hindi",
+        native: "हिन्दी",
     },
     Language {
         id: "tr",
         name: "Turkish",
+        native: "Türkçe",
     },
 ];
 
