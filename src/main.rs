@@ -11,6 +11,8 @@ mod text;
 mod theme;
 mod tray;
 mod ui;
+#[cfg(target_os = "macos")]
+mod updater;
 
 use std::borrow::Cow;
 

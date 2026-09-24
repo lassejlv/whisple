@@ -18,6 +18,8 @@ use crate::settings::{self, Preferences};
 use crate::startup;
 use crate::stt;
 use crate::tray;
+#[cfg(target_os = "macos")]
+use crate::updater::{self, PreparedUpdate};
 
 pub(crate) const WINDOW_WIDTH: f32 = 400.0;
 pub(crate) const WINDOW_RADIUS: f32 = 20.0;
@@ -98,6 +100,12 @@ pub(crate) struct Whisp {
     pub clean_fillers: bool,
     pub input_device: String,
     pub open_on_startup: bool,
+    #[cfg(target_os = "macos")]
+    update: Option<PreparedUpdate>,
+    #[cfg(target_os = "macos")]
+    update_checking: bool,
+    #[cfg(target_os = "macos")]
+    last_update_check: Instant,
     pub microphones: Vec<String>,
     pub recording_hotkey: bool,
     /// When the current recording started, for the bar's timer.
@@ -181,7 +189,7 @@ impl Whisp {
             }
         })
         .detach();
-        let view = Self {
+        let mut view = Self {
             focus_handle: cx.focus_handle(),
             phase: Phase::Idle,
             levels: VecDeque::new(),
@@ -207,6 +215,12 @@ impl Whisp {
             clean_fillers: prefs.clean_fillers,
             input_device: prefs.input_device,
             open_on_startup: prefs.open_on_startup,
+            #[cfg(target_os = "macos")]
+            update: None,
+            #[cfg(target_os = "macos")]
+            update_checking: false,
+            #[cfg(target_os = "macos")]
+            last_update_check: Instant::now(),
             microphones: Vec::new(),
             recording_hotkey: false,
             listen_started: None,
@@ -227,6 +241,8 @@ impl Whisp {
         };
         // A hidden window need not render, so start listening at creation.
         view.listen_for_commands(window.window_handle(), cx);
+        #[cfg(target_os = "macos")]
+        view.check_for_updates(cx);
         view
     }
 
@@ -430,8 +446,16 @@ impl Whisp {
                                     }
                                     view.set_visible(true, window, cx);
                                 }
+                                #[cfg(target_os = "macos")]
+                                tray::Command::Update => view.install_or_check_for_updates(cx),
+                                #[cfg(not(target_os = "macos"))]
+                                tray::Command::Update => {}
                                 tray::Command::Quit => cx.quit(),
                             }
+                        }
+                        #[cfg(target_os = "macos")]
+                        if view.last_update_check.elapsed() >= Duration::from_secs(6 * 60 * 60) {
+                            view.check_for_updates(cx);
                         }
                         if view.bar_visible {
                             // Re-anchor the native size already chosen by tick;
@@ -1058,6 +1082,71 @@ impl Whisp {
             .ok();
         })
         .detach();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn check_for_updates(&mut self, cx: &mut Context<Self>) {
+        self.last_update_check = Instant::now();
+        if !updater::is_packaged() || self.update_checking {
+            return;
+        }
+        let prepared_version = self.update.as_ref().map(|update| update.version.clone());
+        self.update_checking = true;
+        tray::set_update(tray::UpdateStatus::Checking, cx);
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move { updater::check_and_prepare(prepared_version) })
+                .await;
+            this.update(cx, |view, cx| {
+                view.update_checking = false;
+                let failed = match outcome {
+                    Ok(Some(update)) => {
+                        view.update = Some(update);
+                        false
+                    }
+                    Ok(None) => false,
+                    Err(err) => {
+                        eprintln!("Whisple update check failed: {err}");
+                        view.error = Some(format!("Update check failed: {err}"));
+                        true
+                    }
+                };
+                let version = view
+                    .update
+                    .as_ref()
+                    .map(|update| update.version.to_string());
+                let menu_status = match (version.as_deref(), failed) {
+                    (Some(version), _) => tray::UpdateStatus::Available(version),
+                    (None, true) => tray::UpdateStatus::Error,
+                    (None, false) => tray::UpdateStatus::UpToDate,
+                };
+                tray::set_update(menu_status, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn install_or_check_for_updates(&mut self, cx: &mut Context<Self>) {
+        if self.update.is_none() {
+            self.check_for_updates(cx);
+            return;
+        }
+        if self.visibility_locked() {
+            self.error = Some("Finish recording before installing the update.".into());
+            cx.notify();
+            return;
+        }
+        match self.update.as_mut().unwrap().install() {
+            Ok(()) => cx.quit(),
+            Err(err) => {
+                self.error = Some(format!("Could not install the update: {err}"));
+                cx.notify();
+            }
+        }
     }
 
     fn refresh_models(&mut self) {

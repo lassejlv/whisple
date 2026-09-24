@@ -1,19 +1,31 @@
 #!/usr/bin/env bash
 # Build Apple silicon and Intel DMGs in target/dist/ (or one with --arch).
 # Requires Rust, Xcode command-line tools, and rsvg-convert (librsvg).
-# The bundles are not Developer ID signed or notarized.
+# Bundles use ad hoc signing by default; the current workflow does not notarize.
 set -euo pipefail
 
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$project_dir"
 
 selected_arch="both"
-if [[ $# -eq 2 && "$1" == "--arch" ]]; then
-    selected_arch="$2"
-elif [[ $# -ne 0 ]]; then
-    echo "Usage: $0 [--arch arm64|x86_64]" >&2
-    exit 2
-fi
+use_packaged_app=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --arch)
+            [[ $# -ge 2 ]] || { echo "--arch needs arm64 or x86_64." >&2; exit 2; }
+            selected_arch="$2"
+            shift 2
+            ;;
+        --use-packaged-app)
+            use_packaged_app=true
+            shift
+            ;;
+        *)
+            echo "Usage: $0 [--arch arm64|x86_64] [--use-packaged-app]" >&2
+            exit 2
+            ;;
+    esac
+done
 case "$selected_arch" in
     both|arm64|x86_64) ;;
     *) echo "Unsupported architecture: $selected_arch" >&2; exit 2 ;;
@@ -54,11 +66,16 @@ for target_triple in aarch64-apple-darwin x86_64-apple-darwin; do
         continue
     fi
 
-    if [[ "$target_triple" == "$host_triple" ]]; then
+    if [[ "$use_packaged_app" == true && "$target_triple" == "$host_triple" ]]; then
+        app_bundle="$project_dir/target/Whisple.app"
+    elif [[ "$use_packaged_app" == true ]]; then
+        app_bundle="$project_dir/target/macos/$target_triple/Whisple.app"
+    elif [[ "$target_triple" == "$host_triple" ]]; then
         app_bundle="$("$project_dir/scripts/package-macos.sh" | tail -n 1)"
     else
         app_bundle="$("$project_dir/scripts/package-macos.sh" --target "$target_triple" | tail -n 1)"
     fi
+    codesign --verify --deep --strict "$app_bundle"
     binary_arch="$(lipo -archs "$app_bundle/Contents/MacOS/whisple")"
     if [[ "$binary_arch" != "$arch" ]]; then
         echo "Expected $arch binary in $app_bundle; got $binary_arch." >&2
@@ -75,7 +92,10 @@ for target_triple in aarch64-apple-darwin x86_64-apple-darwin; do
     zip="$dist_dir/Whisple-$version-macos-$arch.zip"
     rm -f "$zip"
     ditto -c -k --sequesterRsrc --keepParent "$app_bundle" "$zip"
-    shasum -a 256 "$dmg" "$zip" > "$dist_dir/Whisple-$version-macos-$arch.sha256"
+    (
+        cd "$dist_dir"
+        shasum -a 256 "$(basename "$dmg")" "$(basename "$zip")"
+    ) > "$dist_dir/Whisple-$version-macos-$arch.sha256"
     rm -rf "$stage"
     stage=""
     echo "$dmg"
