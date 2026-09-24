@@ -1,5 +1,6 @@
 mod app;
 mod audio;
+mod cloud;
 mod hotkey;
 mod models;
 mod motion;
@@ -59,6 +60,11 @@ impl AssetSource for Assets {
             "icons/whisp/play.svg" => Some(Cow::Borrowed(include_bytes!("../assets/play.svg"))),
             "icons/whisp/search.svg" => Some(Cow::Borrowed(include_bytes!("../assets/search.svg"))),
             "icons/whisp/trash.svg" => Some(Cow::Borrowed(include_bytes!("../assets/trash.svg"))),
+            "icons/whisp/openai.svg" => Some(Cow::Borrowed(include_bytes!("../assets/openai.svg"))),
+            "icons/whisp/groq.svg" => Some(Cow::Borrowed(include_bytes!("../assets/groq.svg"))),
+            "icons/whisp/groq-mark.svg" => {
+                Some(Cow::Borrowed(include_bytes!("../assets/groq-mark.svg")))
+            }
             _ => None,
         };
         if ours.is_some() {

@@ -10,6 +10,7 @@ use gpui_kit::{
 };
 
 use crate::audio::{self, Mic};
+use crate::cloud::{self, Provider};
 use crate::hotkey;
 use crate::models::{self, ModelSpec};
 use crate::motion::{Ease, Spring};
@@ -27,10 +28,10 @@ pub(crate) const WINDOW_RADIUS: f32 = 20.0;
 pub(crate) const BAR_HEIGHT: f32 = 56.0;
 pub(crate) const COLLAPSED_HEIGHT: f32 = BAR_HEIGHT + 2.0;
 /// Panel heights above the bar, each including its 1px hairline to the bar.
-/// With the bar they give the HUD heights measured in the design: result 175,
-/// model picker 503, settings 431, language 451.
+/// With the bar they give the HUD heights measured in the design.
 pub(crate) const RESULT_EXTRA: f32 = 117.0;
-pub(crate) const PICKER_EXTRA: f32 = 445.0;
+pub(crate) const PICKER_EXTRA: f32 = 645.0;
+pub(crate) const CLOUD_KEY_EXTRA: f32 = 278.0;
 pub(crate) const SETTINGS_EXTRA: f32 = 373.0;
 pub(crate) const LANGUAGE_EXTRA: f32 = 393.0;
 pub(crate) const MICROPHONE_EXTRA: f32 = LANGUAGE_EXTRA;
@@ -79,6 +80,10 @@ pub(crate) struct Whisp {
     pub phase: Phase,
     pub levels: VecDeque<f32>,
     pub picker_open: bool,
+    pub cloud_config: Option<Provider>,
+    pub cloud_keys: [bool; 2],
+    pub key_input: Option<Entity<InputState>>,
+    pub key_visible: bool,
     pub models: Vec<InstalledModel>,
     pub selected: String,
     pub download: Option<Download>,
@@ -139,8 +144,9 @@ impl Whisp {
         let models = load_models();
         let prefs = settings::load();
         let selected = models::load_selected()
-            .filter(|id| models::spec(id).is_some())
+            .filter(|id| models::spec(id).is_some() || Provider::from_id(id).is_some())
             .unwrap_or_else(|| models::recommended_id().to_string());
+        let cloud_keys = Provider::ALL.map(|provider| cloud::has_key(provider).unwrap_or(false));
         let hotkey_error = hotkey::parse(&prefs.show_hotkey)
             .and_then(|chord| hotkey::install(chord).err())
             .map(|err| format!("Could not register the shortcut: {err}"));
@@ -194,6 +200,10 @@ impl Whisp {
             phase: Phase::Idle,
             levels: VecDeque::new(),
             picker_open: false,
+            cloud_config: None,
+            cloud_keys,
+            key_input: None,
+            key_visible: false,
             models,
             selected,
             download: None,
@@ -356,6 +366,7 @@ impl Whisp {
     pub(crate) fn panel_height(&self, reveal: Option<Reveal>) -> f32 {
         match reveal {
             Some(Reveal::Result) => RESULT_EXTRA,
+            Some(Reveal::Picker) if self.cloud_config.is_some() => CLOUD_KEY_EXTRA,
             Some(Reveal::Picker) => PICKER_EXTRA,
             Some(Reveal::Settings) => match self.settings_page {
                 SettingsPage::Main => SETTINGS_EXTRA,
@@ -529,6 +540,9 @@ impl Whisp {
     }
 
     pub(crate) fn selected_ready(&self) -> bool {
+        if let Some(provider) = Provider::from_id(&self.selected) {
+            return self.cloud_keys[provider.index()];
+        }
         self.models
             .iter()
             .any(|model| model.spec.id == self.selected && model.ready)
@@ -544,7 +558,7 @@ impl Whisp {
         if !self.selected_ready() {
             self.picker_open = true;
             self.picker_opened_at = None;
-            self.error = Some("Download a model before recording.".into());
+            self.error = Some("Choose a ready model before recording.".into());
             self.snap_chrome();
             cx.notify();
             return;
@@ -592,7 +606,7 @@ impl Whisp {
         self.error = None;
         self.copied = false;
         if !self.selected_ready() {
-            self.error = Some("Choose a downloaded model first.".into());
+            self.error = Some("Choose a ready model first.".into());
             cx.notify();
             return;
         }
@@ -631,6 +645,95 @@ impl Whisp {
             return;
         }
         self.start_download(spec, cx);
+    }
+
+    pub(crate) fn choose_cloud(&mut self, provider: Provider, cx: &mut Context<Self>) {
+        if !self.cloud_keys[provider.index()] {
+            self.open_cloud_config(provider, cx);
+            return;
+        }
+        self.selected = provider.id().to_string();
+        self.pending_uninstall = None;
+        self.error = None;
+        self.picker_open = false;
+        self.cloud_config = None;
+        self.persist();
+        cx.notify();
+    }
+
+    pub(crate) fn open_cloud_config(&mut self, provider: Provider, cx: &mut Context<Self>) {
+        self.stop_recording();
+        self.cloud_config = Some(provider);
+        self.key_input = None;
+        self.key_visible = false;
+        self.picker_open = true;
+        self.error = None;
+        cx.notify();
+    }
+
+    pub(crate) fn back_from_cloud_config(&mut self, cx: &mut Context<Self>) {
+        self.cloud_config = None;
+        self.error = None;
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_key_visibility(
+        &mut self,
+        window: &mut gpui_kit::Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.key_visible = !self.key_visible;
+        if let Some(input) = &self.key_input {
+            input.update(cx, |input, cx| {
+                input.set_masked(!self.key_visible, window, cx)
+            });
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn save_cloud_key(&mut self, cx: &mut Context<Self>) {
+        let Some(provider) = self.cloud_config else {
+            return;
+        };
+        let key = self
+            .key_input
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+            .unwrap_or_default();
+        if key.trim().is_empty() && self.cloud_keys[provider.index()] {
+            self.choose_cloud(provider, cx);
+            return;
+        }
+        match cloud::save_key(provider, &key) {
+            Ok(()) => {
+                self.cloud_keys[provider.index()] = true;
+                self.key_input = None;
+                self.choose_cloud(provider, cx);
+            }
+            Err(err) => {
+                self.error = Some(err);
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn remove_cloud_key(&mut self, cx: &mut Context<Self>) {
+        let Some(provider) = self.cloud_config else {
+            return;
+        };
+        match cloud::delete_key(provider) {
+            Ok(()) => {
+                self.cloud_keys[provider.index()] = false;
+                if self.selected == provider.id() {
+                    self.selected = models::recommended_id().to_string();
+                    self.persist();
+                }
+                self.cloud_config = None;
+                self.error = None;
+            }
+            Err(err) => self.error = Some(err),
+        }
+        cx.notify();
     }
 
     pub(crate) fn cancel_download(&mut self, cx: &mut Context<Self>) {
@@ -699,6 +802,7 @@ impl Whisp {
     pub(crate) fn toggle_picker(&mut self, cx: &mut Context<Self>) {
         self.stop_recording();
         self.pending_uninstall = None;
+        self.cloud_config = None;
         if self.settings_open {
             self.settings_open = false;
             self.settings_opened_at = None;
@@ -721,6 +825,7 @@ impl Whisp {
         self.stop_recording();
         self.pending_uninstall = None;
         self.picker_open = false;
+        self.cloud_config = None;
         self.picker_opened_at = None;
         self.settings_open = !self.settings_open;
         if self.settings_open {
@@ -905,6 +1010,10 @@ impl Whisp {
         if self.actions_suppressed() {
             return;
         }
+        if self.picker_open && self.cloud_config.is_some() {
+            self.back_from_cloud_config(cx);
+            return;
+        }
         if self.settings_open && self.settings_page != SettingsPage::Main {
             self.settings_page = SettingsPage::Main;
             self.page_fade.snap(1.0);
@@ -965,9 +1074,11 @@ impl Whisp {
     }
 
     fn transcribe(&mut self, samples: Vec<f32>, rate: u32, cx: &mut Context<Self>) {
-        let spec = self.selected_spec();
-        let model_id = spec.id.to_string();
-        let path = models::model_path(spec);
+        let provider = Provider::from_id(&self.selected);
+        let local = provider.is_none().then(|| {
+            let spec = self.selected_spec();
+            (spec.id.to_string(), models::model_path(spec))
+        });
         let language = settings::whisper_language(&self.language).map(str::to_string);
         let clean = self.clean_fillers;
         let copy = self.copy_notes;
@@ -975,7 +1086,19 @@ impl Whisp {
             let outcome = cx
                 .background_executor()
                 .spawn(async move {
-                    stt::transcribe(&model_id, &path, &samples, rate, language.as_deref(), clean)
+                    if let Some(provider) = provider {
+                        cloud::transcribe(provider, &samples, rate, language.as_deref(), clean)
+                    } else {
+                        let (model_id, path) = local.expect("local model was selected");
+                        stt::transcribe(
+                            &model_id,
+                            &path,
+                            &samples,
+                            rate,
+                            language.as_deref(),
+                            clean,
+                        )
+                    }
                 })
                 .await;
             this.update(cx, |view, cx| {

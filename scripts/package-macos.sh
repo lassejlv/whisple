@@ -90,7 +90,7 @@ cat > "$bundle/Contents/Info.plist" <<PLIST
     <key>WhispleSemanticVersion</key><string>$version</string>
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
-    <key>NSMicrophoneUsageDescription</key><string>Whisple uses the microphone for local dictation.</string>
+    <key>NSMicrophoneUsageDescription</key><string>Whisple uses the microphone for dictation. Audio goes to OpenAI or Groq only when you select a cloud model.</string>
 </dict>
 </plist>
 PLIST
