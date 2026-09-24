@@ -51,6 +51,13 @@ jobs:
         run: |
           set -euo pipefail
           echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+          # The vendored whisper.cpp can select i8mm on M1 runners even though
+          # their CPUs lack it. Disable native CPU detection for arm64 builds.
+          if [[ "${{ matrix.arch }}" == "arm64" ]]; then
+            printf '%s\n' 'set(GGML_NATIVE OFF CACHE BOOL "Portable Apple Silicon build" FORCE)' \
+              > "$RUNNER_TEMP/ggml-arm64.cmake"
+            echo "CMAKE_TOOLCHAIN_FILE=$RUNNER_TEMP/ggml-arm64.cmake" >> "$GITHUB_ENV"
+          fi
           if ! command -v rsvg-convert >/dev/null; then brew install librsvg; fi
 
       - name: Run Rust tests
