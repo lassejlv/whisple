@@ -942,15 +942,20 @@ impl Whisp {
         .detach();
     }
 
-    pub(crate) fn persist_settings(&self) {
+    pub(crate) fn set_input_device(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.input_device = name.to_string();
         self.persist();
+        cx.notify();
     }
 
-    pub(crate) fn remove_cloud_key_from_settings(
-        &mut self,
-        provider: Provider,
-        cx: &mut Context<Self>,
-    ) {
+    /// A key was just saved for `provider`: switch to it.
+    pub(crate) fn use_saved_cloud_key(&mut self, provider: Provider, cx: &mut Context<Self>) {
+        self.cloud_keys[provider.index()] = true;
+        self.choose_cloud(provider, cx);
+    }
+
+    /// The key for `provider` was removed: fall back to the recommended model.
+    pub(crate) fn forget_cloud_key(&mut self, provider: Provider, cx: &mut Context<Self>) {
         self.cloud_keys[provider.index()] = false;
         if self.selected == provider.id() {
             self.selected = models::recommended_id().to_string();
@@ -959,7 +964,7 @@ impl Whisp {
         cx.notify();
     }
 
-    pub(crate) fn check_updates_from_settings(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn check_for_updates_now(&mut self, cx: &mut Context<Self>) {
         #[cfg(target_os = "macos")]
         self.check_for_updates(cx);
         #[cfg(not(target_os = "macos"))]

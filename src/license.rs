@@ -31,7 +31,6 @@ static TRIAL_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Access {
-    Unlicensed,
     Checking,
     Trial {
         expires_at: i64,
@@ -84,7 +83,7 @@ impl Access {
             Self::Blocked { display_key, .. } | Self::Unavailable { display_key, .. } => {
                 Some(display_key)
             }
-            Self::Unlicensed | Self::Checking | Self::Trial { .. } | Self::TrialExpired => None,
+            Self::Checking | Self::Trial { .. } | Self::TrialExpired => None,
         }
     }
 }

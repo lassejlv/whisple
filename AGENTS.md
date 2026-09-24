@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Whisple is a single Rust desktop binary. `src/main.rs` starts the GPUI app; `src/app.rs` coordinates recording and window state, and `src/ui.rs` renders the interface. Audio capture and transcription live in `src/audio.rs`, `src/stt.rs`, and `src/cloud.rs`. Platform hotkeys are under `src/hotkey/`; settings, startup behavior, tray controls, and updates have separate modules. Keep icons and bundled media in `assets/`, release tooling in `scripts/`, and release instructions in `docs/releasing.md`. Unit tests sit beside their implementation in `src/`.
+Whisple is a single Rust desktop binary. `src/main.rs` starts the GPUI app; `src/app.rs` coordinates recording and window state, and `src/ui.rs` renders the voice bar. The Settings window lives in `src/settings_window/`: `mod.rs` owns the window and sidebar, `pages/` has one file per page with its actions, and `widgets.rs` holds the shared rows and switches. Audio capture and transcription live in `src/audio.rs`, `src/stt.rs`, and `src/cloud.rs`. Platform hotkeys are under `src/hotkey/`; settings, startup behavior, tray controls, and updates have separate modules. Keep icons and bundled media in `assets/`, release tooling in `scripts/`, and release instructions in `docs/releasing.md`. Unit tests sit beside their implementation in `src/`.
 
 ## Build, Test, and Development Commands
 

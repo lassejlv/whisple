@@ -246,7 +246,7 @@ impl Whisp {
         let locked = self.locked();
         let trial_over = matches!(
             self.license_access,
-            Access::Trial { .. } | Access::TrialExpired | Access::Unlicensed
+            Access::Trial { .. } | Access::TrialExpired
         );
         let center = if listening {
             waveform(&self.bars).into_any_element()

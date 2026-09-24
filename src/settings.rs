@@ -198,8 +198,10 @@ pub fn decode(raw: &str) -> Preferences {
     let Ok(file) = serde_json::from_str::<File>(raw) else {
         return Preferences::default();
     };
-    let mut prefs = Preferences::default();
-    prefs.onboarding_complete = file.onboarding_complete;
+    let mut prefs = Preferences {
+        onboarding_complete: file.onboarding_complete,
+        ..Preferences::default()
+    };
     if !file.selected.is_empty() {
         prefs.selected = file.selected;
     }

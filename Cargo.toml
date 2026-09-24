@@ -6,6 +6,10 @@ description = "Local-first voice dictation"
 license = "MIT"
 publish = false
 
+# objc's msg_send! still checks the retired `feature = "cargo-clippy"` flag.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
+
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 cpal = "0.15"

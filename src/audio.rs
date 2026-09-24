@@ -150,7 +150,7 @@ pub fn input_names() -> Result<Vec<String>, String> {
         }
         names.push(name);
     }
-    names.sort_by(|left, right| left.to_lowercase().cmp(&right.to_lowercase()));
+    names.sort_by_key(|name| name.to_lowercase());
     Ok(names)
 }
 

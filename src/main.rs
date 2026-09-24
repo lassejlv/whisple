@@ -34,31 +34,13 @@ struct Assets;
 // Lucide icons the panels use beyond the kit's default component bundle.
 gpui_kit::assets::icon_assets!(
     ExtraIcons,
-    [
-        Check,
-        ChevronsUpDown,
-        Clipboard,
-        Copy,
-        Cpu,
-        Globe,
-        Info,
-        KeyRound,
-        Mic,
-        Power,
-        SlidersHorizontal,
-        Sparkles,
-        X,
-    ]
+    [Check, Copy, Cpu, Info, KeyRound, Mic, SlidersHorizontal, X,]
 );
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> gpui_kit::Result<Option<Cow<'static, [u8]>>> {
         let ours: Option<Cow<'static, [u8]>> = match path {
             "icons/gear.svg" => Some(Cow::Borrowed(include_bytes!("../assets/gear.svg"))),
-            "icons/chevron.svg" => Some(Cow::Borrowed(include_bytes!("../assets/chevron.svg"))),
-            "icons/chevron-left.svg" => {
-                Some(Cow::Borrowed(include_bytes!("../assets/chevron-left.svg")))
-            }
             "icons/whisp/chevrons-up-down.svg" => Some(Cow::Borrowed(include_bytes!(
                 "../assets/chevrons-up-down.svg"
             ))),
@@ -71,20 +53,7 @@ impl AssetSource for Assets {
             "icons/whisp/check-bold.svg" => {
                 Some(Cow::Borrowed(include_bytes!("../assets/check-bold.svg")))
             }
-            "icons/whisp/chevron-left-bold.svg" => Some(Cow::Borrowed(include_bytes!(
-                "../assets/chevron-left-bold.svg"
-            ))),
-            "icons/whisp/chevron-right-bold.svg" => Some(Cow::Borrowed(include_bytes!(
-                "../assets/chevron-right-bold.svg"
-            ))),
-            "icons/whisp/keyboard.svg" => {
-                Some(Cow::Borrowed(include_bytes!("../assets/keyboard.svg")))
-            }
-            "icons/whisp/play.svg" => Some(Cow::Borrowed(include_bytes!("../assets/play.svg"))),
-            "icons/whisp/search.svg" => Some(Cow::Borrowed(include_bytes!("../assets/search.svg"))),
-            "icons/whisp/trash.svg" => Some(Cow::Borrowed(include_bytes!("../assets/trash.svg"))),
             "icons/whisp/openai.svg" => Some(Cow::Borrowed(include_bytes!("../assets/openai.svg"))),
-            "icons/whisp/groq.svg" => Some(Cow::Borrowed(include_bytes!("../assets/groq.svg"))),
             "icons/whisp/groq-mark.svg" => {
                 Some(Cow::Borrowed(include_bytes!("../assets/groq-mark.svg")))
             }

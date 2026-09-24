@@ -20,6 +20,8 @@ pub const INSET: Rgba = color(0x17171aff);
 pub const RAISED: Rgba = color(0x232327ff);
 /// White 8%: the window border and every separator.
 pub const HAIRLINE: Rgba = color(0xffffff14);
+/// White 4%: a row or sidebar item under the pointer.
+pub const HOVER: Rgba = color(0xffffff0a);
 /// White 12%: the lit top edge of the window, and progress ring tracks.
 pub const EDGE: Rgba = color(0xffffff1f);
 /// White 6%: the lit top edge of a raised capsule.
@@ -35,6 +37,9 @@ pub const AMBER: Rgba = color(0xffb340ff);
 pub const AMBER_SOFT: Rgba = color(0x2a1f0cff);
 pub const AMBER_HALO_INNER: Rgba = color(0xffb3400d);
 pub const AMBER_HALO_OUTER: Rgba = color(0xffb34006);
+/// A saved API key.
+pub const GREEN: Rgba = color(0x49c38aff);
+pub const GREEN_SOFT: Rgba = color(0x49c38a22);
 /// Amber 7%: the selected-row wash.
 pub const AMBER_WASH: Rgba = color(0xffb34012);
 /// Amber 16%: badge fill.
