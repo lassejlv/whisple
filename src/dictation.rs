@@ -10,7 +10,7 @@ use cocoa::base::{id, nil, BOOL, YES};
 use objc::{class, msg_send, sel, sel_impl};
 
 type Ref = *const c_void;
-type Element = Ref;
+pub(crate) type Element = Ref;
 
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
@@ -18,6 +18,7 @@ extern "C" {
     fn AXIsProcessTrustedWithOptions(options: Ref) -> u8;
     static kAXTrustedCheckOptionPrompt: Ref;
     fn AXUIElementCreateSystemWide() -> Element;
+    fn AXUIElementCreateApplication(pid: i32) -> Element;
     fn AXUIElementCopyAttributeValue(element: Element, attribute: Ref, value: *mut Ref) -> i32;
     fn AXUIElementSetAttributeValue(element: Element, attribute: Ref, value: Ref) -> i32;
     fn AXUIElementGetPid(element: Element, pid: *mut i32) -> i32;
@@ -38,10 +39,13 @@ extern "C" {
     fn CFStringCompare(a: Ref, b: Ref, options: u32) -> isize;
     fn CFEqual(a: Ref, b: Ref) -> u8;
     fn CFRelease(value: Ref);
+    fn CFGetTypeID(value: Ref) -> usize;
+    fn CFStringGetTypeID() -> usize;
     static kCFBooleanTrue: Ref;
 }
 
-struct Owned(Ref);
+/// A Core Foundation object this code owns and releases.
+pub(crate) struct Owned(pub(crate) Ref);
 
 impl Owned {
     fn string(value: &str) -> Option<Self> {
@@ -191,7 +195,34 @@ pub(crate) fn request_access() {
     }
 }
 
-fn attribute(element: Element, name: &str) -> Option<Owned> {
+pub(crate) fn is_trusted() -> bool {
+    unsafe { AXIsProcessTrusted() != 0 }
+}
+
+/// The accessibility element for a running app.
+pub(crate) fn application(pid: i32) -> Option<Owned> {
+    let element = unsafe { AXUIElementCreateApplication(pid) };
+    (!element.is_null()).then_some(Owned(element))
+}
+
+/// A string attribute's value. Other types, such as a missing title
+/// reported as a number, read as `None`.
+pub(crate) fn string_value(value: &Owned) -> Option<String> {
+    unsafe {
+        if CFGetTypeID(value.0) != CFStringGetTypeID() {
+            return None;
+        }
+        // CFString and NSString are toll-free bridged.
+        let bytes: *const std::os::raw::c_char = msg_send![value.0 as id, UTF8String];
+        (!bytes.is_null()).then(|| {
+            std::ffi::CStr::from_ptr(bytes)
+                .to_string_lossy()
+                .into_owned()
+        })
+    }
+}
+
+pub(crate) fn attribute(element: Element, name: &str) -> Option<Owned> {
     let name = Owned::string(name)?;
     let mut value = ptr::null();
     let status = unsafe { AXUIElementCopyAttributeValue(element, name.0, &mut value) };

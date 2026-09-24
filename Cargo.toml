@@ -11,11 +11,13 @@ publish = false
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
 
 [dependencies]
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 cpal = "0.15"
 dirs = "6"
 gpui-kit = { version = "0.6", default-features = false, features = ["component", "assets"] }
 hound = "3.5"
+png = "0.18"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

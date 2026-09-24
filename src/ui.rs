@@ -8,8 +8,8 @@ use gpui_kit::{
 };
 
 use crate::app::{
-    Phase, Recovery, Reveal, Whisp, BAR_HEIGHT, COLLAPSED_HEIGHT, MENU_DIVIDER, MENU_PAD, MENU_ROW,
-    NOTICE_EXTRA, WINDOW_RADIUS,
+    Phase, Recovery, ResultKind, Reveal, Whisp, BAR_HEIGHT, COLLAPSED_HEIGHT, MENU_DIVIDER,
+    MENU_PAD, MENU_ROW, NOTICE_EXTRA, RESULT_LINE, WINDOW_RADIUS,
 };
 use crate::cloud::Provider;
 use crate::hotkey;
@@ -114,6 +114,11 @@ impl Whisp {
             Recovery::CloudOffline => local.or(retry),
             Recovery::CloudRateLimited | Recovery::CloudOther => retry.or(local),
             Recovery::LocalFallback => retry.map(|_| ("Retry cloud", NoticeAction::Retry)),
+            Recovery::Command => None,
+            Recovery::AssistantKey => {
+                Some(("Add key", NoticeAction::Settings(SettingsTarget::Models)))
+            }
+            Recovery::Assistant => Some(("Try again", NoticeAction::Record)),
         }
     }
 
@@ -252,7 +257,7 @@ impl Whisp {
             waveform(&self.bars).into_any_element()
         } else {
             let (label, color) = match &self.phase {
-                Phase::Transcribing => ("Transcribing…", theme::SECONDARY),
+                Phase::Transcribing => (self.working.unwrap_or("Transcribing…"), theme::SECONDARY),
                 _ if locked && trial_over => ("Free trial ended", theme::LABEL),
                 _ if locked => ("License needs attention", theme::LABEL),
                 Phase::Idle if self.selected_ready() => ("Start recording", theme::LABEL),
@@ -278,10 +283,11 @@ impl Whisp {
                     .text_color(theme::SECONDARY)
                     .child(clock(elapsed))
             }),
-            Phase::Transcribing => Some(hint_text(self.transcribing_provider.map_or_else(
-                || "On device".to_string(),
-                |provider| provider.name().to_string(),
-            ))),
+            Phase::Transcribing => Some(hint_text(match self.transcribing_provider {
+                Some(provider) => provider.name().to_string(),
+                None if self.working.is_some() => "Voice command".to_string(),
+                None => "On device".to_string(),
+            })),
             _ if locked => None,
             _ => Some(match self.trial_ending() {
                 Some(left) => hint_text(format!("Trial · {}", license::trial_left(left, true)))
@@ -489,11 +495,17 @@ impl Whisp {
 
     fn transcript_card(&self, text: String, cx: &mut Context<Self>) -> impl IntoElement {
         let words = text.split_whitespace().count();
-        let meta = format!(
-            "{words} {} · {}",
-            if words == 1 { "word" } else { "words" },
-            clock(self.recorded)
-        );
+        let meta = match self.result_kind {
+            ResultKind::Dictation => format!(
+                "{words} {} · {}",
+                if words == 1 { "word" } else { "words" },
+                clock(self.recorded)
+            ),
+            ResultKind::Command => "Voice command".to_string(),
+            ResultKind::Answer(provider) => format!("Whisple · {}", provider.name()),
+            ResultKind::Typed(provider) => format!("Written by Whisple · {}", provider.name()),
+        };
+        let lines = self.result_lines();
         div()
             .px(px(18.0))
             .pt(px(18.0))
@@ -503,12 +515,12 @@ impl Whisp {
             .gap(px(14.0))
             .child(
                 div()
-                    .h(px(44.0))
+                    .h(px(RESULT_LINE * lines as f32))
                     .text_size(px(15.0))
-                    .line_height(px(22.0))
+                    .line_height(px(RESULT_LINE))
                     .text_color(theme::LABEL)
                     .whitespace_normal()
-                    .line_clamp(2)
+                    .line_clamp(lines)
                     .child(text),
             )
             .child(
@@ -526,7 +538,9 @@ impl Whisp {
                             .text_color(theme::TERTIARY)
                             .child(meta),
                     )
-                    .child(self.copy_button(cx)),
+                    .when(self.result_kind != ResultKind::Command, |row| {
+                        row.child(self.copy_button(cx))
+                    }),
             )
     }
 
