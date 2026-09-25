@@ -2,13 +2,15 @@ use std::cell::RefCell;
 
 use global_hotkey::{hotkey::HotKey, GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
-use super::Chord;
+use super::{Chord, Presses, Shortcut};
 
 struct Registration {
     manager: GlobalHotKeyManager,
-    shortcut: Option<HotKey>,
-    active: bool,
-    held: bool,
+    /// The native hotkey for each `Shortcut`, by index.
+    shortcuts: [Option<HotKey>; 2],
+    registered: [bool; 2],
+    paused: bool,
+    held: [bool; 2],
 }
 
 // AppKit hotkeys must be registered and polled on the main thread. Settings
@@ -17,19 +19,24 @@ thread_local! {
     static REGISTRATION: RefCell<Option<Registration>> = const { RefCell::new(None) };
 }
 
-pub fn install(chord: Chord) -> Result<(), String> {
+pub fn install(slot: Shortcut, chord: Chord) -> Result<(), String> {
     let shortcut = native_shortcut(&chord)?;
     REGISTRATION.with_borrow_mut(|state| {
         if state.is_none() {
             *state = Some(Registration {
                 manager: GlobalHotKeyManager::new().map_err(|err| err.to_string())?,
-                shortcut: None,
-                active: false,
-                held: false,
+                shortcuts: [None, None],
+                registered: [false, false],
+                paused: false,
+                held: [false, false],
             });
         }
         let state = state.as_mut().unwrap();
-        if state.shortcut == Some(shortcut) && state.active {
+        let index = slot.index();
+        if state.shortcuts[1 - index] == Some(shortcut) {
+            return Err("Whisple already uses that shortcut.".into());
+        }
+        if state.shortcuts[index] == Some(shortcut) {
             return Ok(());
         }
         // Register first so a conflict never replaces a working preference.
@@ -37,17 +44,19 @@ pub fn install(chord: Chord) -> Result<(), String> {
             .manager
             .register(shortcut)
             .map_err(|err| err.to_string())?;
-        if state.active {
-            if let Some(previous) = state.shortcut {
-                if let Err(err) = state.manager.unregister(previous) {
-                    let _ = state.manager.unregister(shortcut);
-                    return Err(err.to_string());
-                }
+        if let Some(previous) = state.shortcuts[index].filter(|_| state.registered[index]) {
+            if let Err(err) = state.manager.unregister(previous) {
+                let _ = state.manager.unregister(shortcut);
+                return Err(err.to_string());
             }
         }
-        state.shortcut = Some(shortcut);
-        state.active = true;
-        state.held = false;
+        // While paused, registering only proved the shortcut is free.
+        if state.paused {
+            let _ = state.manager.unregister(shortcut);
+        }
+        state.shortcuts[index] = Some(shortcut);
+        state.registered[index] = !state.paused;
+        state.held[index] = false;
         while GlobalHotKeyEvent::receiver().try_recv().is_ok() {}
         Ok(())
     })
@@ -56,46 +65,50 @@ pub fn install(chord: Chord) -> Result<(), String> {
 pub fn set_paused(paused: bool) {
     REGISTRATION.with_borrow_mut(|state| {
         let Some(state) = state else { return };
-        let Some(shortcut) = state.shortcut else {
-            return;
-        };
-        if state.active == !paused {
+        if state.paused == paused {
             return;
         }
-        let result = if paused {
-            state.manager.unregister(shortcut)
-        } else {
-            state.manager.register(shortcut)
-        };
-        match result {
-            Ok(()) => {
-                state.active = !paused;
-                state.held = false;
-                while GlobalHotKeyEvent::receiver().try_recv().is_ok() {}
+        for index in 0..state.shortcuts.len() {
+            let Some(shortcut) = state.shortcuts[index] else {
+                continue;
+            };
+            let result = match (paused, state.registered[index]) {
+                (true, true) => state.manager.unregister(shortcut),
+                (false, false) => state.manager.register(shortcut),
+                _ => Ok(()),
+            };
+            match result {
+                Ok(()) => state.registered[index] = !paused,
+                Err(err) => eprintln!("could not update the global shortcut: {err}"),
             }
-            Err(err) => eprintln!("could not update the global shortcut: {err}"),
         }
+        state.paused = paused;
+        state.held = [false, false];
+        while GlobalHotKeyEvent::receiver().try_recv().is_ok() {}
     });
 }
 
-pub fn take_press() -> bool {
+pub fn take_presses() -> Presses {
     REGISTRATION.with_borrow_mut(|state| {
-        let Some(state) = state else { return false };
-        let mut pressed = false;
+        let mut presses = Presses::default();
+        let Some(state) = state else { return presses };
         while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-            if !state.active || state.shortcut.map(|shortcut| shortcut.id()) != Some(event.id) {
+            let Some(index) = (0..state.shortcuts.len()).find(|&index| {
+                state.registered[index]
+                    && state.shortcuts[index].map(|shortcut| shortcut.id()) == Some(event.id)
+            }) else {
                 continue;
-            }
+            };
             match event.state {
-                HotKeyState::Pressed if !state.held => {
-                    state.held = true;
-                    pressed = !pressed;
+                HotKeyState::Pressed if !state.held[index] => {
+                    state.held[index] = true;
+                    presses.flip(Shortcut::ALL[index]);
                 }
-                HotKeyState::Released => state.held = false,
+                HotKeyState::Released => state.held[index] = false,
                 _ => {}
             }
         }
-        pressed
+        presses
     })
 }
 

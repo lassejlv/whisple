@@ -264,6 +264,13 @@ pub(super) fn shortcut_control(shortcut: &str, capturing: bool) -> AnyElement {
             .text_color(theme::AMBER)
             .child("Press shortcut…")
             .into_any_element()
+    } else if shortcut.is_empty() {
+        div()
+            .px(px(6.0))
+            .text_size(px(12.0))
+            .text_color(theme::TERTIARY)
+            .child("Not set")
+            .into_any_element()
     } else {
         div()
             .flex()

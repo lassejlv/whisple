@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_HOTKEY: &str = "ctrl-shift-space";
+pub const DEFAULT_RECORD_HOTKEY: &str = "ctrl-alt-space";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Preferences {
@@ -16,6 +17,8 @@ pub struct Preferences {
     pub selected: String,
     pub language: String,
     pub show_hotkey: String,
+    /// Shows the bar and starts recording. Empty when turned off.
+    pub record_hotkey: String,
     pub copy_notes: bool,
     pub clean_fillers: bool,
     /// Empty means the system default input.
@@ -131,6 +134,8 @@ struct File {
     language: String,
     #[serde(default)]
     show_hotkey: String,
+    #[serde(default = "default_record_hotkey")]
+    record_hotkey: String,
     #[serde(default = "yes")]
     copy_notes: bool,
     #[serde(default = "yes")]
@@ -151,6 +156,10 @@ fn yes() -> bool {
     true
 }
 
+fn default_record_hotkey() -> String {
+    DEFAULT_RECORD_HOTKEY.into()
+}
+
 impl Default for Preferences {
     fn default() -> Self {
         Self {
@@ -158,6 +167,7 @@ impl Default for Preferences {
             selected: String::new(),
             language: "en".into(),
             show_hotkey: DEFAULT_HOTKEY.into(),
+            record_hotkey: DEFAULT_RECORD_HOTKEY.into(),
             copy_notes: true,
             clean_fillers: true,
             input_device: String::new(),
@@ -226,6 +236,16 @@ pub fn decode(raw: &str) -> Preferences {
             prefs.show_hotkey = chord.canonical();
         }
     }
+    prefs.record_hotkey = match crate::hotkey::parse(&file.record_hotkey) {
+        Some(chord) if chord.has_modifier() => chord.canonical(),
+        // A saved empty value means the user turned the shortcut off.
+        _ if file.record_hotkey.is_empty() => String::new(),
+        _ => DEFAULT_RECORD_HOTKEY.into(),
+    };
+    // One chord cannot do both jobs; the show shortcut came first.
+    if prefs.record_hotkey == prefs.show_hotkey {
+        prefs.record_hotkey.clear();
+    }
     prefs.copy_notes = file.copy_notes;
     prefs.clean_fillers = file.clean_fillers;
     prefs.input_device = clean_device(&file.input_device);
@@ -254,6 +274,7 @@ impl From<&Preferences> for File {
             selected: prefs.selected.clone(),
             language: prefs.language.clone(),
             show_hotkey: prefs.show_hotkey.clone(),
+            record_hotkey: prefs.record_hotkey.clone(),
             copy_notes: prefs.copy_notes,
             clean_fillers: prefs.clean_fillers,
             input_device: prefs.input_device.clone(),
@@ -275,6 +296,7 @@ mod tests {
         assert_eq!(prefs.selected, "small-en");
         assert_eq!(prefs.language, "en");
         assert_eq!(prefs.show_hotkey, DEFAULT_HOTKEY);
+        assert_eq!(prefs.record_hotkey, DEFAULT_RECORD_HOTKEY);
         assert!(prefs.copy_notes);
         assert!(prefs.clean_fillers);
         assert!(prefs.input_device.is_empty());
@@ -322,6 +344,26 @@ mod tests {
     fn unknown_language_falls_back_to_english() {
         let prefs = decode(r#"{"language":"zz"}"#);
         assert_eq!(prefs.language, "en");
+    }
+
+    #[test]
+    fn the_record_shortcut_survives_a_round_trip() {
+        let prefs = decode(r#"{"record_hotkey":"super-shift-r"}"#);
+        assert_eq!(prefs.record_hotkey, "shift-super-r");
+        let raw = serde_json::to_string(&File::from(&prefs)).unwrap();
+        assert_eq!(decode(&raw).record_hotkey, "shift-super-r");
+
+        let off = decode(r#"{"record_hotkey":""}"#);
+        assert!(off.record_hotkey.is_empty());
+        let raw = serde_json::to_string(&File::from(&off)).unwrap();
+        assert!(decode(&raw).record_hotkey.is_empty());
+    }
+
+    #[test]
+    fn the_record_shortcut_never_repeats_the_show_shortcut() {
+        let prefs = decode(r#"{"show_hotkey":"ctrl-alt-space"}"#);
+        assert_eq!(prefs.show_hotkey, "ctrl-alt-space");
+        assert!(prefs.record_hotkey.is_empty());
     }
 
     #[test]

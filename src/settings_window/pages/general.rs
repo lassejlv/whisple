@@ -2,6 +2,7 @@
 //! the assistant's voice commands and screen context.
 use gpui_kit::{div, prelude::*, px, Context, Div, Styled};
 
+use crate::hotkey::Shortcut;
 use crate::settings::{self};
 use crate::settings_window::widgets::*;
 use crate::settings_window::SettingsWindow;
@@ -48,17 +49,23 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    pub(in crate::settings_window) fn begin_shortcut(&mut self, cx: &mut Context<Self>) {
-        self.hud.update(cx, |hud, cx| hud.begin_hotkey_capture(cx));
+    pub(in crate::settings_window) fn begin_shortcut(
+        &mut self,
+        slot: Shortcut,
+        cx: &mut Context<Self>,
+    ) {
+        self.hud
+            .update(cx, |hud, cx| hud.begin_hotkey_capture(slot, cx));
         cx.notify();
     }
 
     pub(in crate::settings_window) fn general(&self, cx: &mut Context<Self>) -> Div {
-        let (startup, shortcut, copy, clean, capturing, commands, screen) = {
+        let (startup, shortcut, record, copy, clean, capturing, commands, screen) = {
             let hud = self.hud.read(cx);
             (
                 hud.open_on_startup,
                 hud.show_hotkey.clone(),
+                hud.record_hotkey.clone(),
                 hud.copy_notes,
                 hud.clean_fillers,
                 hud.recording_hotkey,
@@ -95,16 +102,27 @@ impl SettingsWindow {
                 ],
             ))
             .child(section(
-                "Shortcut",
-                vec![setting_row(
-                    "show-whisple-hotkey",
-                    "Show Whisple",
-                    Some("Opens the bar from any app. Press again to stop."),
-                    shortcut_control(&shortcut, capturing),
-                    false,
-                    cx,
-                    |view, cx| view.begin_shortcut(cx),
-                )],
+                "Shortcuts",
+                vec![
+                    setting_row(
+                        "show-whisple-hotkey",
+                        "Show Whisple",
+                        Some("Opens the bar from any app. Press again to hide it."),
+                        shortcut_control(&shortcut, capturing == Some(Shortcut::Show)),
+                        false,
+                        cx,
+                        |view, cx| view.begin_shortcut(Shortcut::Show, cx),
+                    ),
+                    setting_row(
+                        "record-hotkey",
+                        "Start recording",
+                        Some("Opens the bar and starts recording. Press again to finish."),
+                        shortcut_control(&record, capturing == Some(Shortcut::Record)),
+                        true,
+                        cx,
+                        |view, cx| view.begin_shortcut(Shortcut::Record, cx),
+                    ),
+                ],
             ))
             .child(section(
                 "Output",

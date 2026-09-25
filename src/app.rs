@@ -13,7 +13,7 @@ use crate::audio::{self, Mic};
 use crate::cloud::{self, Provider};
 #[cfg(target_os = "macos")]
 use crate::dictation;
-use crate::hotkey;
+use crate::hotkey::{self, Shortcut};
 use crate::license::{self, Access};
 use crate::models::{self, ModelSpec};
 use crate::motion::{Ease, Spring};
@@ -174,6 +174,8 @@ pub(crate) struct Whisp {
     transcription_id: u64,
     pub language: String,
     pub show_hotkey: String,
+    /// Shows the bar and starts recording. Empty when turned off.
+    pub record_hotkey: String,
     pub copy_notes: bool,
     #[cfg(target_os = "macos")]
     dictation_target: Option<dictation::Target>,
@@ -192,7 +194,8 @@ pub(crate) struct Whisp {
     update_checking: bool,
     #[cfg(target_os = "macos")]
     last_update_check: Instant,
-    pub recording_hotkey: bool,
+    /// The shortcut Settings is waiting for a new chord for.
+    pub recording_hotkey: Option<Shortcut>,
     /// When the current recording started, for the bar's timer.
     pub listen_started: Option<Instant>,
     /// Length of the audio behind the last transcript.
@@ -224,9 +227,15 @@ impl Whisp {
             .filter(|id| models::spec(id).is_some() || Provider::from_id(id).is_some())
             .unwrap_or_else(|| models::recommended_id().to_string());
         let cloud_keys = Provider::ALL.map(|provider| cloud::has_key(provider).unwrap_or(false));
-        let hotkey_error = hotkey::parse(&prefs.show_hotkey)
-            .and_then(|chord| hotkey::install(chord).err())
-            .map(|err| format!("Could not register the shortcut: {err}"));
+        let hotkey_error = [
+            (Shortcut::Show, &prefs.show_hotkey),
+            (Shortcut::Record, &prefs.record_hotkey),
+        ]
+        .into_iter()
+        .find_map(|(slot, source)| {
+            hotkey::parse(source).and_then(|chord| hotkey::install(slot, chord).err())
+        })
+        .map(|err| format!("Could not register the shortcut: {err}"));
         if prefs.open_on_startup {
             if let Err(err) = startup::apply(true) {
                 eprintln!("could not refresh the login item: {err}");
@@ -239,7 +248,7 @@ impl Whisp {
             }
             let keystroke = event.keystroke.clone();
             view.update(cx, |this, cx| {
-                if !this.recording_hotkey {
+                if this.recording_hotkey.is_none() {
                     return;
                 }
                 cx.stop_propagation();
@@ -303,6 +312,7 @@ impl Whisp {
             transcription_id: 0,
             language: prefs.language,
             show_hotkey: prefs.show_hotkey,
+            record_hotkey: prefs.record_hotkey,
             copy_notes: prefs.copy_notes,
             #[cfg(target_os = "macos")]
             dictation_target: None,
@@ -320,7 +330,7 @@ impl Whisp {
             update_checking: false,
             #[cfg(target_os = "macos")]
             last_update_check: Instant::now(),
-            recording_hotkey: false,
+            recording_hotkey: None,
             listen_started: None,
             recorded: Duration::ZERO,
             last_text: String::new(),
@@ -506,9 +516,12 @@ impl Whisp {
             let alive = window_handle
                 .update(cx, |_, window, cx| {
                     this.update(cx, |view, cx| {
-                        let pressed = hotkey::take_press();
-                        if pressed {
+                        let presses = hotkey::take_presses();
+                        if presses.show {
                             view.set_visible(!view.bar_visible, window, cx);
+                        }
+                        if presses.record {
+                            view.record_from_shortcut(window, cx);
                         }
                         while let Some(command) = tray::take_command() {
                             match command {
@@ -678,8 +691,20 @@ impl Whisp {
             .any(|model| model.spec.id == self.selected && model.ready)
     }
 
+    /// The record shortcut: opens the bar if needed and starts recording, or
+    /// stops the running recording and transcribes it.
+    fn record_from_shortcut(&mut self, window: &mut gpui_kit::Window, cx: &mut Context<Self>) {
+        if self.recording_hotkey.is_some() || matches!(self.phase, Phase::Transcribing) {
+            return;
+        }
+        if !self.bar_visible {
+            self.set_visible(true, window, cx);
+        }
+        self.toggle_listen(cx);
+    }
+
     pub(crate) fn toggle_listen(&mut self, cx: &mut Context<Self>) {
-        if self.recording_hotkey || self.actions_suppressed() {
+        if self.recording_hotkey.is_some() || self.actions_suppressed() {
             return;
         }
         if matches!(self.phase, Phase::Idle | Phase::Result(_)) && !self.require_license(cx) {
@@ -1174,11 +1199,11 @@ impl Whisp {
             })
     }
 
-    pub(crate) fn begin_hotkey_capture(&mut self, cx: &mut Context<Self>) {
-        if self.recording_hotkey {
+    pub(crate) fn begin_hotkey_capture(&mut self, slot: Shortcut, cx: &mut Context<Self>) {
+        if self.recording_hotkey == Some(slot) {
             self.stop_recording();
         } else {
-            self.recording_hotkey = true;
+            self.recording_hotkey = Some(slot);
             self.error = None;
             hotkey::set_paused(true);
         }
@@ -1215,8 +1240,11 @@ impl Whisp {
         if hotkey::is_modifier_only(&keystroke.key) {
             return;
         }
+        let Some(slot) = self.recording_hotkey else {
+            return;
+        };
         if keystroke.key == "escape" {
-            self.recording_hotkey = false;
+            self.recording_hotkey = None;
             hotkey::set_paused(false);
             self.error = None;
             self.suppress_actions_until = Some(Instant::now() + Duration::from_millis(280));
@@ -1231,13 +1259,16 @@ impl Whisp {
             cx.notify();
             return;
         }
-        if let Err(err) = hotkey::install(chord.clone()) {
+        if let Err(err) = hotkey::install(slot, chord.clone()) {
             self.error = Some(format!("Could not use that shortcut: {err}"));
             cx.notify();
             return;
         }
-        self.show_hotkey = chord.canonical();
-        self.recording_hotkey = false;
+        match slot {
+            Shortcut::Show => self.show_hotkey = chord.canonical(),
+            Shortcut::Record => self.record_hotkey = chord.canonical(),
+        }
+        self.recording_hotkey = None;
         self.error = None;
         self.suppress_actions_until = Some(Instant::now() + Duration::from_millis(280));
         self.persist();
@@ -1246,8 +1277,8 @@ impl Whisp {
     }
 
     pub(crate) fn close_overlay(&mut self, window: &mut gpui_kit::Window, cx: &mut Context<Self>) {
-        if self.recording_hotkey {
-            self.recording_hotkey = false;
+        if self.recording_hotkey.is_some() {
+            self.recording_hotkey = None;
             hotkey::set_paused(false);
             self.error = None;
             self.suppress_actions_until = Some(Instant::now() + Duration::from_millis(280));
@@ -1563,14 +1594,14 @@ impl Whisp {
     }
 
     fn stop_recording(&mut self) {
-        if self.recording_hotkey {
-            self.recording_hotkey = false;
+        if self.recording_hotkey.is_some() {
+            self.recording_hotkey = None;
             hotkey::set_paused(false);
         }
     }
 
     pub(crate) fn cancel_hotkey_capture(&mut self, cx: &mut Context<Self>) {
-        if self.recording_hotkey {
+        if self.recording_hotkey.is_some() {
             self.stop_recording();
             self.error = None;
             cx.notify();
@@ -1588,6 +1619,7 @@ impl Whisp {
             selected: self.selected.clone(),
             language: self.language.clone(),
             show_hotkey: self.show_hotkey.clone(),
+            record_hotkey: self.record_hotkey.clone(),
             copy_notes: self.copy_notes,
             clean_fillers: self.clean_fillers,
             input_device: self.input_device.clone(),

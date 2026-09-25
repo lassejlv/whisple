@@ -173,7 +173,7 @@ impl Onboarding {
                         if view.download.is_some() {
                             cx.notify();
                         }
-                        if hotkey::take_press() {
+                        if hotkey::take_presses().any() {
                             window.activate_window();
                             cx.activate(true);
                         }
@@ -580,14 +580,14 @@ impl Onboarding {
     }
 
     fn features(&self) -> Div {
-        let shortcut = hotkey::symbols(&settings::load().show_hotkey);
+        let shortcut = hotkey::symbols(&record_shortcut());
         #[cfg(target_os = "macos")]
         let dictate = format!(
-            "Press {shortcut}, talk, and press Space. Your words are typed into the app you were using."
+            "Press {shortcut} to start talking and again to finish. Your words are typed into the app you were using."
         );
         #[cfg(not(target_os = "macos"))]
         let dictate = format!(
-            "Press {shortcut}, talk, and press Space. Your words are copied, ready to paste."
+            "Press {shortcut} to start talking and again to finish. Your words are copied, ready to paste."
         );
         let rows = [
             (Lucide::Keyboard, "Dictate anywhere", dictate),
@@ -909,7 +909,7 @@ impl Onboarding {
     }
 
     fn try_it(&self) -> Div {
-        let caps = hotkey::keycaps(&settings::load().show_hotkey);
+        let caps = hotkey::keycaps(&record_shortcut());
         div()
             .w_full()
             .flex()
@@ -940,9 +940,9 @@ impl Onboarding {
                     .child(description(
                         {
                             #[cfg(target_os = "macos")]
-                            let instructions = "Press the shortcut, say a sentence, then press Space. Your words go into the selected text field. Clipboard copying is optional.";
+                            let instructions = "Press the shortcut, say a sentence, then press it again. Your words go into the selected text field. Clipboard copying is optional.";
                             #[cfg(not(target_os = "macos"))]
-                            let instructions = "Press the shortcut, say a sentence, then press Space. Your words land on the clipboard.";
+                            let instructions = "Press the shortcut, say a sentence, then press it again. Your words land on the clipboard.";
                             instructions
                         },
                         440.0,
@@ -1222,6 +1222,16 @@ fn heading(label: &'static str, size: f32) -> Div {
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme::LABEL)
         .child(label)
+}
+
+/// The shortcut that starts recording, or the show shortcut when it is off.
+fn record_shortcut() -> String {
+    let prefs = settings::load();
+    if prefs.record_hotkey.is_empty() {
+        prefs.show_hotkey
+    } else {
+        prefs.record_hotkey
+    }
 }
 
 /// The round selection mark on a model tile.

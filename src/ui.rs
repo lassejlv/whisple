@@ -292,7 +292,13 @@ impl Whisp {
             _ => Some(match self.trial_ending() {
                 Some(left) => hint_text(format!("Trial · {}", license::trial_left(left, true)))
                     .text_color(theme::AMBER),
-                None => hint_text(hotkey::symbols(&self.show_hotkey)),
+                // While the bar is up, the useful shortcut is the one that
+                // records.
+                None => hint_text(hotkey::symbols(if self.record_hotkey.is_empty() {
+                    &self.show_hotkey
+                } else {
+                    &self.record_hotkey
+                })),
             }),
         };
 
