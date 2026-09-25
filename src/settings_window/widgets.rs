@@ -10,6 +10,7 @@ use gpui_kit::{
 use super::{Choice, SettingsWindow};
 use crate::cloud::Provider;
 use crate::hotkey;
+use crate::i18n::t;
 use crate::motion;
 use crate::theme;
 
@@ -245,14 +246,14 @@ pub(super) fn shortcut_control(shortcut: &str, capturing: bool) -> AnyElement {
         div()
             .text_size(px(12.0))
             .text_color(theme::AMBER)
-            .child("Press shortcut…")
+            .child(t("Press shortcut…"))
             .into_any_element()
     } else if shortcut.is_empty() {
         div()
             .px(px(6.0))
             .text_size(px(12.0))
             .text_color(theme::TERTIARY)
-            .child("Not set")
+            .child(t("Not set"))
             .into_any_element()
     } else {
         div()
@@ -293,7 +294,7 @@ pub(super) fn shortcut_control(shortcut: &str, capturing: bool) -> AnyElement {
                 .text_size(px(12.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme::AMBER)
-                .child("Change"),
+                .child(t("Change")),
         )
         .into_any_element()
 }

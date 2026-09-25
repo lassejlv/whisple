@@ -13,6 +13,7 @@ use crate::app::{
 };
 use crate::cloud::Provider;
 use crate::hotkey;
+use crate::i18n::{t, tf};
 use crate::license::{self, Access};
 use crate::motion;
 use crate::settings_window::SettingsTarget;
@@ -90,35 +91,36 @@ impl Whisp {
     fn notice_action(&self) -> Option<(&'static str, NoticeAction)> {
         let retry = self
             .failed_audio_available()
-            .then_some(("Retry", NoticeAction::Retry));
+            .then_some((t("Retry"), NoticeAction::Retry));
         let local = (self.failed_audio_available()
             && self
                 .models
                 .iter()
                 .any(|model| model.ready && model.spec.id.starts_with("turbo")))
-        .then_some(("Use local Turbo", NoticeAction::Local));
+        .then_some((t("Use local Turbo"), NoticeAction::Local));
         match self.recovery? {
-            Recovery::Microphone | Recovery::MicrophoneDisconnected => {
-                Some(("Choose mic", NoticeAction::Settings(SettingsTarget::Audio)))
-            }
+            Recovery::Microphone | Recovery::MicrophoneDisconnected => Some((
+                t("Choose mic"),
+                NoticeAction::Settings(SettingsTarget::Audio),
+            )),
             #[cfg(target_os = "macos")]
-            Recovery::MicrophonePermission => Some(("Open Privacy", NoticeAction::Privacy)),
+            Recovery::MicrophonePermission => Some((t("Open Privacy"), NoticeAction::Privacy)),
             #[cfg(not(target_os = "macos"))]
             Recovery::MicrophonePermission => None,
-            Recovery::Model => Some(("Choose model", NoticeAction::Models)),
-            Recovery::NoSpeech => Some(("Try again", NoticeAction::Record)),
+            Recovery::Model => Some((t("Choose model"), NoticeAction::Models)),
+            Recovery::NoSpeech => Some((t("Try again"), NoticeAction::Record)),
             Recovery::CloudKey(provider) => Some((
-                "Fix key",
+                t("Fix key"),
                 NoticeAction::Settings(SettingsTarget::CloudKey(provider)),
             )),
             Recovery::CloudOffline => local.or(retry),
             Recovery::CloudRateLimited | Recovery::CloudOther => retry.or(local),
-            Recovery::LocalFallback => retry.map(|_| ("Retry cloud", NoticeAction::Retry)),
+            Recovery::LocalFallback => retry.map(|_| (t("Retry cloud"), NoticeAction::Retry)),
             Recovery::Command => None,
             Recovery::AssistantKey => {
-                Some(("Add key", NoticeAction::Settings(SettingsTarget::Models)))
+                Some((t("Add key"), NoticeAction::Settings(SettingsTarget::Models)))
             }
-            Recovery::Assistant => Some(("Try again", NoticeAction::Record)),
+            Recovery::Assistant => Some((t("Try again"), NoticeAction::Record)),
         }
     }
 
@@ -128,7 +130,7 @@ impl Whisp {
             #[cfg(target_os = "macos")]
             Some(kind @ Recovery::MicrophonePermission) => (
                 kind.title().to_string(),
-                Some("Allow Whisple under Privacy & Security › Microphone.".to_string()),
+                Some(t("Allow Whisple under Privacy & Security › Microphone.").to_string()),
             ),
             Some(kind) => (kind.title().to_string(), Some(message)),
             None => (message, None),
@@ -152,7 +154,7 @@ impl Whisp {
         #[cfg(target_os = "macos")]
         if self.update_prompt == Some(UpdatePrompt::JustUpdated) {
             return notice_line(
-                format!("Updated to Whisple {}", env!("CARGO_PKG_VERSION")),
+                tf("Updated to Whisple {}", &[&env!("CARGO_PKG_VERSION")]),
                 None,
                 theme::LABEL,
                 None::<(&str, fn(&mut Whisp, &mut Context<Whisp>))>,
@@ -163,10 +165,10 @@ impl Whisp {
         }
         let version = self.ready_update().unwrap_or_default();
         notice_line(
-            format!("Whisple {version} is ready"),
-            Some("Installs and restarts in a few seconds.".to_string()),
+            tf("Whisple {} is ready", &[&version]),
+            Some(t("Installs and restarts in a few seconds.").to_string()),
             theme::LABEL,
-            Some(("Install", |this: &mut Whisp, cx: &mut Context<Whisp>| {
+            Some((t("Install"), |this: &mut Whisp, cx: &mut Context<Whisp>| {
                 this.install_update(cx)
             })),
             |this, cx| this.dismiss_update(cx),
@@ -257,12 +259,14 @@ impl Whisp {
             waveform(&self.bars).into_any_element()
         } else {
             let (label, color) = match &self.phase {
-                Phase::Transcribing => (self.working.unwrap_or("Transcribing…"), theme::SECONDARY),
-                _ if locked && trial_over => ("Free trial ended", theme::LABEL),
-                _ if locked => ("License needs attention", theme::LABEL),
-                Phase::Idle if self.selected_ready() => ("Start recording", theme::LABEL),
-                Phase::Result(_) if self.selected_ready() => ("Record again", theme::LABEL),
-                _ => ("Choose a model", theme::LABEL),
+                Phase::Transcribing => {
+                    (self.working.unwrap_or(t("Transcribing…")), theme::SECONDARY)
+                }
+                _ if locked && trial_over => (t("Free trial ended"), theme::LABEL),
+                _ if locked => (t("License needs attention"), theme::LABEL),
+                Phase::Idle if self.selected_ready() => (t("Start recording"), theme::LABEL),
+                Phase::Result(_) if self.selected_ready() => (t("Record again"), theme::LABEL),
+                _ => (t("Choose a model"), theme::LABEL),
             };
             div()
                 .text_size(px(14.0))
@@ -285,12 +289,12 @@ impl Whisp {
             }),
             Phase::Transcribing => Some(hint_text(match self.transcribing_provider {
                 Some(provider) => provider.name().to_string(),
-                None if self.working.is_some() => "Voice command".to_string(),
-                None => "On device".to_string(),
+                None if self.working.is_some() => t("Voice command").to_string(),
+                None => t("On device").to_string(),
             })),
             _ if locked => None,
             _ => Some(match self.trial_ending() {
-                Some(left) => hint_text(format!("Trial · {}", license::trial_left(left, true)))
+                Some(left) => hint_text(tf("Trial · {}", &[&license::trial_left(left, true)]))
                     .text_color(theme::AMBER),
                 // While the bar is up, the useful shortcut is the one that
                 // records.
@@ -348,9 +352,9 @@ impl Whisp {
             |this, cx| this.open_license_window(cx),
         )
         .child(if buy {
-            format!("Unlock · {}", license::PRICE)
+            tf("Unlock · {}", &[&license::PRICE])
         } else {
-            "License".to_string()
+            t("License").to_string()
         })
     }
 
@@ -445,9 +449,9 @@ impl Whisp {
         let scale = self.press_scale("models");
         let open = self.menu_open;
         let label = if !self.selected_ready() && self.menu_choices().is_empty() {
-            "Add a model"
+            t("Add a model")
         } else if !self.selected_ready() {
-            "Models"
+            t("Models")
         } else if let Some(provider) = Provider::from_id(&self.selected) {
             provider.name()
         } else {
@@ -502,19 +506,16 @@ impl Whisp {
     fn transcript_card(&self, text: String, cx: &mut Context<Self>) -> impl IntoElement {
         let words = text.split_whitespace().count();
         let meta = match self.result_kind {
-            ResultKind::Dictation => format!(
-                "{words} {} · {}",
-                if words == 1 { "word" } else { "words" },
-                clock(self.recorded)
-            ),
+            ResultKind::Dictation => format!("{} · {}", word_count(words), clock(self.recorded)),
             ResultKind::Translated(language) => format!(
-                "{words} {} · {} · {language}",
-                if words == 1 { "word" } else { "words" },
-                clock(self.recorded)
+                "{} · {} · {}",
+                word_count(words),
+                clock(self.recorded),
+                t(language)
             ),
-            ResultKind::Command => "Voice command".to_string(),
+            ResultKind::Command => t("Voice command").to_string(),
             ResultKind::Answer(provider) => format!("Whisple · {}", provider.name()),
-            ResultKind::Typed(provider) => format!("Written by Whisple · {}", provider.name()),
+            ResultKind::Typed(provider) => tf("Written by Whisple · {}", &[&provider.name()]),
         };
         let lines = self.result_lines();
         div()
@@ -591,7 +592,7 @@ impl Whisp {
                     div()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme::LABEL)
-                        .child(if copied { "Copied" } else { "Copy" }),
+                        .child(if copied { t("Copied") } else { t("Copy") }),
                 )
                 .when(!copied, |pill| {
                     pill.child(
@@ -643,7 +644,7 @@ impl Whisp {
             .child(menu_row(
                 self,
                 "menu-manage".to_string(),
-                "Manage models…",
+                t("Manage models…"),
                 None,
                 false,
                 cx,
@@ -796,7 +797,7 @@ fn notice_line(
                 div()
                     .id("notice-dismiss")
                     .role(gpui_kit::Role::Button)
-                    .aria_label("Dismiss")
+                    .aria_label(t("Dismiss"))
                     .size(px(22.0))
                     .flex_shrink_0()
                     .flex()
@@ -841,6 +842,15 @@ fn press_handlers(
             this.press_up(&out);
         }),
     )
+}
+
+/// "12 words", in the interface language.
+fn word_count(words: usize) -> String {
+    if words == 1 {
+        tf("{} word", &[&words])
+    } else {
+        tf("{} words", &[&words])
+    }
 }
 
 /// `m:ss`, the way a recording timer reads.

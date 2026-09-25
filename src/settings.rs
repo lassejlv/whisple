@@ -14,6 +14,8 @@ pub const DEFAULT_RECORD_HOTKEY: &str = "ctrl-alt-space";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Preferences {
     pub onboarding_complete: bool,
+    /// The interface language's code. Empty follows the system language.
+    pub app_language: String,
     pub selected: String,
     pub language: String,
     /// The language notes come out in. Empty means the spoken language.
@@ -131,6 +133,8 @@ struct File {
     #[serde(default = "yes")]
     onboarding_complete: bool,
     #[serde(default)]
+    app_language: String,
+    #[serde(default)]
     selected: String,
     #[serde(default)]
     language: String,
@@ -168,6 +172,7 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             onboarding_complete: false,
+            app_language: String::new(),
             selected: String::new(),
             language: "en".into(),
             output_language: String::new(),
@@ -235,6 +240,9 @@ pub fn decode(raw: &str) -> Preferences {
         onboarding_complete: file.onboarding_complete,
         ..Preferences::default()
     };
+    if let Some(lang) = crate::i18n::Lang::from_code(&file.app_language) {
+        prefs.app_language = lang.code().to_string();
+    }
     if !file.selected.is_empty() {
         prefs.selected = file.selected;
     }
@@ -287,6 +295,7 @@ impl From<&Preferences> for File {
     fn from(prefs: &Preferences) -> Self {
         Self {
             onboarding_complete: prefs.onboarding_complete,
+            app_language: prefs.app_language.clone(),
             selected: prefs.selected.clone(),
             language: prefs.language.clone(),
             output_language: prefs.output_language.clone(),
@@ -377,6 +386,16 @@ mod tests {
             .is_empty());
         assert_eq!(language_name("da"), Some("Danish"));
         assert_eq!(language_name("auto"), None);
+    }
+
+    #[test]
+    fn the_app_language_survives_a_round_trip() {
+        assert!(Preferences::default().app_language.is_empty());
+        let prefs = decode(r#"{"app_language":"sv"}"#);
+        assert_eq!(prefs.app_language, "sv");
+        let raw = serde_json::to_string(&File::from(&prefs)).unwrap();
+        assert_eq!(decode(&raw).app_language, "sv");
+        assert!(decode(r#"{"app_language":"xx"}"#).app_language.is_empty());
     }
 
     #[test]

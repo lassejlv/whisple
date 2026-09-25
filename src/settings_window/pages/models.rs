@@ -10,6 +10,7 @@ use gpui_kit::{
 };
 
 use crate::cloud::{self, Provider};
+use crate::i18n::{t, tf};
 use crate::models;
 use crate::settings_window::widgets::*;
 use crate::settings_window::SettingsWindow;
@@ -41,8 +42,8 @@ impl SettingsWindow {
             .flex_col()
             .gap(px(22.0))
             .child(section_with_detail(
-                "On this Mac",
-                format!("{} used", models::format_size(used)),
+                t("On this Mac"),
+                tf("{} used", &[&models::format_size(used)]),
                 local,
             ))
             .child(
@@ -50,13 +51,13 @@ impl SettingsWindow {
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
-                    .child(section_with_detail("Cloud", "Uses your own API key".into(), cloud))
+                    .child(section_with_detail(t("Cloud"), t("Uses your own API key").into(), cloud))
                     .child(
                         div()
                             .pl(px(4.0))
                             .text_size(px(12.0))
                             .text_color(theme::TERTIARY)
-                            .child("Cloud recordings are sent to the selected provider. Keys are stored in your Mac’s Keychain."),
+                            .child(t("Cloud recordings are sent to the selected provider. Keys are stored in your Mac’s Keychain.")),
                     ),
             )
     }
@@ -88,21 +89,23 @@ impl SettingsWindow {
             )
         };
         let subtitle = if let Some((received, total)) = progress {
-            format!(
+            tf(
                 "{} of {} · {}",
-                models::format_size(received),
-                models::format_size(total),
-                spec.blurb
+                &[
+                    &models::format_size(received),
+                    &models::format_size(total),
+                    &t(spec.blurb),
+                ],
             )
         } else {
-            format!("{} · {}", models::format_size(spec.bytes), spec.blurb)
+            format!("{} · {}", models::format_size(spec.bytes), t(spec.blurb))
         };
         let id = spec.id;
         let trailing = if progress.is_some() {
             div()
                 .id(SharedString::from(format!("settings-cancel-{id}")))
                 .role(gpui_kit::Role::Button)
-                .aria_label(format!("Cancel {} download", spec.name))
+                .aria_label(tf("Cancel {} download", &[&t(spec.name)]))
                 .text_size(px(12.0))
                 .text_color(theme::AMBER)
                 .cursor_pointer()
@@ -110,7 +113,7 @@ impl SettingsWindow {
                     cx.stop_propagation();
                     view.hud.update(cx, |hud, cx| hud.cancel_download(cx));
                 }))
-                .child("Cancel")
+                .child(t("Cancel"))
                 .into_any_element()
         } else if ready && selected {
             Icon::new(Lucide::Check)
@@ -122,9 +125,9 @@ impl SettingsWindow {
                 .id(SharedString::from(format!("settings-remove-{id}")))
                 .role(gpui_kit::Role::Button)
                 .aria_label(if pending {
-                    format!("Confirm remove {}", spec.name)
+                    tf("Confirm remove {}", &[&t(spec.name)])
                 } else {
-                    format!("Remove {}", spec.name)
+                    tf("Remove {}", &[&t(spec.name)])
                 })
                 .px(px(10.0))
                 .py(px(5.0))
@@ -140,7 +143,11 @@ impl SettingsWindow {
                     cx.stop_propagation();
                     view.hud.update(cx, |hud, cx| hud.uninstall_model(id, cx));
                 }))
-                .child(if pending { "Confirm remove" } else { "Remove" })
+                .child(if pending {
+                    t("Confirm remove")
+                } else {
+                    t("Remove")
+                })
                 .into_any_element()
         } else {
             div()
@@ -151,13 +158,13 @@ impl SettingsWindow {
                 .text_size(px(11.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme::AMBER)
-                .child("GET")
+                .child(t("GET"))
                 .into_any_element()
         };
         div()
             .id(SharedString::from(format!("settings-model-{id}")))
             .role(gpui_kit::Role::Button)
-            .aria_label(format!("Use {} model", spec.name))
+            .aria_label(tf("Use {} model", &[&t(spec.name)]))
             .h(px(54.0))
             .px(px(16.0))
             .flex()
@@ -191,7 +198,7 @@ impl SettingsWindow {
                                     .text_size(px(13.5))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme::LABEL)
-                                    .child(spec.name),
+                                    .child(t(spec.name)),
                             )
                             .when(spec.recommended, |title| {
                                 title.child(
@@ -203,7 +210,7 @@ impl SettingsWindow {
                                         .text_size(px(9.0))
                                         .font_weight(FontWeight::BOLD)
                                         .text_color(theme::AMBER)
-                                        .child("RECOMMENDED"),
+                                        .child(t("RECOMMENDED")),
                                 )
                             }),
                     )
@@ -233,7 +240,7 @@ impl SettingsWindow {
                 provider.id()
             )))
             .role(gpui_kit::Role::Button)
-            .aria_label(format!("Use {} cloud model", provider.name()))
+            .aria_label(tf("Use {} cloud model", &[&provider.name()]))
             .h(px(59.0))
             .px(px(14.0))
             .flex()
@@ -278,7 +285,7 @@ impl SettingsWindow {
                                     div()
                                         .text_size(px(11.0))
                                         .text_color(theme::GREEN)
-                                        .child("● Key saved"),
+                                        .child(t("● Key saved")),
                                 )
                             }),
                     )
@@ -286,7 +293,7 @@ impl SettingsWindow {
                         div()
                             .text_size(px(12.0))
                             .text_color(theme::SECONDARY)
-                            .child(provider.description()),
+                            .child(t(provider.description())),
                     ),
             )
             .child(
@@ -296,11 +303,11 @@ impl SettingsWindow {
                         provider.id()
                     )))
                     .role(gpui_kit::Role::Button)
-                    .aria_label(format!(
-                        "{} {} API key",
-                        if connected { "Edit" } else { "Add" },
-                        provider.name()
-                    ))
+                    .aria_label(if connected {
+                        tf("Edit {} API key", &[&provider.name()])
+                    } else {
+                        tf("Add {} API key", &[&provider.name()])
+                    })
                     .px(px(12.0))
                     .py(px(5.0))
                     .rounded_full()
@@ -313,7 +320,7 @@ impl SettingsWindow {
                         cx.stop_propagation();
                         view.open_cloud(provider, window, cx);
                     }))
-                    .child(if connected { "EDIT" } else { "ADD KEY" }),
+                    .child(if connected { t("EDIT") } else { t("ADD KEY") }),
             )
             .into_any_element()
     }
@@ -330,9 +337,9 @@ impl SettingsWindow {
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(if connected {
-                    "Paste a new key to replace it"
+                    t("Paste a new key to replace it")
                 } else {
-                    "Paste API key"
+                    t("Paste API key")
                 })
                 .masked(true)
         });
@@ -443,22 +450,22 @@ impl SettingsWindow {
         let (url, link) = match provider {
             Provider::OpenAi => (
                 "https://platform.openai.com/api-keys",
-                "Manage keys at platform.openai.com ↗",
+                t("Manage keys at platform.openai.com ↗"),
             ),
             Provider::Groq => (
                 "https://console.groq.com/keys",
-                "Get a key at console.groq.com ↗",
+                t("Get a key at console.groq.com ↗"),
             ),
         };
         let note = if connected {
-            format!(
+            tf(
                 "A key is saved on this device. Paste a new one to replace it. Audio goes to {} only when selected.",
-                provider.name()
+                &[&provider.name()],
             )
         } else {
-            format!(
+            tf(
                 "Your key stays on this device, in your Keychain. Audio goes to {} only when this model is selected.",
-                provider.name()
+                &[&provider.name()],
             )
         };
         let input = self.key_input.clone().map(|state| {
@@ -476,9 +483,9 @@ impl SettingsWindow {
             .id("settings-show-key")
             .role(gpui_kit::Role::Button)
             .aria_label(if self.key_visible {
-                "Hide API key"
+                t("Hide API key")
             } else {
-                "Show API key"
+                t("Show API key")
             })
             .text_size(px(12.0))
             .text_color(theme::SECONDARY)
@@ -493,7 +500,11 @@ impl SettingsWindow {
                 }
                 cx.notify();
             }))
-            .child(if self.key_visible { "Hide" } else { "Show" });
+            .child(if self.key_visible {
+                t("Hide")
+            } else {
+                t("Show")
+            });
         div()
             .flex()
             .flex_col()
@@ -503,12 +514,12 @@ impl SettingsWindow {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(section_label("API KEY"))
+                    .child(section_label(t("API KEY")))
                     .child(
                         div()
                             .id("settings-provider-key-url")
                             .role(gpui_kit::Role::Button)
-                            .aria_label(format!("Open {} API keys", provider.name()))
+                            .aria_label(tf("Open {} API keys", &[&provider.name()]))
                             .text_size(px(12.0))
                             .text_color(theme::AMBER)
                             .cursor_pointer()
@@ -559,7 +570,7 @@ fn cloud_modal_header(provider: Provider, connected: bool) -> Div {
                         .child(if connected {
                             provider.name().to_string()
                         } else {
-                            format!("Connect {}", provider.name())
+                            tf("Connect {}", &[&provider.name()])
                         }),
                 )
                 .child(
@@ -578,7 +589,7 @@ fn cloud_modal_header(provider: Provider, connected: bool) -> Div {
                     .bg(theme::GREEN_SOFT)
                     .text_size(px(11.0))
                     .text_color(theme::GREEN)
-                    .child("● Key saved"),
+                    .child(t("● Key saved")),
             )
         })
 }
@@ -592,18 +603,18 @@ fn cloud_modal_footer(
         div()
             .id("settings-remove-key")
             .role(gpui_kit::Role::Button)
-            .aria_label(format!("Remove {} API key", provider.name()))
+            .aria_label(tf("Remove {} API key", &[&provider.name()]))
             .text_size(px(12.0))
             .text_color(theme::RED)
             .cursor_pointer()
             .on_click(cx.listener(|view, _, window, cx| view.remove_cloud(window, cx)))
-            .child("Remove key")
+            .child(t("Remove key"))
             .into_any_element()
     } else {
         div()
             .text_size(px(12.0))
             .text_color(theme::TERTIARY)
-            .child(format!("Billed by {}", provider.name()))
+            .child(tf("Billed by {}", &[&provider.name()]))
             .into_any_element()
     };
     div()
@@ -621,13 +632,17 @@ fn cloud_modal_footer(
                 .items_center()
                 .gap(px(8.0))
                 .child(
-                    modal_button("settings-cloud-cancel", "Cancel", false)
+                    modal_button("settings-cloud-cancel", t("Cancel"), false)
                         .on_click(cx.listener(|view, _, window, cx| view.close_modal(window, cx))),
                 )
                 .child(
                     modal_button(
                         "settings-cloud-save",
-                        if connected { "Use model" } else { "Save & use" },
+                        if connected {
+                            t("Use model")
+                        } else {
+                            t("Save & use")
+                        },
                         true,
                     )
                     .on_click(cx.listener(|view, _, window, cx| view.save_cloud(window, cx))),

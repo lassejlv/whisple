@@ -3,6 +3,7 @@
 use gpui_kit::{div, prelude::*, px, Context, Div, Styled};
 
 use crate::hotkey::Shortcut;
+use crate::i18n::t;
 use crate::settings::{self};
 use crate::settings_window::widgets::*;
 use crate::settings_window::SettingsWindow;
@@ -79,11 +80,21 @@ impl SettingsWindow {
             .flex_col()
             .gap(px(26.0))
             .child(section(
-                "Startup",
+                t("Language"),
+                vec![selector_row(
+                    t("App language"),
+                    Some(t("Menus, buttons and settings. Dictation is not affected.")),
+                    selector_control(&self.app_language_select, t("App language"))
+                        .into_any_element(),
+                    false,
+                )],
+            ))
+            .child(section(
+                t("Startup"),
                 vec![
                     setting_row(
                         "open-at-login",
-                        "Open at login",
+                        t("Open at login"),
                         None,
                         self.switch("open-at-login", startup),
                         false,
@@ -92,8 +103,8 @@ impl SettingsWindow {
                     ),
                     setting_row(
                         "show-in-menu-bar",
-                        "Show in menu bar",
-                        Some("Keep the Whisple icon next to the clock."),
+                        t("Show in menu bar"),
+                        Some(t("Keep the Whisple icon next to the clock.")),
                         self.switch("show-in-menu-bar", menu_bar),
                         true,
                         cx,
@@ -102,12 +113,12 @@ impl SettingsWindow {
                 ],
             ))
             .child(section(
-                "Shortcuts",
+                t("Shortcuts"),
                 vec![
                     setting_row(
                         "show-whisple-hotkey",
-                        "Show Whisple",
-                        Some("Opens the bar from any app. Press again to hide it."),
+                        t("Show Whisple"),
+                        Some(t("Opens the bar from any app. Press again to hide it.")),
                         shortcut_control(&shortcut, capturing == Some(Shortcut::Show)),
                         false,
                         cx,
@@ -115,8 +126,8 @@ impl SettingsWindow {
                     ),
                     setting_row(
                         "record-hotkey",
-                        "Start recording",
-                        Some("Opens the bar and starts recording. Press again to finish."),
+                        t("Start recording"),
+                        Some(t("Opens the bar and starts recording. Press again to finish.")),
                         shortcut_control(&record, capturing == Some(Shortcut::Record)),
                         true,
                         cx,
@@ -125,11 +136,11 @@ impl SettingsWindow {
                 ],
             ))
             .child(section(
-                "Output",
+                t("Output"),
                 vec![
                     setting_row(
                         "copy-to-clipboard",
-                        "Copy to clipboard when done",
+                        t("Copy to clipboard when done"),
                         None,
                         self.switch("copy-to-clipboard", copy),
                         false,
@@ -138,8 +149,8 @@ impl SettingsWindow {
                     ),
                     setting_row(
                         "clean-up-notes",
-                        "Clean up notes",
-                        Some("Removes “um”, “uh” and repeated words."),
+                        t("Clean up notes"),
+                        Some(t("Removes “um”, “uh” and repeated words.")),
                         self.switch("clean-up-notes", clean),
                         true,
                         cx,
@@ -148,12 +159,12 @@ impl SettingsWindow {
                 ],
             ))
             .child(section(
-                "Assistant",
+                t("Assistant"),
                 vec![
                     setting_row(
                         "voice-commands",
-                        "Voice commands",
-                        Some("Say “Open Spotify” or “Go to github.com” to open it."),
+                        t("Voice commands"),
+                        Some(t("Say “Open Spotify” or “Go to github.com” to open it.")),
                         self.switch("voice-commands", commands),
                         false,
                         cx,
@@ -161,9 +172,9 @@ impl SettingsWindow {
                     ),
                     setting_row(
                         "screen-context",
-                        "Share screen with Whisple",
+                        t("Share screen with Whisple"),
                         Some(
-                            "Start with “Hey Whisple” to ask about your screen. It sends the app, window title, selection and a screenshot to your cloud provider.",
+                            t("Start with “Hey Whisple” to ask about your screen. It sends the app, window title, selection and a screenshot to your cloud provider."),
                         ),
                         self.switch("screen-context", screen),
                         true,

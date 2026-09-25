@@ -14,7 +14,7 @@ Whisple is a single Rust desktop binary. `src/main.rs` starts the GPUI app; `src
 
 ## Coding Style & Naming Conventions
 
-Use Rust 2021 conventions and `rustfmt` defaults (four-space indentation). Name modules and functions in `snake_case`, types in `PascalCase`, and constants in `SCREAMING_SNAKE_CASE`. Keep platform-specific code behind `cfg(target_os = ...)` and preserve the separation between macOS and X11 hotkey implementations. Add new assets through the loader in `src/main.rs` when the UI needs them.
+Use Rust 2021 conventions and `rustfmt` defaults (four-space indentation). Name modules and functions in `snake_case`, types in `PascalCase`, and constants in `SCREAMING_SNAKE_CASE`. Keep platform-specific code behind `cfg(target_os = ...)` and preserve the separation between macOS and X11 hotkey implementations. Wrap every user-facing interface string in `t("…")` or `tf("… {} …", &[…])` from `src/i18n.rs`, and add its translation to each table in `src/i18n/`; `cargo test` fails when a language is missing a string. Dictation, translation, and assistant output are not interface text. Add new assets through the loader in `src/main.rs` when the UI needs them.
 
 ## Testing Guidelines
 

@@ -19,11 +19,14 @@ use gpui_kit::{
     WindowOptions,
 };
 
-use pages::audio::{language_choices, microphone_choices, output_language_choices, Choice};
+use pages::audio::{
+    app_language_choices, language_choices, microphone_choices, output_language_choices, Choice,
+};
 
 use crate::app::Whisp;
 use crate::audio::{self, Mic};
 use crate::cloud::Provider;
+use crate::i18n::{t, tf};
 use crate::motion;
 use crate::settings::Preferences;
 use crate::theme;
@@ -70,11 +73,11 @@ enum Page {
 impl Page {
     fn title(self) -> &'static str {
         match self {
-            Self::General => "General",
-            Self::Audio => "Audio",
-            Self::Models => "Models",
-            Self::License => "License",
-            Self::About => "About",
+            Self::General => t("General"),
+            Self::Audio => t("Audio"),
+            Self::Models => t("Models"),
+            Self::License => t("License"),
+            Self::About => t("About"),
         }
     }
 
@@ -96,6 +99,7 @@ pub(crate) struct SettingsWindow {
     microphone_select: Entity<SelectState<SearchableVec<Choice>>>,
     language_select: Entity<SelectState<SearchableVec<Choice>>>,
     output_select: Entity<SelectState<SearchableVec<Choice>>>,
+    app_language_select: Entity<SelectState<SearchableVec<Choice>>>,
     cloud_config: Option<Provider>,
     key_input: Option<Entity<InputState>>,
     key_visible: bool,
@@ -174,7 +178,7 @@ pub(crate) fn open(
                 // over the sidebar, and the window manager's title bar on
                 // Linux.
                 titlebar: Some(gpui_kit::TitlebarOptions {
-                    title: Some("Whisple Settings".into()),
+                    title: Some(t("Whisple Settings").into()),
                     appears_transparent: true,
                     traffic_light_position: Some(gpui_kit::point(px(18.0), px(18.0))),
                 }),
@@ -287,6 +291,28 @@ impl SettingsWindow {
             )
             .searchable(true)
         });
+        let app_language_index = crate::i18n::Lang::ALL
+            .iter()
+            .position(|lang| *lang == crate::i18n::current());
+        let app_language_select = cx.new(|cx| {
+            SelectState::new(
+                app_language_choices(),
+                app_language_index.map(|index| IndexPath::default().row(index)),
+                window,
+                cx,
+            )
+        });
+        cx.subscribe_in(
+            &app_language_select,
+            window,
+            |view, _, event, window, cx| {
+                let SelectEvent::Confirm(Some(code)) = event else {
+                    return;
+                };
+                view.choose_app_language(code, window, cx);
+            },
+        )
+        .detach();
         cx.subscribe_in(&output_select, window, |view, _, event, _, cx| {
             let SelectEvent::Confirm(Some(language)) = event else {
                 return;
@@ -310,7 +336,7 @@ impl SettingsWindow {
         .detach();
         let license_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Paste your Polar license key")
+                .placeholder(t("Paste your Polar license key"))
                 .masked(true)
         });
         cx.subscribe(&license_input, |_, _, _: &InputEvent, cx| cx.notify())
@@ -339,6 +365,7 @@ impl SettingsWindow {
             microphone_select,
             language_select,
             output_select,
+            app_language_select,
             cloud_config: None,
             key_input: None,
             key_visible: false,
@@ -423,7 +450,7 @@ impl SettingsWindow {
                 view.microphone_names = names;
                 match Mic::monitor(&input_device) {
                     Ok(monitor) => view.monitor = Some(monitor),
-                    Err(err) => view.error = Some(format!("Input level unavailable: {err}")),
+                    Err(err) => view.error = Some(tf("Input level unavailable: {}", &[&err])),
                 }
                 cx.notify();
             })
@@ -437,6 +464,38 @@ impl SettingsWindow {
         if let SettingsTarget::CloudKey(provider) = target {
             self.open_cloud(provider, window, cx);
         }
+    }
+
+    /// Switches the interface language and relabels what Settings built in
+    /// the old one: its title and the lists inside its pickers.
+    fn choose_app_language(&mut self, code: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(lang) = crate::i18n::Lang::from_code(code) else {
+            return;
+        };
+        crate::set_app_language(lang, cx);
+        window.set_window_title(t("Whisple Settings"));
+        let (language, output_language, input_device) = {
+            let hud = self.hud.read(cx);
+            (
+                hud.language.clone(),
+                hud.output_language.clone(),
+                hud.input_device.clone(),
+            )
+        };
+        self.language_select.update(cx, |state, cx| {
+            state.set_items(language_choices(), window, cx);
+            state.set_selected_value(&language, window, cx);
+        });
+        self.output_select.update(cx, |state, cx| {
+            state.set_items(output_language_choices(), window, cx);
+            state.set_selected_value(&output_language, window, cx);
+        });
+        let names = self.microphone_names.clone();
+        self.microphone_select.update(cx, |state, cx| {
+            state.set_items(microphone_choices(&names), window, cx);
+            state.set_selected_value(&input_device, window, cx);
+        });
+        cx.notify();
     }
 
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -496,7 +555,7 @@ impl SettingsWindow {
         div()
             .id(SharedString::from(format!("settings-nav-{}", page.title())))
             .role(gpui_kit::Role::Button)
-            .aria_label(format!("{} settings", page.title()))
+            .aria_label(tf("{} settings", &[&page.title()]))
             .h(px(34.0))
             .w_full()
             .px(px(8.0))

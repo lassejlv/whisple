@@ -17,6 +17,7 @@ use gpui_kit::{
 
 use crate::cloud::{self, Provider};
 use crate::hotkey;
+use crate::i18n::{self, t, tf, Lang};
 use crate::license;
 use crate::microphone_permission;
 use crate::models::{self, ModelSpec};
@@ -69,7 +70,7 @@ impl Choice {
 
     fn name(self) -> &'static str {
         match self {
-            Self::Local(spec) => spec.name,
+            Self::Local(spec) => t(spec.name),
             Self::Cloud(provider) => provider.name(),
         }
     }
@@ -263,7 +264,7 @@ impl Onboarding {
                         view.step = MODEL;
                     }
                     Err(err) => {
-                        view.error = Some(format!("Microphone access is unavailable: {err}"))
+                        view.error = Some(tf("Microphone access is unavailable: {}", &[&err]))
                     }
                 }
                 cx.notify();
@@ -324,7 +325,7 @@ impl Onboarding {
                 self.key_visible = false;
                 let input = cx.new(|cx| {
                     InputState::new(window, cx)
-                        .placeholder("Paste API key")
+                        .placeholder(t("Paste API key"))
                         .masked(true)
                 });
                 cx.subscribe(&input, |_, _, _: &InputEvent, cx| cx.notify())
@@ -362,6 +363,10 @@ impl Onboarding {
     fn finish(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut prefs = settings::load();
         prefs.selected = self.choice.id().to_string();
+        // Keep the detected language once the user has seen it.
+        if prefs.app_language.is_empty() {
+            prefs.app_language = i18n::current().code().to_string();
+        }
         prefs.onboarding_complete = true;
         settings::save(&prefs);
         crate::open_hud(cx, true);
@@ -370,7 +375,7 @@ impl Onboarding {
 
     fn content(&self, cx: &mut Context<Self>) -> Div {
         let inner = match self.step {
-            WELCOME => self.welcome().into_any_element(),
+            WELCOME => self.welcome(cx).into_any_element(),
             FEATURES => self.features().into_any_element(),
             MICROPHONE => self.microphone().into_any_element(),
             MODEL if self.cloud_config.is_some() => self.cloud_key_panel(cx).into_any_element(),
@@ -388,7 +393,7 @@ impl Onboarding {
             .child(inner)
     }
 
-    fn welcome(&self) -> Div {
+    fn welcome(&self, cx: &mut Context<Self>) -> Div {
         let bars = [15.0, 30.0, 40.0, 24.0, 12.0];
         div()
             .flex()
@@ -427,41 +432,23 @@ impl Onboarding {
                     .flex_col()
                     .items_center()
                     .gap(px(12.0))
-                    .child(heading("Welcome to Whisple", 34.0))
+                    .child(heading(t("Welcome to Whisple"), 34.0))
                     .child(description(
-                        "A voice bar for your whole computer. A few quick steps and you’re talking instead of typing.",
+                        t("A voice bar for your whole computer. A few quick steps and you’re talking instead of typing."),
                         420.0,
                         16.0,
                     )),
             )
-            .child(
-                div()
-                    .h(px(28.0))
-                    .px(px(12.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .rounded_full()
-                    .bg(theme::INSET)
-                    .shadow(vec![theme::inner_ring(theme::HAIRLINE)])
-                    .child(div().size(px(6.0)).rounded_full().bg(theme::AMBER))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme::SECONDARY)
-                            .child("On-device or cloud · your choice"),
-                    ),
-            )
+            .child(language_picker(cx))
     }
 
     fn microphone(&self) -> Div {
         let status = if self.microphone_allowed {
-            "Allowed"
+            t("Allowed")
         } else if self.requesting_microphone {
-            "Waiting for macOS"
+            t("Waiting for macOS")
         } else {
-            "Not allowed yet"
+            t("Not allowed yet")
         };
         div()
             .w_full()
@@ -492,9 +479,9 @@ impl Onboarding {
                     .flex_col()
                     .items_center()
                     .gap(px(12.0))
-                    .child(heading("Let Whisple hear you", 30.0))
+                    .child(heading(t("Let Whisple hear you"), 30.0))
                     .child(description(
-                        "macOS will ask for microphone access. Whisple only listens while recording. With a local model, audio stays on your Mac.",
+                        t("macOS will ask for microphone access. Whisple only listens while recording. With a local model, audio stays on your Mac."),
                         440.0,
                         15.0,
                     )),
@@ -535,7 +522,7 @@ impl Onboarding {
                                     .text_size(px(14.0))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme::LABEL)
-                                    .child("Microphone"),
+                                    .child(t("Microphone")),
                             )
                             .child(
                                 div()
@@ -565,7 +552,7 @@ impl Onboarding {
                             .items_center()
                             .text_size(px(12.0))
                             .text_color(theme::TERTIARY)
-                            .child("You can change this later in System Settings › Privacy & Security."),
+                            .child(t("You can change this later in System Settings › Privacy & Security.")),
                     ),
             )
             .when_some(self.error.as_ref(), |this, error| {
@@ -583,29 +570,31 @@ impl Onboarding {
     fn features(&self) -> Div {
         let shortcut = hotkey::symbols(&record_shortcut());
         #[cfg(target_os = "macos")]
-        let dictate = format!(
-            "Press {shortcut} to start talking and again to finish. Your words are typed into the app you were using."
+        let dictate = tf(
+            "Press {} to start talking and again to finish. Your words are typed into the app you were using.",
+            &[&shortcut],
         );
         #[cfg(not(target_os = "macos"))]
-        let dictate = format!(
-            "Press {shortcut} to start talking and again to finish. Your words are copied, ready to paste."
+        let dictate = tf(
+            "Press {} to start talking and again to finish. Your words are copied, ready to paste.",
+            &[&shortcut],
         );
         let rows = [
-            (Lucide::Keyboard, "Dictate anywhere", dictate),
+            (Lucide::Keyboard, t("Dictate anywhere"), dictate),
             (
                 Lucide::AppWindow,
-                "Open apps by voice",
-                "Say “Open Spotify” or “Go to github.com” and Whisple opens it.".to_string(),
+                t("Open apps by voice"),
+                t("Say “Open Spotify” or “Go to github.com” and Whisple opens it.").to_string(),
             ),
             (
                 Lucide::ScanEye,
-                "Ask about your screen",
-                "Start with “Hey Whisple” to ask about what you see, or have it write a reply for you. Uses your OpenAI or Groq key.".to_string(),
+                t("Ask about your screen"),
+                t("Start with “Hey Whisple” to ask about what you see, or have it write a reply for you. Uses your OpenAI or Groq key.").to_string(),
             ),
             (
                 Lucide::ShieldCheck,
-                "Private by default",
-                "On-device models keep your voice on this computer. Cloud models are optional."
+                t("Private by default"),
+                t("On-device models keep your voice on this computer. Cloud models are optional.")
                     .to_string(),
             ),
         ];
@@ -616,7 +605,7 @@ impl Onboarding {
             .items_center()
             .gap(px(22.0))
             .pb(px(8.0))
-            .child(heading("What Whisple can do", 30.0))
+            .child(heading(t("What Whisple can do"), 30.0))
             .child(
                 div()
                     .w(px(520.0))
@@ -682,9 +671,9 @@ impl Onboarding {
         let choices = Choice::all();
         let last = choices.len() - 1;
         let detail = match self.choice {
-            Choice::Local(spec) => format!("{} · Runs on this computer", spec.blurb),
+            Choice::Local(spec) => tf("{} · Runs on this computer", &[&t(spec.blurb)]),
             Choice::Cloud(provider) => {
-                format!("{} · Uses your own API key", provider.description())
+                tf("{} · Uses your own API key", &[&t(provider.description())])
             }
         };
         div()
@@ -699,9 +688,9 @@ impl Onboarding {
                     .flex_col()
                     .items_center()
                     .gap(px(6.0))
-                    .child(heading("Pick a voice model", 30.0))
+                    .child(heading(t("Pick a voice model"), 30.0))
                     .child(description(
-                        "You can switch any time from the bar.",
+                        t("You can switch any time from the bar."),
                         440.0,
                         14.0,
                     )),
@@ -742,7 +731,7 @@ impl Onboarding {
         let selected = self.choice.id() == choice.id();
         let (tag, recommended) = match choice {
             Choice::Local(spec) => (models::format_size(spec.bytes), spec.recommended),
-            Choice::Cloud(_) => ("Cloud".to_string(), false),
+            Choice::Cloud(_) => (t("Cloud").to_string(), false),
         };
         div()
             .id(SharedString::from(format!(
@@ -783,7 +772,7 @@ impl Onboarding {
                         .text_size(px(11.0))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme::AMBER)
-                        .child("Recommended"),
+                        .child(t("Recommended")),
                 )
             })
             .child(div().flex_1())
@@ -816,8 +805,8 @@ impl Onboarding {
                     .flex_col()
                     .items_center()
                     .gap(px(10.0))
-                    .child(heading("Connect your cloud model", 28.0))
-                    .child(description("Enter your API key to use this model in Whisple.", 440.0, 15.0)),
+                    .child(heading(t("Connect your cloud model"), 28.0))
+                    .child(description(t("Enter your API key to use this model in Whisple."), 440.0, 15.0)),
             )
             .child(
                 div()
@@ -871,7 +860,7 @@ impl Onboarding {
                                         }
                                         cx.notify();
                                     }))
-                                    .child(if self.key_visible { "Hide" } else { "Show" }),
+                                    .child(if self.key_visible { t("Hide") } else { t("Show") }),
                             ),
                     )
                     .child(
@@ -879,7 +868,7 @@ impl Onboarding {
                             .text_size(px(12.0))
                             .line_height(px(18.0))
                             .text_color(theme::SECONDARY)
-                            .child(format!("Your key is saved in the system credential store. Recordings are sent to {} for transcription. Provider charges may apply.", provider.name())),
+                            .child(tf("Your key is saved in the system credential store. Recordings are sent to {} for transcription. Provider charges may apply.", &[&provider.name()])),
                     ),
             )
             .when_some(self.error.as_ref(), |this, error| {
@@ -907,7 +896,7 @@ impl Onboarding {
                     .text_size(px(12.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme::AMBER)
-                    .child(format!("✓  {} is ready", self.choice.name())),
+                    .child(tf("✓  {} is ready", &[&self.choice.name()])),
             )
             .child(
                 div()
@@ -915,13 +904,13 @@ impl Onboarding {
                     .flex_col()
                     .items_center()
                     .gap(px(12.0))
-                    .child(heading("Now try it", 30.0))
+                    .child(heading(t("Now try it"), 30.0))
                     .child(description(
                         {
                             #[cfg(target_os = "macos")]
-                            let instructions = "Press the shortcut, say a sentence, then press it again. Your words go into the selected text field. Clipboard copying is optional.";
+                            let instructions = t("Press the shortcut, say a sentence, then press it again. Your words go into the selected text field. Clipboard copying is optional.");
                             #[cfg(not(target_os = "macos"))]
-                            let instructions = "Press the shortcut, say a sentence, then press it again. Your words land on the clipboard.";
+                            let instructions = t("Press the shortcut, say a sentence, then press it again. Your words land on the clipboard.");
                             instructions
                         },
                         440.0,
@@ -1025,45 +1014,45 @@ impl Onboarding {
                             .text_size(px(13.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme::AMBER)
-                            .child(format!(
+                            .child(tf(
                                 "Your 3-day free trial has started. After that, Whisple is {} once.",
-                                license::PRICE
+                                &[&license::PRICE],
                             )),
                     )
                     .child(
                         div()
                             .text_size(px(13.0))
                             .text_color(theme::TERTIARY)
-                            .child("You can change the shortcut any time in Settings."),
+                            .child(t("You can change the shortcut any time in Settings.")),
                     ),
             )
     }
 
     fn footer(&self, cx: &mut Context<Self>) -> Div {
         let label = match self.step {
-            WELCOME => "Get started".to_string(),
-            FEATURES => "Continue".to_string(),
-            MICROPHONE if self.requesting_microphone => "Waiting for macOS…".to_string(),
-            MICROPHONE if self.microphone_allowed => "Continue".to_string(),
-            MICROPHONE => "Allow microphone".to_string(),
+            WELCOME => t("Get started").to_string(),
+            FEATURES => t("Continue").to_string(),
+            MICROPHONE if self.requesting_microphone => t("Waiting for macOS…").to_string(),
+            MICROPHONE if self.microphone_allowed => t("Continue").to_string(),
+            MICROPHONE => t("Allow microphone").to_string(),
             MODEL if self.download.is_some() => {
                 let download = self.download.as_ref().unwrap();
                 let fraction =
                     download.received.load(Ordering::Relaxed) as f64 / download.total.max(1) as f64;
-                format!(
+                tf(
                     "Downloading {}%",
-                    (fraction * 100.0).clamp(0.0, 100.0) as u32
+                    &[&((fraction * 100.0).clamp(0.0, 100.0) as u32)],
                 )
             }
-            MODEL if self.cloud_config.is_some() => {
-                format!("Save and use {}", self.choice.name())
-            }
+            MODEL if self.cloud_config.is_some() => tf("Save and use {}", &[&self.choice.name()]),
             MODEL => match self.choice {
-                Choice::Cloud(provider) => format!("Use {}", provider.name()),
-                Choice::Local(spec) if models::is_downloaded(spec) => format!("Use {}", spec.name),
-                Choice::Local(spec) => format!("Download {}", spec.name),
+                Choice::Cloud(provider) => tf("Use {}", &[&provider.name()]),
+                Choice::Local(spec) if models::is_downloaded(spec) => {
+                    tf("Use {}", &[&t(spec.name)])
+                }
+                Choice::Local(spec) => tf("Download {}", &[&t(spec.name)]),
             },
-            _ => "Start using Whisple".to_string(),
+            _ => t("Start using Whisple").to_string(),
         };
         let busy = self.download.is_some() || self.requesting_microphone;
         div()
@@ -1111,7 +1100,7 @@ impl Onboarding {
                                 .text_color(theme::SECONDARY)
                                 .cursor_pointer()
                                 .on_click(cx.listener(|view, _, window, cx| view.back(window, cx)))
-                                .child("Back"),
+                                .child(t("Back")),
                         )
                     })
                     .child(
@@ -1201,6 +1190,59 @@ fn heading(label: &'static str, size: f32) -> Div {
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme::LABEL)
         .child(label)
+}
+
+/// The interface languages as chips, the current one highlighted. Picking
+/// one switches every window at once.
+fn language_picker(cx: &mut Context<Onboarding>) -> Div {
+    let current = i18n::current();
+    div()
+        .flex()
+        .flex_wrap()
+        .justify_center()
+        .gap(px(6.0))
+        .children(Lang::ALL.into_iter().map(|lang| {
+            let selected = lang == current;
+            div()
+                .id(SharedString::from(format!(
+                    "onboarding-language-{}",
+                    lang.code()
+                )))
+                .role(gpui_kit::Role::Button)
+                .aria_label(lang.native_name())
+                .h(px(28.0))
+                .px(px(12.0))
+                .flex()
+                .items_center()
+                .rounded_full()
+                .bg(if selected {
+                    theme::AMBER_SOFT
+                } else {
+                    theme::INSET
+                })
+                .shadow(vec![theme::inner_ring(if selected {
+                    theme::AMBER
+                } else {
+                    theme::HAIRLINE
+                })])
+                .text_size(px(12.0))
+                .font_weight(if selected {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::MEDIUM
+                })
+                .text_color(if selected {
+                    theme::AMBER
+                } else {
+                    theme::SECONDARY
+                })
+                .cursor_pointer()
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    crate::set_app_language(lang, cx);
+                    cx.notify();
+                }))
+                .child(lang.native_name())
+        }))
 }
 
 /// The shortcut that starts recording, or the show shortcut when it is off.

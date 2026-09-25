@@ -5,6 +5,7 @@ use gpui_kit::component::input::{Input, InputContentType};
 use gpui_kit::component::{Icon, Sizable};
 use gpui_kit::{div, prelude::*, px, Context, Div, FontWeight, IntoElement, Styled, Window};
 
+use crate::i18n::{t, tf};
 use crate::license::{self, Access};
 use crate::settings_window::widgets::*;
 use crate::settings_window::SettingsWindow;
@@ -32,7 +33,7 @@ impl SettingsWindow {
         }
         let key = self.license_input.read(cx).value().to_string();
         if key.trim().is_empty() {
-            self.error = Some("Paste your license key first.".into());
+            self.error = Some(t("Paste your license key first.").into());
             cx.notify();
             return;
         }
@@ -115,43 +116,48 @@ impl SettingsWindow {
     pub(in crate::settings_window) fn license(&self, cx: &mut Context<Self>) -> Div {
         let status = self.hud.read(cx).license_access.clone();
         let trial_detail = status.trial_remaining().map(|remaining| {
-            format!(
+            tf(
                 "{} of your 3-day free trial. Then {} once to keep Whisple.",
-                license::trial_left(remaining, false),
-                license::PRICE
+                &[&license::trial_left(remaining, false), &license::PRICE],
             )
         });
-        let ended_detail = format!(
+        let ended_detail = tf(
             "Your 3-day free trial has ended. Buy Whisple for {} once to keep dictating.",
-            license::PRICE
+            &[&license::PRICE],
         );
         let trial_license_issue = match &status {
             Access::Trial {
                 license_issue: Some(reason),
                 ..
-            } => Some(format!("Saved license needs attention: {reason}")),
+            } => Some(tf("Saved license needs attention: {}", &[reason])),
             _ => None,
         };
         let (title, detail) = match &status {
-            Access::Checking => ("Checking license", "Contacting Polar to verify access."),
+            Access::Checking => (
+                t("Checking license"),
+                t("Contacting Polar to verify access."),
+            ),
             Access::Trial { .. } if status.allowed() => {
-                ("Free trial", trial_detail.as_deref().unwrap_or_default())
+                (t("Free trial"), trial_detail.as_deref().unwrap_or_default())
             }
             Access::Trial { .. } | Access::TrialExpired => {
-                ("Free trial ended", ended_detail.as_str())
+                (t("Free trial ended"), ended_detail.as_str())
             }
-            Access::Active(_) => ("License active", "Whisple is ready to use on this device."),
+            Access::Active(_) => (
+                t("License active"),
+                t("Whisple is ready to use on this device."),
+            ),
             Access::Offline(_) => (
-                "License active offline",
-                "A recent verification allows temporary offline use.",
+                t("License active offline"),
+                t("A recent verification allows temporary offline use."),
             ),
             Access::Blocked { .. } => (
-                "License needs attention",
-                "Check the message below or enter another key.",
+                t("License needs attention"),
+                t("Check the message below or enter another key."),
             ),
             Access::Unavailable { .. } => (
-                "Could not verify access",
-                "Connect to the internet and check your license again.",
+                t("Could not verify access"),
+                t("Connect to the internet and check your license again."),
             ),
         };
         div()
@@ -207,28 +213,28 @@ impl SettingsWindow {
                                     .text_size(px(16.0))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(theme::LABEL)
-                                    .child("Whisple is yours"),
+                                    .child(t("Whisple is yours")),
                             )
                             .child(
                                 div()
                                     .text_size(px(13.0))
                                     .text_color(theme::SECONDARY)
-                                    .child("Your lifetime license is active. Thanks for supporting Whisple."),
+                                    .child(t("Your lifetime license is active. Thanks for supporting Whisple.")),
                             )
                             .child(
                                 div()
                                     .text_size(px(12.0))
                                     .text_color(theme::SECONDARY)
-                                    .child(format!(
+                                    .child(tf(
                                         "Active on this Mac · {}",
-                                        status.display_key().unwrap_or_default()
+                                        &[&status.display_key().unwrap_or_default()],
                                     )),
                             )
                             .child(
                                 div()
                                     .id("license-start-talking")
                                     .role(gpui_kit::Role::Button)
-                                    .aria_label("Start talking")
+                                    .aria_label(t("Start talking"))
                                     .h(px(34.0))
                                     .px(px(14.0))
                                     .rounded(px(8.0))
@@ -242,24 +248,24 @@ impl SettingsWindow {
                                     .on_click(cx.listener(|view, _, window, cx| {
                                         view.start_talking(window, cx)
                                     }))
-                                    .child("Start talking"),
+                                    .child(t("Start talking")),
                             ),
                     )
                 },
             )
             .child(section(
-                "Lifetime license",
+                t("Lifetime license"),
                 vec![link_row(
                     "license-buy",
-                    "Buy Whisple",
-                    format!("{} once · opens Polar checkout ↗", license::PRICE),
+                    t("Buy Whisple"),
+                    tf("{} once · opens Polar checkout ↗", &[&license::PRICE]),
                     license::CHECKOUT_URL,
                     false,
                     cx,
                 )],
             ))
             .child(section(
-                "Activate on this device",
+                t("Activate on this device"),
                 vec![div()
                     .p(px(16.0))
                     .flex()
@@ -274,7 +280,7 @@ impl SettingsWindow {
                                     .display_key()
                                     .filter(|key| !key.is_empty())
                                     .unwrap_or(
-                                        "Paste the key from your purchase email or Polar account.",
+                                        t("Paste the key from your purchase email or Polar account."),
                                     )
                                     .to_string(),
                             ),
@@ -314,14 +320,14 @@ impl SettingsWindow {
                                         div()
                                             .id("license-deactivate")
                                             .role(gpui_kit::Role::Button)
-                                            .aria_label("Deactivate license on this device")
+                                            .aria_label(t("Deactivate license on this device"))
                                             .text_size(px(12.0))
                                             .text_color(theme::SECONDARY)
                                             .cursor_pointer()
                                             .on_click(cx.listener(|view, _, _, cx| {
                                                 view.deactivate_license(cx)
                                             }))
-                                            .child("Deactivate this device"),
+                                            .child(t("Deactivate this device")),
                                     )
                                 },
                             )
@@ -329,7 +335,7 @@ impl SettingsWindow {
                                 div()
                                     .id("license-activate")
                                     .role(gpui_kit::Role::Button)
-                                    .aria_label("Activate license")
+                                    .aria_label(t("Activate license"))
                                     .h(px(34.0))
                                     .px(px(14.0))
                                     .rounded(px(8.0))
@@ -344,9 +350,9 @@ impl SettingsWindow {
                                         cx.listener(|view, _, _, cx| view.activate_license(cx)),
                                     )
                                     .child(if self.license_busy {
-                                        "Working…"
+                                        t("Working…")
                                     } else {
-                                        "Activate key"
+                                        t("Activate key")
                                     }),
                             ),
                     )
@@ -360,23 +366,23 @@ impl SettingsWindow {
                         div()
                             .id("license-refresh")
                             .role(gpui_kit::Role::Button)
-                            .aria_label("Check license status")
+                            .aria_label(t("Check license status"))
                             .text_size(px(12.0))
                             .text_color(theme::AMBER)
                             .cursor_pointer()
                             .on_click(cx.listener(|view, _, _, cx| view.refresh_license(cx)))
-                            .child("Check status"),
+                            .child(t("Check status")),
                     )
                     .child(
                         div()
                             .id("license-portal")
                             .role(gpui_kit::Role::Button)
-                            .aria_label("Open Polar purchases")
+                            .aria_label(t("Open Polar purchases"))
                             .text_size(px(12.0))
                             .text_color(theme::SECONDARY)
                             .cursor_pointer()
                             .on_click(|_, _, cx| cx.open_url(license::CUSTOMER_PORTAL_URL))
-                            .child("Find your key ↗"),
+                            .child(t("Find your key ↗")),
                     ),
             )
     }

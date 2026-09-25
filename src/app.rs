@@ -14,6 +14,7 @@ use crate::cloud::{self, Provider};
 #[cfg(target_os = "macos")]
 use crate::dictation;
 use crate::hotkey::{self, Shortcut};
+use crate::i18n::{t, tf};
 use crate::license::{self, Access};
 use crate::models::{self, ModelSpec};
 use crate::motion::{Ease, Spring};
@@ -113,19 +114,19 @@ pub(crate) enum Recovery {
 impl Recovery {
     pub(crate) fn title(self) -> &'static str {
         match self {
-            Self::Microphone => "Microphone unavailable",
-            Self::MicrophoneDisconnected => "Microphone disconnected",
-            Self::MicrophonePermission => "Microphone access blocked",
-            Self::Model => "No ready model",
-            Self::NoSpeech => "No speech detected",
-            Self::CloudOffline => "Cloud unavailable",
-            Self::CloudKey(_) => "API key rejected",
-            Self::CloudRateLimited => "Too many requests",
-            Self::CloudOther => "Cloud transcription failed",
-            Self::LocalFallback => "Local transcription failed",
-            Self::Command => "Could not open that",
-            Self::AssistantKey => "The assistant needs a cloud key",
-            Self::Assistant => "Whisple could not answer",
+            Self::Microphone => t("Microphone unavailable"),
+            Self::MicrophoneDisconnected => t("Microphone disconnected"),
+            Self::MicrophonePermission => t("Microphone access blocked"),
+            Self::Model => t("No ready model"),
+            Self::NoSpeech => t("No speech detected"),
+            Self::CloudOffline => t("Cloud unavailable"),
+            Self::CloudKey(_) => t("API key rejected"),
+            Self::CloudRateLimited => t("Too many requests"),
+            Self::CloudOther => t("Cloud transcription failed"),
+            Self::LocalFallback => t("Local transcription failed"),
+            Self::Command => t("Could not open that"),
+            Self::AssistantKey => t("The assistant needs a cloud key"),
+            Self::Assistant => t("Whisple could not answer"),
         }
     }
 }
@@ -239,7 +240,7 @@ impl Whisp {
         .find_map(|(slot, source)| {
             hotkey::parse(source).and_then(|chord| hotkey::install(slot, chord).err())
         })
-        .map(|err| format!("Could not register the shortcut: {err}"));
+        .map(|err| tf("Could not register the shortcut: {}", &[&err]));
         if prefs.open_on_startup {
             if let Err(err) = startup::apply(true) {
                 eprintln!("could not refresh the login item: {err}");
@@ -661,8 +662,8 @@ impl Whisp {
             .filter(|model| model.ready)
             .map(|model| MenuChoice {
                 id: model.spec.id,
-                name: model.spec.name,
-                detail: "On device",
+                name: t(model.spec.name),
+                detail: t("On device"),
             });
         let cloud = Provider::ALL
             .into_iter()
@@ -670,7 +671,7 @@ impl Whisp {
             .map(|provider| MenuChoice {
                 id: provider.id(),
                 name: provider.name(),
-                detail: "Cloud",
+                detail: t("Cloud"),
             });
         local.chain(cloud).collect()
     }
@@ -809,9 +810,9 @@ impl Whisp {
         self.menu_open = false;
         // A saved key after a rejected one: offer the kept recording again.
         if matches!(self.recovery, Some(Recovery::CloudKey(_))) && self.failed_audio.is_some() {
-            self.error = Some(format!(
+            self.error = Some(tf(
                 "{} key saved. Retry your recording.",
-                provider.name()
+                &[&provider.name()],
             ));
             self.recovery = Some(Recovery::CloudOther);
         } else {
@@ -860,7 +861,8 @@ impl Whisp {
                 .as_ref()
                 .is_some_and(|download| download.id == id)
         {
-            self.error = Some("Finish recording or downloading before removing this model.".into());
+            self.error =
+                Some(t("Finish recording or downloading before removing this model.").into());
             cx.notify();
             return;
         }
@@ -921,7 +923,7 @@ impl Whisp {
     /// opens a fresh bar when it finishes.
     pub(crate) fn restart_onboarding(&mut self, cx: &mut Context<Self>) {
         if self.visibility_locked() {
-            self.error = Some("Finish recording before setting up again.".into());
+            self.error = Some(t("Finish recording before setting up again.").into());
             self.snap_chrome();
             cx.notify();
             return;
@@ -994,7 +996,7 @@ impl Whisp {
             return true;
         }
         if matches!(self.license_access, Access::Checking) {
-            self.error = Some("Checking your license. Try again in a moment.".into());
+            self.error = Some(t("Checking your license. Try again in a moment.").into());
             self.snap_chrome();
             cx.notify();
             return false;
@@ -1025,7 +1027,7 @@ impl Whisp {
             Access::Blocked { reason, .. } | Access::Unavailable { reason, .. } => {
                 self.error.as_deref() == Some(reason.as_str())
             }
-            _ => self.error.as_deref() == Some("Checking your license. Try again in a moment."),
+            _ => self.error.as_deref() == Some(t("Checking your license. Try again in a moment.")),
         };
         match &access {
             Access::Blocked { reason, .. } | Access::Unavailable { reason, .. } => {
@@ -1097,13 +1099,13 @@ impl Whisp {
         #[cfg(target_os = "macos")]
         {
             if self.update_checking {
-                return "Checking for updates…".into();
+                return t("Checking for updates…").into();
             }
             if let Some(update) = &self.update {
-                return format!("Whisple v{} is ready to install", update.version);
+                return tf("Whisple v{} is ready to install", &[&update.version]);
             }
         }
-        format!("Version {}", env!("CARGO_PKG_VERSION"))
+        tf("Version {}", &[&env!("CARGO_PKG_VERSION")])
     }
 
     /// The version of a downloaded, verified update waiting to install.
@@ -1137,7 +1139,7 @@ impl Whisp {
                 match update.install() {
                     Ok(()) => cx.quit(),
                     Err(err) => {
-                        self.error = Some(format!("Could not install the update: {err}"));
+                        self.error = Some(tf("Could not install the update: {}", &[&err]));
                         self.snap_chrome();
                     }
                 }
@@ -1277,12 +1279,12 @@ impl Whisp {
             return;
         };
         if !chord.has_modifier() {
-            self.error = Some("Use Ctrl, Alt, or Super as well.".into());
+            self.error = Some(t("Use Ctrl, Alt, or Super as well.").into());
             cx.notify();
             return;
         }
         if let Err(err) = hotkey::install(slot, chord.clone()) {
-            self.error = Some(format!("Could not use that shortcut: {err}"));
+            self.error = Some(tf("Could not use that shortcut: {}", &[&err]));
             cx.notify();
             return;
         }
@@ -1516,9 +1518,9 @@ impl Whisp {
         self.phase = Phase::Transcribing;
         self.transcribing_provider = provider;
         self.working = Some(match route {
-            Route::Ask(_) => "Thinking…",
-            Route::Command(_) => "Opening…",
-            Route::Dictation => "Translating…",
+            Route::Ask(_) => t("Thinking…"),
+            Route::Command(_) => t("Opening…"),
+            Route::Dictation => t("Translating…"),
         });
         let request = assistant::Request {
             transcript,
@@ -1660,6 +1662,7 @@ impl Whisp {
     fn persist(&self) {
         settings::save(&Preferences {
             onboarding_complete: settings::load().onboarding_complete,
+            app_language: settings::load().app_language,
             selected: self.selected.clone(),
             language: self.language.clone(),
             output_language: self.output_language.clone(),
@@ -1852,7 +1855,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-q", QuitWhisp, None),
     ]);
     cx.on_action::<QuitWhisp>(|_, cx| cx.quit());
-    cx.set_menus([Menu::new("Whisple").items([MenuItem::action("Quit Whisple", QuitWhisp)])]);
+    cx.set_menus([Menu::new("Whisple").items([MenuItem::action(t("Quit Whisple"), QuitWhisp)])]);
 }
 
 fn apply_window_height(window: &mut gpui_kit::Window, height: f32, cx: &mut App) {
