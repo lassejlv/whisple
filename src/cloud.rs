@@ -2,7 +2,8 @@
 //! AI Gateway account.
 
 use std::io::Cursor;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use base64::Engine;
@@ -83,12 +84,19 @@ impl Provider {
         }
     }
 
+    /// The transcription model in use: the newest, or its fallback once
+    /// the provider said it does not know the newest.
     pub fn model(self) -> &'static str {
+        self.transcription_models().current()
+    }
+
+    fn transcription_models(self) -> Models {
         match self {
-            Self::OpenAi => "gpt-transcribe",
-            Self::Groq => "whisper-large-v3-turbo",
-            Self::Xai => "grok-voice-transcribe-2.0",
-            Self::Vercel => gateway_model().transcription(),
+            Self::OpenAi => Models::new("gpt-transcribe", "gpt-4o-transcribe"),
+            // Whisper v3 Turbo is still Groq's newest speech model.
+            Self::Groq => Models::only("whisper-large-v3-turbo"),
+            Self::Xai => Models::new("grok-voice-transcribe-2.0", "grok-voice-transcribe-1.0"),
+            Self::Vercel => gateway_model().transcription_models(),
         }
     }
 
@@ -142,56 +150,29 @@ impl GatewayModel {
     }
 
     pub fn name(self) -> &'static str {
-        match (self, self.fell_back()) {
-            (Self::Grok, false) => "Grok STT 2",
-            (Self::Grok, true) => "Grok STT",
-            (Self::OpenAi, false) => "GPT Transcribe",
-            (Self::OpenAi, true) => "GPT-4o Transcribe",
+        let newest = self.transcription_models().in_use_is_newest();
+        match (self, newest) {
+            (Self::Grok, true) => "Grok STT 2",
+            (Self::Grok, false) => "Grok STT",
+            (Self::OpenAi, true) => "GPT Transcribe",
+            (Self::OpenAi, false) => "GPT-4o Transcribe",
         }
     }
 
-    /// The gateway id Whisple transcribes with: the newest model, or the one
-    /// the gateway lists when it did not know the newest.
-    pub fn transcription(self) -> &'static str {
-        if self.fell_back() {
-            self.listed()
-        } else {
-            self.newest()
-        }
-    }
-
-    fn newest(self) -> &'static str {
+    /// The gateway lists only `spacexai/grok-stt`, which names no version,
+    /// and `openai/gpt-4o-transcribe`; those are the fallbacks.
+    fn transcription_models(self) -> Models {
         match self {
-            Self::Grok => "spacexai/grok-voice-transcribe-2.0",
-            Self::OpenAi => "openai/gpt-transcribe",
+            Self::Grok => Models::new("spacexai/grok-voice-transcribe-2.0", "spacexai/grok-stt"),
+            Self::OpenAi => Models::new("openai/gpt-transcribe", "openai/gpt-4o-transcribe"),
         }
     }
 
-    /// The model id the gateway publishes. `spacexai/grok-stt` names no
-    /// version.
-    fn listed(self) -> &'static str {
+    /// The chat models the assistant and translation use through the gateway.
+    pub fn chat_models(self) -> Models {
         match self {
-            Self::Grok => "spacexai/grok-stt",
-            Self::OpenAi => "openai/gpt-4o-transcribe",
-        }
-    }
-
-    fn index(self) -> usize {
-        match self {
-            Self::Grok => 0,
-            Self::OpenAi => 1,
-        }
-    }
-
-    fn fell_back(self) -> bool {
-        FELL_BACK[self.index()].load(Ordering::Relaxed)
-    }
-
-    /// The chat model the assistant and translation use through the gateway.
-    pub fn chat(self) -> &'static str {
-        match self {
-            Self::Grok => "spacexai/grok-4.7",
-            Self::OpenAi => "openai/gpt-5.6-luna",
+            Self::Grok => Models::new("spacexai/grok-4.7", "spacexai/grok-4.3"),
+            Self::OpenAi => Models::new("openai/gpt-5.6-luna", "openai/gpt-5.5"),
         }
     }
 
@@ -210,9 +191,76 @@ impl GatewayModel {
 
 static GATEWAY_MODEL: AtomicU8 = AtomicU8::new(0);
 
-/// Set once the gateway answers that it does not know a model's newest id,
-/// so later recordings go straight to the listed one until Whisple restarts.
-static FELL_BACK: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+/// A provider's newest model and an older one to use when the provider does
+/// not know the newest yet: model ids change faster than Whisple ships.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Models {
+    pub newest: &'static str,
+    pub fallback: Option<&'static str>,
+}
+
+impl Models {
+    pub const fn new(newest: &'static str, fallback: &'static str) -> Self {
+        Self {
+            newest,
+            fallback: Some(fallback),
+        }
+    }
+
+    pub const fn only(newest: &'static str) -> Self {
+        Self {
+            newest,
+            fallback: None,
+        }
+    }
+
+    /// The newest model, or the fallback once the newest was unknown.
+    pub fn current(self) -> &'static str {
+        match self.fallback {
+            Some(fallback) if unknown_models().contains(&self.newest) => fallback,
+            _ => self.newest,
+        }
+    }
+
+    fn in_use_is_newest(self) -> bool {
+        self.current() == self.newest
+    }
+
+    /// Remembers that the provider does not know the newest model and
+    /// returns the fallback to retry with, if there is one and the newest
+    /// was the one just tried.
+    pub fn fall_back_from(self, tried: &str) -> Option<&'static str> {
+        let fallback = self.fallback?;
+        if tried != self.newest {
+            return None;
+        }
+        let mut unknown = unknown_models();
+        if !unknown.contains(&self.newest) {
+            unknown.push(self.newest);
+        }
+        Some(fallback)
+    }
+}
+
+/// Newest model ids a provider said it does not know, until Whisple
+/// restarts and tries them again.
+fn unknown_models() -> std::sync::MutexGuard<'static, Vec<&'static str>> {
+    static UNKNOWN: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    UNKNOWN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Whether an error response means the model id does not exist.
+pub fn is_unknown_model(status: u16, body: &str) -> bool {
+    let body = body.to_ascii_lowercase();
+    status == 404
+        || (status == 400
+            && (body.contains("model_not_found")
+                || body.contains("does not exist")
+                || body.contains("model not found")
+                || body.contains("unknown model")))
+}
 
 pub fn gateway_model() -> GatewayModel {
     GatewayModel::ALL
@@ -322,53 +370,40 @@ fn transcribe_with_key(
         .map_err(|err| {
             TranscriptionError::Other(format!("Could not start cloud transcription: {err}"))
         })?;
-    let response = if provider == Provider::Vercel {
-        let model = gateway_model();
-        let body = gateway_body(model, &wav, language);
-        let send = |id: &str| {
-            client
-                .post(endpoint)
-                .bearer_auth(key)
+    let send = |model: &str| {
+        let request = client.post(endpoint).bearer_auth(key);
+        if provider == Provider::Vercel {
+            request
                 .header("ai-gateway-protocol-version", "0.0.1")
                 .header("ai-gateway-auth-method", "api-key")
                 .header("ai-transcription-model-specification-version", "4")
-                .header("ai-model-id", id)
-                .json(&body)
+                .header("ai-model-id", model)
+                .json(&gateway_body(gateway_model(), &wav, language))
                 .send()
-        };
-        match send(model.transcription()) {
-            // The newest id is not on the gateway yet: use the listed one.
-            Ok(first) if !model.fell_back() && matches!(first.status().as_u16(), 400 | 404) => {
-                let status = first.status().as_u16();
-                let detail = first.text().unwrap_or_default();
-                if status == 404 || detail.contains("model_not_found") {
-                    FELL_BACK[model.index()].store(true, Ordering::Relaxed);
-                    send(model.listed())
-                } else {
-                    return Err(response_error(provider, status));
-                }
+        } else {
+            let file = multipart::Part::bytes(wav.clone())
+                .file_name("recording.wav")
+                .mime_str("audio/wav")?;
+            let mut form = multipart::Form::new().text("model", model.to_string());
+            if let Some(language) = language {
+                form = form.text(language_field(model), language.to_string());
             }
-            response => response,
+            // xAI reads the fields in order and needs the file after the others.
+            request.multipart(form.part("file", file)).send()
         }
-    } else {
-        let request = client.post(endpoint).bearer_auth(key);
-        let file = multipart::Part::bytes(wav)
-            .file_name("recording.wav")
-            .mime_str("audio/wav")
-            .map_err(|err| TranscriptionError::Other(err.to_string()))?;
-        let mut form = multipart::Form::new().text("model", provider.model());
-        if let Some(language) = language {
-            form = form.text(
-                if provider == Provider::OpenAi {
-                    "languages[]"
-                } else {
-                    "language"
-                },
-                language.to_string(),
-            );
+    };
+    let models = provider.transcription_models();
+    let model = models.current();
+    let response = match send(model) {
+        Ok(first) if !first.status().is_success() => {
+            let status = first.status().as_u16();
+            let detail = first.text().unwrap_or_default();
+            match models.fall_back_from(model) {
+                Some(fallback) if is_unknown_model(status, &detail) => send(fallback),
+                _ => return Err(response_error(provider, status)),
+            }
         }
-        // xAI reads the fields in order and needs the file after the others.
-        request.multipart(form.part("file", file)).send()
+        response => response,
     };
     let response = response.map_err(|err| {
         TranscriptionError::Offline(format!("Could not reach {}: {err}", provider.name()))
@@ -398,6 +433,15 @@ fn transcribe_with_key(
         ))
     } else {
         Ok(text)
+    }
+}
+
+/// GPT Transcribe takes several language hints; the other models take one.
+fn language_field(model: &str) -> &'static str {
+    if model == "gpt-transcribe" {
+        "languages[]"
+    } else {
+        "language"
     }
 }
 
@@ -512,6 +556,50 @@ mod tests {
             false,
         );
         assert!(matches!(result, Err(TranscriptionError::NoSpeech(_))));
+    }
+
+    #[test]
+    fn a_model_the_provider_does_not_know_falls_back_once() {
+        let models = Models::new("test-newest-stt", "test-older-stt");
+        assert_eq!(models.current(), "test-newest-stt");
+        assert_eq!(models.fall_back_from("something-else"), None);
+        assert_eq!(models.current(), "test-newest-stt");
+        assert_eq!(
+            models.fall_back_from("test-newest-stt"),
+            Some("test-older-stt")
+        );
+        assert_eq!(models.current(), "test-older-stt");
+        // The fallback is the last try.
+        assert_eq!(models.fall_back_from("test-older-stt"), None);
+        assert_eq!(
+            Models::only("test-only-stt").fall_back_from("test-only-stt"),
+            None
+        );
+    }
+
+    #[test]
+    fn only_a_missing_model_counts_as_unknown() {
+        assert!(is_unknown_model(404, ""));
+        assert!(is_unknown_model(
+            400,
+            r#"{"error":{"message":"The model `x` does not exist","code":"model_not_found"}}"#
+        ));
+        assert!(!is_unknown_model(
+            400,
+            r#"{"error":{"message":"Audio file is too short"}}"#
+        ));
+        assert!(!is_unknown_model(401, "model_not_found"));
+        assert!(!is_unknown_model(500, ""));
+    }
+
+    #[test]
+    fn every_provider_names_a_newest_model_and_openai_hints_languages() {
+        for provider in Provider::ALL {
+            assert!(!provider.transcription_models().newest.is_empty());
+        }
+        assert_eq!(language_field("gpt-transcribe"), "languages[]");
+        assert_eq!(language_field("gpt-4o-transcribe"), "language");
+        assert_eq!(language_field("grok-voice-transcribe-2.0"), "language");
     }
 
     #[test]
