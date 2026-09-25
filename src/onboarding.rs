@@ -48,10 +48,11 @@ enum Choice {
 }
 
 impl Choice {
-    /// Every choice, smallest download first, cloud providers last.
+    /// Every choice: the recommended download, the other downloads from
+    /// smallest to largest, then the cloud providers.
     fn all() -> Vec<Self> {
         let mut local: Vec<&'static ModelSpec> = models::CATALOG.iter().collect();
-        local.sort_by_key(|spec| spec.bytes);
+        local.sort_by_key(|spec| (!spec.recommended, spec.bytes));
         local
             .into_iter()
             .map(Self::Local)
@@ -679,82 +680,84 @@ impl Onboarding {
 
     fn model_choice(&self, cx: &mut Context<Self>) -> Div {
         let choices = Choice::all();
+        let last = choices.len() - 1;
+        let detail = match self.choice {
+            Choice::Local(spec) => format!("{} · Runs on this computer", spec.blurb),
+            Choice::Cloud(provider) => {
+                format!("{} · Uses your own API key", provider.description())
+            }
+        };
         div()
             .w_full()
             .flex()
             .flex_col()
             .items_center()
-            .gap(px(16.0))
+            .gap(px(14.0))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .items_center()
-                    .gap(px(8.0))
+                    .gap(px(6.0))
                     .child(heading("Pick a voice model", 30.0))
                     .child(description(
-                        "On-device models download once and stay private. Cloud models use your own API key.",
-                        480.0,
+                        "You can switch any time from the bar.",
+                        440.0,
                         14.0,
                     )),
             )
             .child(
                 div()
-                    .w(px(576.0))
+                    .w(px(440.0))
                     .flex()
-                    .flex_wrap()
-                    .gap(px(8.0))
-                    .children(choices.into_iter().map(|choice| self.choice_tile(choice, cx))),
+                    .flex_col()
+                    .rounded(px(12.0))
+                    .overflow_hidden()
+                    .bg(theme::INSET)
+                    .children(
+                        choices
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, choice)| self.choice_row(choice, index == last, cx)),
+                    ),
             )
             .child(
                 div()
+                    .w(px(440.0))
                     .h(px(16.0))
+                    .text_center()
                     .text_size(px(12.0))
+                    .whitespace_nowrap()
+                    .text_ellipsis()
                     .text_color(if self.error.is_some() {
                         theme::RED
                     } else {
-                        theme::TERTIARY
+                        theme::SECONDARY
                     })
-                    .child(match &self.error {
-                        Some(error) => error.clone(),
-                        None => "You can switch models any time from the bar.".to_string(),
-                    }),
+                    .child(self.error.clone().unwrap_or(detail)),
             )
     }
 
-    fn choice_tile(&self, choice: Choice, cx: &mut Context<Self>) -> impl IntoElement {
+    fn choice_row(&self, choice: Choice, last: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.choice.id() == choice.id();
-        let (tag, detail, recommended) = match choice {
-            Choice::Local(spec) => (
-                models::format_size(spec.bytes),
-                spec.blurb,
-                spec.recommended,
-            ),
-            Choice::Cloud(provider) => ("Cloud".to_string(), provider.description(), false),
+        let (tag, recommended) = match choice {
+            Choice::Local(spec) => (models::format_size(spec.bytes), spec.recommended),
+            Choice::Cloud(_) => ("Cloud".to_string(), false),
         };
         div()
             .id(SharedString::from(format!(
                 "onboarding-model-{}",
                 choice.id()
             )))
-            .w(px(284.0))
-            .h(px(62.0))
+            .h(px(34.0))
             .px(px(14.0))
             .flex()
             .items_center()
-            .gap(px(12.0))
-            .rounded(px(12.0))
-            .bg(if selected {
-                theme::AMBER_SOFT
-            } else {
-                theme::INSET
-            })
-            .shadow(vec![theme::inner_ring(if selected {
-                theme::AMBER
-            } else {
-                theme::HAIRLINE
-            })])
+            .gap(px(10.0))
+            .when(!last, |row| row.border_b_1().border_color(theme::HAIRLINE))
+            .when(selected, |row| row.bg(theme::AMBER_SOFT))
             .cursor_pointer()
+            .hover(|row| row.bg(theme::RAISED))
             .on_click(cx.listener(move |view, _, _, cx| {
                 if view.download.is_none() {
                     view.choice = choice;
@@ -765,59 +768,35 @@ impl Onboarding {
             .child(radio(selected))
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(
-                                div()
-                                    .text_size(px(14.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme::LABEL)
-                                    .whitespace_nowrap()
-                                    .child(choice.name()),
-                            )
-                            .when(recommended, |this| {
-                                this.child(
-                                    div()
-                                        .px(px(6.0))
-                                        .py(px(1.0))
-                                        .rounded_full()
-                                        .bg(theme::AMBER_BADGE)
-                                        .text_size(px(9.0))
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(theme::AMBER)
-                                        .child("RECOMMENDED"),
-                                )
-                            })
-                            .child(div().flex_1())
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_size(px(11.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(if selected {
-                                        theme::AMBER
-                                    } else {
-                                        theme::TERTIARY
-                                    })
-                                    .child(tag),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme::SECONDARY)
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(detail),
-                    ),
+                    .text_size(px(13.0))
+                    .font_weight(if selected {
+                        FontWeight::SEMIBOLD
+                    } else {
+                        FontWeight::MEDIUM
+                    })
+                    .text_color(theme::LABEL)
+                    .child(choice.name()),
+            )
+            .when(recommended, |row| {
+                row.child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme::AMBER)
+                        .child("Recommended"),
+                )
+            })
+            .child(div().flex_1())
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .font_features(theme::tabular())
+                    .text_color(if selected {
+                        theme::AMBER
+                    } else {
+                        theme::TERTIARY
+                    })
+                    .child(tag),
             )
     }
 
@@ -1234,10 +1213,10 @@ fn record_shortcut() -> String {
     }
 }
 
-/// The round selection mark on a model tile.
+/// The round selection mark on a model row.
 fn radio(selected: bool) -> Div {
     div()
-        .size(px(18.0))
+        .size(px(16.0))
         .flex_shrink_0()
         .rounded_full()
         .border_2()
@@ -1250,7 +1229,7 @@ fn radio(selected: bool) -> Div {
         .items_center()
         .justify_center()
         .when(selected, |this| {
-            this.bg(theme::AMBER).text_color(theme::HUD).child("✓")
+            this.child(div().size(px(8.0)).rounded_full().bg(theme::AMBER))
         })
 }
 
@@ -1279,7 +1258,9 @@ mod tests {
                 Choice::Cloud(_) => None,
             })
             .collect();
-        assert!(local.windows(2).all(|pair| pair[0] <= pair[1]));
+        // The recommended model leads; the rest go smallest first.
+        assert!(matches!(choices[0], Choice::Local(spec) if spec.recommended));
+        assert!(local[1..].windows(2).all(|pair| pair[0] <= pair[1]));
         assert!(choices[models::CATALOG.len()..]
             .iter()
             .all(|choice| matches!(choice, Choice::Cloud(_))));
