@@ -1,4 +1,5 @@
-//! General: startup, the show shortcut, and what happens to a transcript.
+//! General: startup, the show shortcut, what happens to a transcript, and
+//! the assistant's voice commands and screen context.
 use gpui_kit::{div, prelude::*, px, Context, Div, Styled};
 
 use crate::settings::{self};
@@ -37,13 +38,23 @@ impl SettingsWindow {
         cx.notify();
     }
 
+    pub(in crate::settings_window) fn toggle_commands(&mut self, cx: &mut Context<Self>) {
+        self.hud.update(cx, |hud, cx| hud.toggle_voice_commands(cx));
+        cx.notify();
+    }
+
+    pub(in crate::settings_window) fn toggle_screen(&mut self, cx: &mut Context<Self>) {
+        self.hud.update(cx, |hud, cx| hud.toggle_screen_context(cx));
+        cx.notify();
+    }
+
     pub(in crate::settings_window) fn begin_shortcut(&mut self, cx: &mut Context<Self>) {
         self.hud.update(cx, |hud, cx| hud.begin_hotkey_capture(cx));
         cx.notify();
     }
 
     pub(in crate::settings_window) fn general(&self, cx: &mut Context<Self>) -> Div {
-        let (startup, shortcut, copy, clean, capturing) = {
+        let (startup, shortcut, copy, clean, capturing, commands, screen) = {
             let hud = self.hud.read(cx);
             (
                 hud.open_on_startup,
@@ -51,6 +62,8 @@ impl SettingsWindow {
                 hud.copy_notes,
                 hud.clean_fillers,
                 hud.recording_hotkey,
+                hud.voice_commands,
+                hud.screen_context,
             )
         };
         let menu_bar = settings::load().show_in_menu_bar;
@@ -113,6 +126,31 @@ impl SettingsWindow {
                         true,
                         cx,
                         |view, cx| view.toggle_clean(cx),
+                    ),
+                ],
+            ))
+            .child(section(
+                "Assistant",
+                vec![
+                    setting_row(
+                        "voice-commands",
+                        "Voice commands",
+                        Some("Say “Open Spotify” or “Go to github.com” to open it."),
+                        self.switch("voice-commands", commands),
+                        false,
+                        cx,
+                        |view, cx| view.toggle_commands(cx),
+                    ),
+                    setting_row(
+                        "screen-context",
+                        "Share screen with Whisple",
+                        Some(
+                            "Start with “Hey Whisple” to ask about your screen. It sends the app, window title, selection and a screenshot to your cloud provider.",
+                        ),
+                        self.switch("screen-context", screen),
+                        true,
+                        cx,
+                        |view, cx| view.toggle_screen(cx),
                     ),
                 ],
             ))

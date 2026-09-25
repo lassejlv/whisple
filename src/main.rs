@@ -1,6 +1,9 @@
 mod app;
+mod apps;
+mod assistant;
 mod audio;
 mod cloud;
+mod commands;
 #[cfg(target_os = "macos")]
 mod dictation;
 mod hotkey;
@@ -10,6 +13,7 @@ mod models;
 mod motion;
 mod onboarding;
 mod place;
+mod screen;
 mod settings;
 mod settings_window;
 mod startup;

@@ -22,6 +22,10 @@ pub struct Preferences {
     pub input_device: String,
     pub open_on_startup: bool,
     pub show_in_menu_bar: bool,
+    /// "Open Spotify" launches the app instead of typing the words.
+    pub voice_commands: bool,
+    /// The assistant sees the front app, selection and a screenshot.
+    pub screen_context: bool,
 }
 
 pub struct Language {
@@ -137,6 +141,10 @@ struct File {
     open_on_startup: bool,
     #[serde(default = "yes")]
     show_in_menu_bar: bool,
+    #[serde(default = "yes")]
+    voice_commands: bool,
+    #[serde(default = "yes")]
+    screen_context: bool,
 }
 
 fn yes() -> bool {
@@ -155,6 +163,8 @@ impl Default for Preferences {
             input_device: String::new(),
             open_on_startup: false,
             show_in_menu_bar: true,
+            voice_commands: true,
+            screen_context: true,
         }
     }
 }
@@ -221,6 +231,8 @@ pub fn decode(raw: &str) -> Preferences {
     prefs.input_device = clean_device(&file.input_device);
     prefs.open_on_startup = file.open_on_startup;
     prefs.show_in_menu_bar = file.show_in_menu_bar;
+    prefs.voice_commands = file.voice_commands;
+    prefs.screen_context = file.screen_context;
     prefs
 }
 
@@ -247,6 +259,8 @@ impl From<&Preferences> for File {
             input_device: prefs.input_device.clone(),
             open_on_startup: prefs.open_on_startup,
             show_in_menu_bar: prefs.show_in_menu_bar,
+            voice_commands: prefs.voice_commands,
+            screen_context: prefs.screen_context,
         }
     }
 }
@@ -266,6 +280,19 @@ mod tests {
         assert!(prefs.input_device.is_empty());
         assert!(!prefs.open_on_startup);
         assert!(prefs.onboarding_complete);
+        assert!(prefs.voice_commands);
+        assert!(prefs.screen_context);
+    }
+
+    #[test]
+    fn assistant_switches_survive_a_round_trip() {
+        let prefs = decode(r#"{"voice_commands":false,"screen_context":false}"#);
+        assert!(!prefs.voice_commands);
+        assert!(!prefs.screen_context);
+        let raw = serde_json::to_string(&File::from(&prefs)).unwrap();
+        let again = decode(&raw);
+        assert!(!again.voice_commands);
+        assert!(!again.screen_context);
     }
 
     #[test]

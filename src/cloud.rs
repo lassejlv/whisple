@@ -130,7 +130,7 @@ pub fn delete_key(provider: Provider) -> Result<(), String> {
     }
 }
 
-fn load_key(provider: Provider) -> Result<String, TranscriptionError> {
+pub(crate) fn load_key(provider: Provider) -> Result<String, TranscriptionError> {
     match entry(provider)
         .map_err(TranscriptionError::Other)?
         .get_password()

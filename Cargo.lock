@@ -8289,6 +8289,7 @@ dependencies = [
 name = "whisple"
 version = "0.2.1"
 dependencies = [
+ "base64",
  "block",
  "chrono",
  "cocoa 0.26.0",
@@ -8299,6 +8300,7 @@ dependencies = [
  "hound",
  "keyring",
  "objc",
+ "png 0.18.1",
  "reqwest",
  "semver",
  "serde",

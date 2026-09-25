@@ -8,6 +8,7 @@ use gpui_kit::{
     Menu, MenuItem, WeakEntity,
 };
 
+use crate::assistant::{self, ErrorKind, Outcome, Route};
 use crate::audio::{self, Mic};
 use crate::cloud::{self, Provider};
 #[cfg(target_os = "macos")]
@@ -17,6 +18,7 @@ use crate::license::{self, Access};
 use crate::models::{self, ModelSpec};
 use crate::motion::{Ease, Spring};
 use crate::place;
+use crate::screen::{self, Snapshot};
 use crate::settings::{self, Preferences};
 use crate::settings_window::SettingsTarget;
 use crate::startup;
@@ -42,6 +44,30 @@ pub(crate) const MENU_DIVIDER: f32 = 9.0;
 
 /// Waveform bars across the bar while recording, oldest on the left.
 pub(crate) const BARS: usize = 19;
+/// One line of text in the result panel.
+pub(crate) const RESULT_LINE: f32 = 22.0;
+/// Assistant answers grow the result panel up to this many lines.
+const MAX_ANSWER_LINES: usize = 6;
+/// Roughly how many characters fit on a result line.
+const LINE_CHARS: usize = 46;
+
+/// Where an in-flight transcript goes after dictation: typed, or handed to
+/// a command or the assistant. The macOS editor to type into travels along.
+#[cfg(target_os = "macos")]
+type TypingTarget = Option<dictation::Target>;
+#[cfg(not(target_os = "macos"))]
+type TypingTarget = ();
+
+/// What the result panel is showing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResultKind {
+    Dictation,
+    /// A voice command's confirmation, like "Opened Spotify".
+    Command,
+    Answer(Provider),
+    /// Text the assistant wrote for the cursor.
+    Typed(Provider),
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Reveal {
@@ -77,6 +103,9 @@ pub(crate) enum Recovery {
     CloudRateLimited,
     CloudOther,
     LocalFallback,
+    Command,
+    AssistantKey,
+    Assistant,
 }
 
 impl Recovery {
@@ -92,6 +121,9 @@ impl Recovery {
             Self::CloudRateLimited => "Too many requests",
             Self::CloudOther => "Cloud transcription failed",
             Self::LocalFallback => "Local transcription failed",
+            Self::Command => "Could not open that",
+            Self::AssistantKey => "The assistant needs a cloud key",
+            Self::Assistant => "Whisple could not answer",
         }
     }
 }
@@ -125,6 +157,10 @@ pub(crate) struct Whisp {
     failed_audio: Option<(Arc<Vec<f32>>, u32)>,
     pub transcribing_provider: Option<Provider>,
     pub copied: bool,
+    pub result_kind: ResultKind,
+    /// The bar's label while a command or the assistant works, such as
+    /// "Thinking…". `None` while transcribing.
+    pub working: Option<&'static str>,
     pub chrome: Ease,
     pub press_id: Option<String>,
     pub press: Ease,
@@ -142,6 +178,10 @@ pub(crate) struct Whisp {
     #[cfg(target_os = "macos")]
     dictation_target: Option<dictation::Target>,
     pub clean_fillers: bool,
+    pub voice_commands: bool,
+    pub screen_context: bool,
+    /// The app and window the user was in when the bar opened.
+    screen: Snapshot,
     pub input_device: String,
     pub open_on_startup: bool,
     #[cfg(target_os = "macos")]
@@ -248,6 +288,8 @@ impl Whisp {
             failed_audio: None,
             transcribing_provider: None,
             copied: false,
+            result_kind: ResultKind::Dictation,
+            working: None,
             chrome: Ease::chrome(COLLAPSED_HEIGHT),
             press_id: None,
             press: Ease::press(0.0),
@@ -265,6 +307,9 @@ impl Whisp {
             #[cfg(target_os = "macos")]
             dictation_target: None,
             clean_fillers: prefs.clean_fillers,
+            voice_commands: prefs.voice_commands,
+            screen_context: prefs.screen_context,
+            screen: Snapshot::default(),
             input_device: prefs.input_device,
             open_on_startup: prefs.open_on_startup,
             #[cfg(target_os = "macos")]
@@ -393,9 +438,23 @@ impl Whisp {
     /// The settled height of a panel above the bar, hairline included.
     pub(crate) fn panel_height(&self, reveal: Option<Reveal>) -> f32 {
         match reveal {
-            Some(Reveal::Result) => RESULT_EXTRA,
+            Some(Reveal::Result) => RESULT_EXTRA + (self.result_lines() - 2) as f32 * RESULT_LINE,
             Some(Reveal::Menu) => menu_height(self.menu_choices().len()),
             None => 0.0,
+        }
+    }
+
+    /// Lines of text the result panel shows: two for a note, more for an
+    /// assistant's answer.
+    pub(crate) fn result_lines(&self) -> usize {
+        match self.result_kind {
+            ResultKind::Dictation | ResultKind::Command => 2,
+            ResultKind::Answer(_) | ResultKind::Typed(_) => self
+                .last_text
+                .chars()
+                .count()
+                .div_ceil(LINE_CHARS)
+                .clamp(2, MAX_ANSWER_LINES),
         }
     }
 
@@ -510,7 +569,6 @@ impl Whisp {
         if !visible && self.visibility_locked() {
             return;
         }
-        #[cfg(target_os = "macos")]
         let was_visible = self.bar_visible;
         self.bar_visible = visible;
         if !visible {
@@ -524,10 +582,18 @@ impl Whisp {
         tray::set_visible(visible, cx);
         place::set_mapped(visible);
         if visible {
-            // Capture the editor before the HUD takes keyboard focus.
-            #[cfg(target_os = "macos")]
+            // Capture the editor and screen before the HUD takes keyboard
+            // focus.
             if !was_visible {
-                self.dictation_target = dictation::Target::focused();
+                #[cfg(target_os = "macos")]
+                {
+                    self.dictation_target = dictation::Target::focused();
+                }
+                self.screen = if self.screen_context {
+                    screen::focused()
+                } else {
+                    Snapshot::default()
+                };
             }
             window.activate_window();
             cx.activate(true);
@@ -890,6 +956,7 @@ impl Whisp {
             self.phase = Phase::Idle;
             self.failed_audio = None;
             self.transcribing_provider = None;
+            self.working = None;
             self.listen_started = None;
             self.levels.clear();
             self.rest_bars();
@@ -1055,6 +1122,33 @@ impl Whisp {
         cx.notify();
     }
 
+    pub(crate) fn toggle_voice_commands(&mut self, cx: &mut Context<Self>) {
+        self.voice_commands = !self.voice_commands;
+        self.persist();
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_screen_context(&mut self, cx: &mut Context<Self>) {
+        self.screen_context = !self.screen_context;
+        if !self.screen_context {
+            self.screen = Snapshot::default();
+        }
+        self.persist();
+        cx.notify();
+    }
+
+    /// The cloud provider the assistant asks: the selected one when it is a
+    /// cloud model, otherwise any with a saved key.
+    fn assistant_provider(&self) -> Option<Provider> {
+        Provider::from_id(&self.selected)
+            .filter(|provider| self.cloud_keys[provider.index()])
+            .or_else(|| {
+                Provider::ALL
+                    .into_iter()
+                    .find(|provider| self.cloud_keys[provider.index()])
+            })
+    }
+
     pub(crate) fn begin_hotkey_capture(&mut self, cx: &mut Context<Self>) {
         if self.recording_hotkey {
             self.stop_recording();
@@ -1157,6 +1251,10 @@ impl Whisp {
         let Phase::Result(text) = &self.phase else {
             return;
         };
+        // "Opened Spotify" is a confirmation, not something to paste.
+        if self.result_kind == ResultKind::Command {
+            return;
+        }
         cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
         self.copied = true;
         cx.notify();
@@ -1214,6 +1312,8 @@ impl Whisp {
         let copy = self.copy_notes;
         #[cfg(target_os = "macos")]
         let target = self.dictation_target.take();
+        #[cfg(not(target_os = "macos"))]
+        let target = ();
         let task_samples = Arc::clone(&samples);
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let outcome = cx
@@ -1249,23 +1349,9 @@ impl Whisp {
                     Ok(text) => {
                         view.failed_audio = None;
                         view.recovery = None;
-                        #[cfg(target_os = "macos")]
-                        let insert_error = target.and_then(|target| target.insert(&text).err());
-                        if copy {
-                            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-                            view.copied = true;
-                        } else {
-                            view.copied = false;
-                        }
-                        view.last_text.clone_from(&text);
-                        view.phase = Phase::Result(text);
-                        #[cfg(target_os = "macos")]
-                        {
-                            view.error = insert_error;
-                        }
-                        #[cfg(not(target_os = "macos"))]
-                        {
-                            view.error = None;
+                        match assistant::route(&text, view.voice_commands) {
+                            Route::Dictation => view.finish_dictation(text, target, copy, cx),
+                            route => view.act(route, text, target, copy, cx),
                         }
                     }
                     Err((err, cloud_error)) => {
@@ -1292,6 +1378,116 @@ impl Whisp {
                             && !matches!(view.recovery, Some(Recovery::NoSpeech)))
                         .then_some((samples, rate));
                         view.error = Some(err);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Types a note into the original editor and shows it.
+    fn finish_dictation(
+        &mut self,
+        text: String,
+        target: TypingTarget,
+        copy: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let insert_error = match type_into(target, &text) {
+            Typing::Failed(err) => Some(err),
+            Typing::Inserted | Typing::NoTarget => None,
+        };
+        if copy {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+            self.copied = true;
+        } else {
+            self.copied = false;
+        }
+        self.show_result(text, ResultKind::Dictation);
+        self.error = insert_error;
+    }
+
+    fn show_result(&mut self, text: String, kind: ResultKind) {
+        self.working = None;
+        self.result_kind = kind;
+        self.last_text.clone_from(&text);
+        self.phase = Phase::Result(text);
+        self.error = None;
+    }
+
+    /// Runs a voice command or asks the assistant, keeping the bar busy
+    /// until it is done.
+    fn act(
+        &mut self,
+        route: Route,
+        transcript: String,
+        target: TypingTarget,
+        copy: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let transcription_id = self.transcription_id;
+        let asking = matches!(route, Route::Ask(_));
+        let provider = asking.then(|| self.assistant_provider()).flatten();
+        self.phase = Phase::Transcribing;
+        self.transcribing_provider = provider;
+        self.working = Some(if asking { "Thinking…" } else { "Opening…" });
+        let request = assistant::Request {
+            transcript,
+            route,
+            provider,
+            screen: self.screen_context.then(|| self.screen.clone()),
+        };
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move { assistant::perform(request) })
+                .await;
+            this.update(cx, |view, cx| {
+                if view.transcription_id != transcription_id {
+                    return;
+                }
+                view.transcribing_provider = None;
+                view.working = None;
+                match outcome {
+                    Ok(Outcome::Dictation(text)) => view.finish_dictation(text, target, copy, cx),
+                    Ok(Outcome::Opened(message)) => {
+                        view.copied = false;
+                        view.show_result(message, ResultKind::Command);
+                    }
+                    Ok(Outcome::Answer { text, provider }) => {
+                        view.copied = copy;
+                        if copy {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                        }
+                        view.show_result(text, ResultKind::Answer(provider));
+                    }
+                    Ok(Outcome::Typed { text, provider }) => {
+                        let typing = type_into(target, &text);
+                        // Text the user asked for must land somewhere: when
+                        // it could not be typed, it waits on the clipboard.
+                        let copied = copy || !matches!(typing, Typing::Inserted);
+                        if copied {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                        }
+                        view.copied = copied;
+                        view.show_result(text, ResultKind::Typed(provider));
+                        if let Typing::Failed(err) = typing {
+                            view.error = Some(err);
+                        }
+                    }
+                    Err(err) => {
+                        view.phase = Phase::Idle;
+                        view.recovery = Some(match err.kind {
+                            ErrorKind::Launch => Recovery::Command,
+                            ErrorKind::NoKey => Recovery::AssistantKey,
+                            ErrorKind::Key(provider) => Recovery::CloudKey(provider),
+                            ErrorKind::Offline => Recovery::CloudOffline,
+                            ErrorKind::RateLimited => Recovery::CloudRateLimited,
+                            ErrorKind::Other => Recovery::Assistant,
+                        });
+                        view.error = Some(err.message);
                     }
                 }
                 cx.notify();
@@ -1372,6 +1568,8 @@ impl Whisp {
             input_device: self.input_device.clone(),
             open_on_startup: self.open_on_startup,
             show_in_menu_bar: settings::load().show_in_menu_bar,
+            voice_commands: self.voice_commands,
+            screen_context: self.screen_context,
         });
     }
 
@@ -1486,6 +1684,34 @@ impl Whisp {
 
     fn refresh_models(&mut self) {
         self.models = load_models();
+    }
+}
+
+/// Only macOS types into other apps so far.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+enum Typing {
+    Inserted,
+    NoTarget,
+    Failed(String),
+}
+
+/// Types `text` into the editor that had focus before the bar opened.
+fn type_into(target: TypingTarget, text: &str) -> Typing {
+    #[cfg(target_os = "macos")]
+    {
+        match target {
+            Some(target) => match target.insert(text) {
+                Ok(()) => Typing::Inserted,
+                Err(err) => Typing::Failed(err),
+            },
+            None => Typing::NoTarget,
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let () = target;
+        let _ = text;
+        Typing::NoTarget
     }
 }
 
