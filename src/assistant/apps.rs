@@ -1,6 +1,8 @@
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+#[cfg(not(target_os = "windows"))]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -8,9 +10,9 @@ pub struct App {
     pub name: String,
     generic: Option<String>,
     path: PathBuf,
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    #[cfg_attr(any(target_os = "macos", target_os = "windows"), allow(dead_code))]
     exec: Option<String>,
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    #[cfg_attr(any(target_os = "macos", target_os = "windows"), allow(dead_code))]
     terminal: bool,
 }
 
@@ -73,7 +75,12 @@ fn bundle(path: PathBuf) -> App {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn scan() -> Vec<App> {
+    start_menu::scan()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn scan() -> Vec<App> {
     let mut apps = Vec::new();
     let mut seen = HashSet::new();
@@ -83,7 +90,7 @@ fn scan() -> Vec<App> {
     apps
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn desktop_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let home = dirs::home_dir();
@@ -112,7 +119,7 @@ fn desktop_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn collect_entries(root: &Path, dir: &Path, seen: &mut HashSet<String>, apps: &mut Vec<App>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -144,7 +151,7 @@ fn collect_entries(root: &Path, dir: &Path, seen: &mut HashSet<String>, apps: &m
     }
 }
 
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", target_os = "windows"), allow(dead_code))]
 fn parse_desktop_entry(raw: &str, path: PathBuf) -> Option<App> {
     let mut in_entry = false;
     let mut name = None;
@@ -189,7 +196,7 @@ fn parse_desktop_entry(raw: &str, path: PathBuf) -> Option<App> {
     })
 }
 
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", target_os = "windows"), allow(dead_code))]
 fn unescape_value(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let mut chars = value.chars();
@@ -214,7 +221,7 @@ fn unescape_value(value: &str) -> String {
     out
 }
 
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", target_os = "windows"), allow(dead_code))]
 fn exec_args(exec: &str, app: &App) -> Result<Vec<String>, String> {
     let mut args = Vec::new();
     let mut current = String::new();
@@ -368,7 +375,12 @@ pub fn launch(app: &App) -> Result<(), String> {
         }
         Ok(())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        shell_execute(&app.path.to_string_lossy())
+            .map_err(|err| format!("Could not open {}: {err}", app.name))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let exec = app
             .exec
@@ -398,7 +410,7 @@ pub fn open_url(url: &str) -> Result<(), String> {
         return Err("Only web addresses can be opened.".into());
     }
     #[cfg(target_os = "windows")]
-    return shell_open(url).map_err(|err| format!("Could not open {url}: {err}"));
+    return shell_execute(url).map_err(|err| format!("Could not open {url}: {err}"));
     #[cfg(target_os = "macos")]
     let args = ["/usr/bin/open".to_string(), url.to_string()];
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -407,10 +419,11 @@ pub fn open_url(url: &str) -> Result<(), String> {
     spawn_detached(&args).map_err(|err| format!("Could not open {url}: {err}"))
 }
 
-/// Opens a web address in the default browser. The shell parses nothing, so
-/// characters such as `&` in the address stay part of it.
+/// Opens a web address in the default browser, or an app from the Apps
+/// folder. The shell parses nothing, so characters such as `&` in an address
+/// stay part of it.
 #[cfg(target_os = "windows")]
-fn shell_open(url: &str) -> windows::core::Result<()> {
+fn shell_execute(target: &str) -> windows::core::Result<()> {
     use windows::core::{w, HSTRING};
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -419,7 +432,7 @@ fn shell_open(url: &str) -> windows::core::Result<()> {
         ShellExecuteW(
             None,
             w!("open"),
-            &HSTRING::from(url),
+            &HSTRING::from(target),
             None,
             None,
             SW_SHOWNORMAL,
@@ -433,6 +446,7 @@ fn shell_open(url: &str) -> windows::core::Result<()> {
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 /// Starts a program that outlives Whisple, in its own process group so a
 /// signal to Whisple does not reach it. A thread reaps it when it exits.
 fn spawn_detached(args: &[String]) -> std::io::Result<()> {
@@ -459,10 +473,91 @@ fn spawn_detached(args: &[String]) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn on_path(program: &str) -> bool {
     std::env::var_os("PATH")
         .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
+}
+
+/// Every app in Start's "All apps" list, desktop and Store apps alike. Each
+/// launches through its entry in the Apps folder.
+#[cfg(target_os = "windows")]
+mod start_menu {
+    use std::path::PathBuf;
+
+    use windows::core::PWSTR;
+    use windows::Win32::System::Com::{CoTaskMemFree, IBindCtx};
+    use windows::Win32::UI::Shell::{
+        BHID_EnumItems, FOLDERID_AppsFolder, IEnumShellItems, IShellItem, SHGetKnownFolderItem,
+        KF_FLAG_DEFAULT, SIGDN, SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING,
+    };
+
+    use super::App;
+
+    pub fn scan() -> Vec<App> {
+        crate::platform::windows::com_ready();
+        let Ok(folder) = (unsafe {
+            SHGetKnownFolderItem::<IShellItem>(&FOLDERID_AppsFolder, KF_FLAG_DEFAULT, None)
+        }) else {
+            return Vec::new();
+        };
+        let Ok(items) = (unsafe {
+            folder.BindToHandler::<_, IEnumShellItems>(None::<&IBindCtx>, &BHID_EnumItems)
+        }) else {
+            return Vec::new();
+        };
+        let mut apps = Vec::new();
+        loop {
+            let mut item = [None];
+            let mut fetched = 0;
+            if unsafe { items.Next(&mut item, Some(&mut fetched)) }.is_err() || fetched == 0 {
+                break;
+            }
+            let Some(item) = item[0].take() else {
+                break;
+            };
+            let (Some(name), Some(id)) = (
+                display_name(&item, SIGDN_NORMALDISPLAY),
+                display_name(&item, SIGDN_PARENTRELATIVEPARSING),
+            ) else {
+                continue;
+            };
+            // Start lists uninstallers, web links and help files beside the
+            // apps.
+            if name.to_lowercase().contains("uninstall")
+                || id.starts_with("http")
+                || is_document(&id)
+            {
+                continue;
+            }
+            apps.push(App {
+                name,
+                generic: None,
+                path: PathBuf::from(format!(r"shell:AppsFolder\{id}")),
+                exec: None,
+                terminal: false,
+            });
+        }
+        apps
+    }
+
+    fn is_document(id: &str) -> bool {
+        std::path::Path::new(id)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| {
+                ["chm", "htm", "html", "pdf", "rtf", "txt", "url"]
+                    .iter()
+                    .any(|doc| ext.eq_ignore_ascii_case(doc))
+            })
+    }
+
+    fn display_name(item: &IShellItem, kind: SIGDN) -> Option<String> {
+        let raw: PWSTR = unsafe { item.GetDisplayName(kind) }.ok()?;
+        let text = unsafe { raw.to_string() }.ok();
+        unsafe { CoTaskMemFree(Some(raw.0 as *const _)) };
+        text
+    }
 }
 
 #[cfg(test)]
@@ -559,7 +654,7 @@ mod tests {
         assert_eq!(unescape_value(r"a\sb\\c"), r"a b\c");
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     #[test]
     fn a_user_entry_hides_the_system_one() {
         let user = tempfile::tempdir().unwrap();

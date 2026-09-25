@@ -18,9 +18,16 @@ impl Snapshot {
 pub fn focused() -> Snapshot {
     #[cfg(target_os = "macos")]
     let snapshot = macos::focused();
+    #[cfg(target_os = "windows")]
+    let snapshot = win::focused();
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     let snapshot = x11::focused();
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "freebsd")))]
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "linux",
+        target_os = "freebsd"
+    )))]
     let snapshot = Snapshot::default();
     tidy(snapshot)
 }
@@ -40,11 +47,20 @@ pub fn capture_png() -> Result<Vec<u8>, String> {
     {
         macos::capture_png()
     }
+    #[cfg(target_os = "windows")]
+    {
+        win::capture_png()
+    }
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     {
         x11::capture_png()
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "freebsd")))]
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "linux",
+        target_os = "freebsd"
+    )))]
     {
         Err("Screen capture is not available on this system.".into())
     }
@@ -102,7 +118,12 @@ fn fit(rgb: &[u8], width: u32, height: u32, max_width: u32) -> (Vec<u8>, u32, u3
     (out, out_w, out_h)
 }
 
-#[cfg(any(target_os = "linux", target_os = "freebsd", test))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "windows",
+    test
+))]
 fn encode_png(rgb: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     {
@@ -118,6 +139,211 @@ fn encode_png(rgb: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
             .map_err(|err| format!("Could not encode the screenshot: {err}"))?;
     }
     Ok(bytes)
+}
+
+/// The foreground window's app, title and selected text, read through UI
+/// Automation, and a GDI capture of the primary display.
+#[cfg(target_os = "windows")]
+mod win {
+    use windows::core::{w, HSTRING, PCWSTR, PWSTR};
+    use windows::Win32::Foundation::{CloseHandle, HWND};
+    use windows::Win32::Graphics::Gdi::{
+        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
+        GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CAPTUREBLT,
+        DIB_RGB_COLORS, SRCCOPY,
+    };
+    use windows::Win32::Storage::FileSystem::{
+        GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
+    };
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::Win32::UI::Accessibility::{IUIAutomationTextPattern, UIA_TextPatternId};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetSystemMetrics, GetWindowTextW, GetWindowThreadProcessId,
+        SM_CXSCREEN, SM_CYSCREEN,
+    };
+
+    use super::Snapshot;
+
+    pub fn focused() -> Snapshot {
+        let window = unsafe { GetForegroundWindow() };
+        if window.is_invalid() {
+            return Snapshot::default();
+        }
+        let mut pid = 0;
+        unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) };
+        if pid == 0 || pid == std::process::id() {
+            return Snapshot::default();
+        }
+        Snapshot {
+            app: app_name(pid),
+            window: title(window),
+            selection: selection(pid),
+        }
+    }
+
+    fn title(window: HWND) -> Option<String> {
+        let mut buffer = [0u16; 512];
+        let len = unsafe { GetWindowTextW(window, &mut buffer) };
+        (len > 0).then(|| String::from_utf16_lossy(&buffer[..len as usize]))
+    }
+
+    /// The name the app gives itself, such as "Google Chrome", falling back
+    /// to the executable's name.
+    fn app_name(pid: u32) -> Option<String> {
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+        let mut buffer = [0u16; 1024];
+        let mut len = buffer.len() as u32;
+        let queried = unsafe {
+            QueryFullProcessImageNameW(
+                process,
+                PROCESS_NAME_WIN32,
+                PWSTR(buffer.as_mut_ptr()),
+                &mut len,
+            )
+        };
+        let _ = unsafe { CloseHandle(process) };
+        queried.ok()?;
+        let path = String::from_utf16_lossy(&buffer[..len as usize]);
+        let stem = std::path::Path::new(&path)
+            .file_stem()?
+            .to_string_lossy()
+            .into_owned();
+        // Store apps run inside this host; their window title names them.
+        if stem.eq_ignore_ascii_case("ApplicationFrameHost") {
+            return None;
+        }
+        description(&path).or(Some(stem))
+    }
+
+    fn description(path: &str) -> Option<String> {
+        let path = HSTRING::from(path);
+        let size = unsafe { GetFileVersionInfoSizeW(&path, None) };
+        if size == 0 {
+            return None;
+        }
+        let mut data = vec![0u8; size as usize];
+        unsafe { GetFileVersionInfoW(&path, None, size, data.as_mut_ptr().cast()) }.ok()?;
+        let translation = query(&data, w!(r"\VarFileInfo\Translation"), false)?;
+        if translation.len() < 4 {
+            return None;
+        }
+        let language = u16::from_le_bytes([translation[0], translation[1]]);
+        let code_page = u16::from_le_bytes([translation[2], translation[3]]);
+        let key = HSTRING::from(format!(
+            r"\StringFileInfo\{language:04x}{code_page:04x}\FileDescription"
+        ));
+        let value = query(&data, PCWSTR(key.as_ptr()), true)?;
+        let units: Vec<u16> = value
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&pair| u16::from_le_bytes(pair))
+            .take_while(|&unit| unit != 0)
+            .collect();
+        Some(String::from_utf16_lossy(&units))
+    }
+
+    /// A value from a version resource. Strings report their length in
+    /// UTF-16 units and binary values in bytes.
+    fn query(data: &[u8], key: PCWSTR, text: bool) -> Option<Vec<u8>> {
+        let mut value = std::ptr::null_mut();
+        let mut len = 0u32;
+        let found = unsafe { VerQueryValueW(data.as_ptr().cast(), key, &mut value, &mut len) };
+        if !found.as_bool() || value.is_null() || len == 0 {
+            return None;
+        }
+        let start = (value as usize).checked_sub(data.as_ptr() as usize)?;
+        let bytes = if text { len as usize * 2 } else { len as usize };
+        let end = (start + bytes).min(data.len());
+        data.get(start..end).map(<[u8]>::to_vec)
+    }
+
+    fn selection(pid: u32) -> Option<String> {
+        let automation = crate::platform::windows::automation()?;
+        let element = unsafe { automation.GetFocusedElement() }.ok()?;
+        if unsafe { element.CurrentProcessId() }.ok()? as u32 != pid {
+            return None;
+        }
+        let pattern =
+            unsafe { element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) }
+                .ok()?;
+        let ranges = unsafe { pattern.GetSelection() }.ok()?;
+        let mut text = String::new();
+        for index in 0..unsafe { ranges.Length() }.ok()? {
+            let range = unsafe { ranges.GetElement(index) }.ok()?;
+            text.push_str(&unsafe { range.GetText(-1) }.ok()?.to_string());
+        }
+        Some(text)
+    }
+
+    pub fn capture_png() -> Result<Vec<u8>, String> {
+        let (width, height) =
+            unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+        if width <= 0 || height <= 0 {
+            return Err("Could not find the display to capture.".into());
+        }
+        let mut bgra = vec![0u8; width as usize * height as usize * 4];
+        unsafe {
+            let screen = GetDC(None);
+            if screen.is_invalid() {
+                return Err("Could not capture the screen.".into());
+            }
+            let memory = CreateCompatibleDC(Some(screen));
+            let bitmap = CreateCompatibleBitmap(screen, width, height);
+            let previous = SelectObject(memory, bitmap.into());
+            let copied = BitBlt(
+                memory,
+                0,
+                0,
+                width,
+                height,
+                Some(screen),
+                0,
+                0,
+                SRCCOPY | CAPTUREBLT,
+            );
+            SelectObject(memory, previous);
+            let mut info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width,
+                    // A negative height asks for rows from the top down.
+                    biHeight: -height,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let rows = GetDIBits(
+                memory,
+                bitmap,
+                0,
+                height as u32,
+                Some(bgra.as_mut_ptr().cast()),
+                &mut info,
+                DIB_RGB_COLORS,
+            );
+            let _ = DeleteObject(bitmap.into());
+            let _ = DeleteDC(memory);
+            ReleaseDC(None, screen);
+            if copied.is_err() || rows != height {
+                return Err("Could not capture the screen.".into());
+            }
+        }
+        let rgb: Vec<u8> = bgra
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|&[blue, green, red, _]| [red, green, blue])
+            .collect();
+        let (rgb, width, height) = super::fit(&rgb, width as u32, height as u32, super::MAX_WIDTH);
+        super::encode_png(&rgb, width, height)
+    }
 }
 
 #[cfg(target_os = "macos")]
