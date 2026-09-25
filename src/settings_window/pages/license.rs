@@ -3,7 +3,9 @@
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::input::{Input, InputContentType};
 use gpui_kit::component::{Icon, Sizable};
-use gpui_kit::{div, prelude::*, px, Context, Div, FontWeight, IntoElement, Styled, Window};
+use gpui_kit::{
+    div, prelude::*, px, Context, Div, FontWeight, IntoElement, Stateful, Styled, Window,
+};
 
 use crate::i18n::{t, tf};
 use crate::license::{self, Access};
@@ -115,6 +117,7 @@ impl SettingsWindow {
 
     pub(in crate::settings_window) fn license(&self, cx: &mut Context<Self>) -> Div {
         let status = self.hud.read(cx).license_access.clone();
+        let has_key = status.display_key().is_some_and(|key| !key.is_empty());
         let trial_detail = status.trial_remaining().map(|remaining| {
             tf(
                 "{} of your 3-day free trial. Then {} once to keep Whisple.",
@@ -309,27 +312,37 @@ impl SettingsWindow {
                             .flex()
                             .items_center()
                             .justify_between()
-                            .when(
-                                !status.display_key().is_some_and(|key| !key.is_empty()),
-                                |row| row.justify_end(),
-                            )
-                            .when(
-                                status.display_key().is_some_and(|key| !key.is_empty()),
-                                |row| {
-                                    row.child(
-                                        div()
-                                            .id("license-deactivate")
-                                            .role(gpui_kit::Role::Button)
-                                            .aria_label(t("Deactivate license on this device"))
-                                            .text_size(px(12.0))
-                                            .text_color(theme::SECONDARY)
-                                            .cursor_pointer()
+                            .gap(px(12.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(16.0))
+                                    .when(has_key, |links| {
+                                        links.child(
+                                            text_button("license-deactivate", t("Deactivate this device"))
+                                                .aria_label(t("Deactivate license on this device"))
+                                                .on_click(cx.listener(|view, _, _, cx| {
+                                                    view.deactivate_license(cx)
+                                                })),
+                                        )
+                                    })
+                                    .when(!has_key, |links| {
+                                        links.child(
+                                            text_button("license-portal", t("Find your key ↗"))
+                                                .aria_label(t("Open Polar purchases"))
+                                                .on_click(|_, _, cx| {
+                                                    cx.open_url(license::CUSTOMER_PORTAL_URL)
+                                                }),
+                                        )
+                                    })
+                                    .child(
+                                        text_button("license-refresh", t("Check status"))
+                                            .aria_label(t("Check license status"))
                                             .on_click(cx.listener(|view, _, _, cx| {
-                                                view.deactivate_license(cx)
-                                            }))
-                                            .child(t("Deactivate this device")),
-                                    )
-                                },
+                                                view.refresh_license(cx)
+                                            })),
+                                    ),
                             )
                             .child(
                                 div()
@@ -358,32 +371,17 @@ impl SettingsWindow {
                     )
                     .into_any_element()],
             ))
-            .child(
-                div()
-                    .flex()
-                    .gap(px(20.0))
-                    .child(
-                        div()
-                            .id("license-refresh")
-                            .role(gpui_kit::Role::Button)
-                            .aria_label(t("Check license status"))
-                            .text_size(px(12.0))
-                            .text_color(theme::AMBER)
-                            .cursor_pointer()
-                            .on_click(cx.listener(|view, _, _, cx| view.refresh_license(cx)))
-                            .child(t("Check status")),
-                    )
-                    .child(
-                        div()
-                            .id("license-portal")
-                            .role(gpui_kit::Role::Button)
-                            .aria_label(t("Open Polar purchases"))
-                            .text_size(px(12.0))
-                            .text_color(theme::SECONDARY)
-                            .cursor_pointer()
-                            .on_click(|_, _, cx| cx.open_url(license::CUSTOMER_PORTAL_URL))
-                            .child(t("Find your key ↗")),
-                    ),
-            )
     }
+}
+
+/// A quiet text action for the license card's footer.
+fn text_button(id: &'static str, label: &'static str) -> Stateful<Div> {
+    div()
+        .id(id)
+        .role(gpui_kit::Role::Button)
+        .text_size(px(12.0))
+        .text_color(theme::SECONDARY)
+        .cursor_pointer()
+        .hover(|button| button.text_color(theme::LABEL))
+        .child(label)
 }
