@@ -12,8 +12,9 @@ struct Registration {
     held: [bool; 2],
 }
 
-// AppKit hotkeys must be registered and polled on the main thread. Settings
-// and the background listener both run on GPUI's foreground executor.
+// AppKit and Win32 hotkeys must be registered and polled on the main thread,
+// whose message loop delivers them. Settings and the background listener
+// both run on GPUI's foreground executor.
 thread_local! {
     static REGISTRATION: RefCell<Option<Registration>> = const { RefCell::new(None) };
 }
@@ -113,7 +114,11 @@ pub fn take_presses() -> Presses {
 
 fn native_shortcut(chord: &Chord) -> Result<HotKey, String> {
     if !chord.has_modifier() {
-        return Err("Use Ctrl, Option, or Command as well.".into());
+        return Err(if cfg!(target_os = "windows") {
+            "Use Ctrl, Alt, or Windows as well.".into()
+        } else {
+            "Use Ctrl, Option, or Command as well.".into()
+        });
     }
     let mut keys = Vec::new();
     for (held, modifier) in [

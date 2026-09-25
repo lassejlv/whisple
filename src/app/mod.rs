@@ -19,6 +19,8 @@ use crate::platform::hotkey::{self, Shortcut};
 use crate::platform::macos::dictation;
 use crate::platform::placement as place;
 use crate::platform::tray;
+#[cfg(target_os = "windows")]
+use crate::platform::windows::dictation;
 use crate::settings::{self, Preferences};
 use crate::startup;
 use crate::transcription::cloud::{self, Provider};
@@ -144,7 +146,7 @@ impl Whisp {
             show_hotkey: prefs.show_hotkey,
             record_hotkey: prefs.record_hotkey,
             copy_notes: prefs.copy_notes,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             dictation_target: None,
             clean_fillers: prefs.clean_fillers,
             voice_commands: prefs.voice_commands,
@@ -464,7 +466,7 @@ impl Whisp {
             // Capture the editor and screen before the HUD takes keyboard
             // focus.
             if !was_visible {
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
                 {
                     self.dictation_target = dictation::Target::focused();
                 }
@@ -568,7 +570,7 @@ enum Typing {
 }
 
 fn type_into(target: TypingTarget, text: &str) -> Typing {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         match target {
             Some(target) => match target.insert(text) {
@@ -578,7 +580,7 @@ fn type_into(target: TypingTarget, text: &str) -> Typing {
             None => Typing::NoTarget,
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let () = target;
         let _ = text;

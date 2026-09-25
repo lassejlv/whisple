@@ -15,9 +15,9 @@ pub(crate) const RESULT_LINE: f32 = 22.0;
 pub(super) const MAX_ANSWER_LINES: usize = 6;
 pub(super) const LINE_CHARS: usize = 46;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(super) type TypingTarget = Option<dictation::Target>;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub(super) type TypingTarget = ();
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -140,7 +140,7 @@ pub(crate) struct Whisp {
     /// Shows the bar and starts recording. Empty when turned off.
     pub record_hotkey: String,
     pub copy_notes: bool,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(super) dictation_target: Option<dictation::Target>,
     pub clean_fillers: bool,
     pub voice_commands: bool,

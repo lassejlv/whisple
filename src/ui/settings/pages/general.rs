@@ -101,7 +101,11 @@ impl SettingsWindow {
                     ),
                     setting_row(
                         "show-in-menu-bar",
-                        t("Show in menu bar"),
+                        if cfg!(target_os = "windows") {
+                            t("Show in system tray")
+                        } else {
+                            t("Show in menu bar")
+                        },
                         Some(t("Keep the Whisple icon next to the clock.")),
                         self.switch("show-in-menu-bar", menu_bar),
                         true,

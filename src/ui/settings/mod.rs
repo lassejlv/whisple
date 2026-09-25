@@ -176,11 +176,12 @@ pub(crate) fn open(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 // The system draws the window controls: macOS traffic lights
-                // over the sidebar, and the window manager's title bar on
-                // Linux.
+                // over the sidebar, and the regular title bar on Windows and
+                // Linux. A transparent title bar on Windows would hide the
+                // native caption buttons.
                 titlebar: Some(gpui_kit::TitlebarOptions {
                     title: Some(t("Whisple Settings").into()),
-                    appears_transparent: true,
+                    appears_transparent: cfg!(target_os = "macos"),
                     traffic_light_position: Some(gpui_kit::point(px(18.0), px(18.0))),
                 }),
                 focus: true,
