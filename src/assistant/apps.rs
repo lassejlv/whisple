@@ -397,11 +397,40 @@ pub fn open_url(url: &str) -> Result<(), String> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err("Only web addresses can be opened.".into());
     }
+    #[cfg(target_os = "windows")]
+    return shell_open(url).map_err(|err| format!("Could not open {url}: {err}"));
     #[cfg(target_os = "macos")]
     let args = ["/usr/bin/open".to_string(), url.to_string()];
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let args = ["xdg-open".to_string(), url.to_string()];
+    #[cfg(not(target_os = "windows"))]
     spawn_detached(&args).map_err(|err| format!("Could not open {url}: {err}"))
+}
+
+/// Opens a web address in the default browser. The shell parses nothing, so
+/// characters such as `&` in the address stay part of it.
+#[cfg(target_os = "windows")]
+fn shell_open(url: &str) -> windows::core::Result<()> {
+    use windows::core::{w, HSTRING};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            &HSTRING::from(url),
+            None,
+            None,
+            SW_SHOWNORMAL,
+        )
+    };
+    // ShellExecute reports success with any value above 32.
+    if result.0 as isize > 32 {
+        Ok(())
+    } else {
+        Err(windows::core::Error::from_thread())
+    }
 }
 
 /// Starts a program that outlives Whisple, in its own process group so a
