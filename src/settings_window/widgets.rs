@@ -53,7 +53,7 @@ fn labeled_section(label: Div, rows: Vec<AnyElement>) -> Div {
 /// A cloud provider's mark on its brand color.
 pub(super) fn provider_tile(provider: Provider, size: f32) -> Div {
     let (background, mark) = match provider {
-        Provider::OpenAi => (theme::LABEL, theme::HUD),
+        Provider::OpenAi | Provider::Xai => (theme::LABEL, theme::HUD),
         Provider::Groq => (gpui_kit::rgba(0xf54f35ff), theme::LABEL),
     };
     div()

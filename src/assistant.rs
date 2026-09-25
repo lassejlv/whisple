@@ -269,6 +269,7 @@ fn endpoint(provider: Provider) -> &'static str {
     match provider {
         Provider::OpenAi => "https://api.openai.com/v1/chat/completions",
         Provider::Groq => "https://api.groq.com/openai/v1/chat/completions",
+        Provider::Xai => "https://api.x.ai/v1/chat/completions",
     }
 }
 
@@ -277,6 +278,7 @@ fn model(provider: Provider) -> &'static str {
     match provider {
         Provider::OpenAi => "gpt-5.6",
         Provider::Groq => "qwen/qwen3.6-27b",
+        Provider::Xai => "grok-4.7",
     }
 }
 
@@ -350,6 +352,11 @@ fn translation_body(provider: Provider, text: &str, language: &str) -> Value {
             "model": model(provider),
             "messages": messages,
             "reasoning_effort": "none",
+            "max_completion_tokens": 2048,
+        }),
+        Provider::Xai => json!({
+            "model": model(provider),
+            "messages": messages,
             "max_completion_tokens": 2048,
         }),
     }
@@ -485,6 +492,12 @@ fn body(provider: Provider, question: &Question) -> Value {
             "messages": messages,
             // Qwen can think first; a voice bar needs the answer now.
             "reasoning_effort": "none",
+            "max_completion_tokens": 1024,
+            "response_format": {"type": "json_object"}
+        }),
+        Provider::Xai => json!({
+            "model": model(provider),
+            "messages": messages,
             "max_completion_tokens": 1024,
             "response_format": {"type": "json_object"}
         }),
@@ -676,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn both_providers_send_the_screenshot_and_read_the_action() {
+    fn every_provider_sends_the_screenshot_and_reads_the_action() {
         for provider in Provider::ALL {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let url = format!("http://{}/chat/completions", listener.local_addr().unwrap());
@@ -764,7 +777,7 @@ mod tests {
     }
 
     #[test]
-    fn both_providers_translate_a_note() {
+    fn every_provider_translates_a_note() {
         for provider in Provider::ALL {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let url = format!("http://{}/chat/completions", listener.local_addr().unwrap());

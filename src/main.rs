@@ -75,6 +75,7 @@ impl AssetSource for Assets {
             "icons/whisp/groq-mark.svg" => {
                 Some(Cow::Borrowed(include_bytes!("../assets/groq-mark.svg")))
             }
+            "icons/whisp/xai.svg" => Some(Cow::Borrowed(include_bytes!("../assets/xai.svg"))),
             "icons/whisp/onboarding-mic.svg" => Some(Cow::Borrowed(include_bytes!(
                 "../assets/onboarding-mic.svg"
             ))),

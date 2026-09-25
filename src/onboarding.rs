@@ -49,15 +49,15 @@ enum Choice {
 }
 
 impl Choice {
-    /// Every choice: the recommended download, the other downloads from
-    /// smallest to largest, then the cloud providers.
+    /// Every choice: the cloud providers, then the recommended download and
+    /// the other downloads from smallest to largest.
     fn all() -> Vec<Self> {
         let mut local: Vec<&'static ModelSpec> = models::CATALOG.iter().collect();
         local.sort_by_key(|spec| (!spec.recommended, spec.bytes));
-        local
+        Provider::ALL
+            .map(Self::Cloud)
             .into_iter()
-            .map(Self::Local)
-            .chain(Provider::ALL.map(Self::Cloud))
+            .chain(local.into_iter().map(Self::Local))
             .collect()
     }
 
@@ -1300,12 +1300,14 @@ mod tests {
                 Choice::Cloud(_) => None,
             })
             .collect();
-        // The recommended model leads; the rest go smallest first.
-        assert!(matches!(choices[0], Choice::Local(spec) if spec.recommended));
-        assert!(local[1..].windows(2).all(|pair| pair[0] <= pair[1]));
-        assert!(choices[models::CATALOG.len()..]
+        // Cloud models lead, then the recommended download, then the rest
+        // smallest first.
+        let clouds = Provider::ALL.len();
+        assert!(choices[..clouds]
             .iter()
             .all(|choice| matches!(choice, Choice::Cloud(_))));
+        assert!(matches!(choices[clouds], Choice::Local(spec) if spec.recommended));
+        assert!(local[1..].windows(2).all(|pair| pair[0] <= pair[1]));
         assert!(choices
             .iter()
             .any(|choice| choice.id() == models::recommended_id()));

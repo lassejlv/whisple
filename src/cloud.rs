@@ -1,4 +1,4 @@
-//! Optional file transcription with the user's OpenAI or Groq account.
+//! Optional file transcription with the user's OpenAI, Groq or xAI account.
 
 use std::io::Cursor;
 use std::time::Duration;
@@ -34,15 +34,17 @@ impl TranscriptionError {
 pub enum Provider {
     OpenAi,
     Groq,
+    Xai,
 }
 
 impl Provider {
-    pub const ALL: [Self; 2] = [Self::OpenAi, Self::Groq];
+    pub const ALL: [Self; 3] = [Self::OpenAi, Self::Groq, Self::Xai];
 
     pub fn from_id(id: &str) -> Option<Self> {
         match id {
             "cloud-openai" => Some(Self::OpenAi),
             "cloud-groq" => Some(Self::Groq),
+            "cloud-xai" => Some(Self::Xai),
             _ => None,
         }
     }
@@ -51,6 +53,7 @@ impl Provider {
         match self {
             Self::OpenAi => "cloud-openai",
             Self::Groq => "cloud-groq",
+            Self::Xai => "cloud-xai",
         }
     }
 
@@ -58,6 +61,7 @@ impl Provider {
         match self {
             Self::OpenAi => 0,
             Self::Groq => 1,
+            Self::Xai => 2,
         }
     }
 
@@ -65,6 +69,7 @@ impl Provider {
         match self {
             Self::OpenAi => "OpenAI",
             Self::Groq => "Groq",
+            Self::Xai => "xAI",
         }
     }
 
@@ -72,6 +77,7 @@ impl Provider {
         match self {
             Self::OpenAi => "gpt-transcribe",
             Self::Groq => "whisper-large-v3-turbo",
+            Self::Xai => "grok-voice-transcribe-2.0",
         }
     }
 
@@ -79,6 +85,7 @@ impl Provider {
         match self {
             Self::OpenAi => "GPT Transcribe · clear, accurate",
             Self::Groq => "Whisper v3 Turbo · fast, low cost",
+            Self::Xai => "Grok Transcribe 2 · accurate, low cost",
         }
     }
 
@@ -86,6 +93,7 @@ impl Provider {
         match self {
             Self::OpenAi => "icons/whisp/openai.svg",
             Self::Groq => "icons/whisp/groq-mark.svg",
+            Self::Xai => "icons/whisp/xai.svg",
         }
     }
 
@@ -93,6 +101,7 @@ impl Provider {
         match self {
             Self::OpenAi => "https://api.openai.com/v1/audio/transcriptions",
             Self::Groq => "https://api.groq.com/openai/v1/audio/transcriptions",
+            Self::Xai => "https://api.x.ai/v1/stt",
         }
     }
 }
@@ -186,9 +195,7 @@ fn transcribe_with_key(
         .file_name("recording.wav")
         .mime_str("audio/wav")
         .map_err(|err| TranscriptionError::Other(err.to_string()))?;
-    let mut form = multipart::Form::new()
-        .text("model", provider.model())
-        .part("file", file);
+    let mut form = multipart::Form::new().text("model", provider.model());
     if let Some(language) = language.filter(|language| *language != "auto") {
         form = form.text(
             if provider == Provider::OpenAi {
@@ -199,6 +206,8 @@ fn transcribe_with_key(
             language.to_string(),
         );
     }
+    // xAI reads the fields in order and needs the file after the others.
+    let form = form.part("file", file);
     let client = Client::builder()
         .timeout(Duration::from_secs(90))
         .user_agent("Whisple/0.1")
@@ -358,10 +367,11 @@ mod tests {
     }
 
     #[test]
-    fn both_providers_send_their_model_and_language_fields() {
+    fn every_provider_sends_its_model_and_language_before_the_file() {
         for (provider, language_field) in [
             (Provider::OpenAi, "languages[]"),
             (Provider::Groq, "language"),
+            (Provider::Xai, "language"),
         ] {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let url = format!(
@@ -406,6 +416,9 @@ mod tests {
                 assert!(body.contains(&format!("name=\"model\"\r\n\r\n{}", provider.model())));
                 assert!(body.contains(&format!("name=\"{language_field}\"\r\n\r\nda")));
                 assert!(request.windows(4).any(|part| part == b"RIFF"));
+                let file_at = body.find("name=\"file\"").unwrap();
+                assert!(body.find("name=\"model\"").unwrap() < file_at);
+                assert!(body.find(&format!("name=\"{language_field}\"")).unwrap() < file_at);
                 let response = "{\"text\":\"Hej verden.\"}";
                 write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
             });

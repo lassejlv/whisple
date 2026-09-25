@@ -41,11 +41,6 @@ impl SettingsWindow {
             .flex()
             .flex_col()
             .gap(px(22.0))
-            .child(section_with_detail(
-                t("On this Mac"),
-                tf("{} used", &[&models::format_size(used)]),
-                local,
-            ))
             .child(
                 div()
                     .flex()
@@ -60,6 +55,11 @@ impl SettingsWindow {
                             .child(t("Cloud recordings are sent to the selected provider. Keys are stored in your Mac’s Keychain.")),
                     ),
             )
+            .child(section_with_detail(
+                t("On this Mac"),
+                tf("{} used", &[&models::format_size(used)]),
+                local,
+            ))
     }
 
     pub(in crate::settings_window) fn model_row(
@@ -246,7 +246,7 @@ impl SettingsWindow {
             .flex()
             .items_center()
             .gap(px(12.0))
-            .when(provider == Provider::Groq, |row| {
+            .when(provider.index() > 0, |row| {
                 row.border_t_1().border_color(theme::HAIRLINE)
             })
             .when(selected, |row| row.bg(theme::AMBER_WASH))
@@ -456,6 +456,7 @@ impl SettingsWindow {
                 "https://console.groq.com/keys",
                 t("Get a key at console.groq.com ↗"),
             ),
+            Provider::Xai => ("https://console.x.ai", t("Get a key at console.x.ai ↗")),
         };
         let note = if connected {
             tf(

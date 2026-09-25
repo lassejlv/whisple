@@ -149,7 +149,7 @@ pub(crate) struct Whisp {
     pub phase: Phase,
     pub levels: VecDeque<f32>,
     pub menu_open: bool,
-    pub cloud_keys: [bool; 2],
+    pub cloud_keys: [bool; Provider::ALL.len()],
     pub models: Vec<InstalledModel>,
     pub selected: String,
     pub download: Option<Download>,
@@ -654,7 +654,7 @@ impl Whisp {
         }
     }
 
-    /// Ready local models, then cloud providers with a saved key.
+    /// Cloud providers with a saved key, then ready local models.
     pub(crate) fn menu_choices(&self) -> Vec<MenuChoice> {
         let local = self
             .models
@@ -673,7 +673,7 @@ impl Whisp {
                 name: provider.name(),
                 detail: t("Cloud"),
             });
-        local.chain(cloud).collect()
+        cloud.chain(local).collect()
     }
 
     fn rest_bars(&mut self) {
