@@ -258,6 +258,8 @@ If you cannot help, use \"answer\" and say why in one sentence. Leave `target` e
 fn body(provider: Provider, question: &Question) -> Value {
     let platform = if cfg!(target_os = "macos") {
         "macOS"
+    } else if cfg!(target_os = "windows") {
+        "Windows"
     } else {
         "Linux"
     };
