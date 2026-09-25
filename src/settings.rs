@@ -1,10 +1,6 @@
-//! Preferences stored in `~/.config/whisp/settings.json`.
-//!
-//! Older files only recorded the selected model. Missing fields keep their
-//! defaults so that file still loads.
-
 use std::fs;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -14,26 +10,19 @@ pub const DEFAULT_RECORD_HOTKEY: &str = "ctrl-alt-space";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Preferences {
     pub onboarding_complete: bool,
-    /// The interface language's code. Empty follows the system language.
     pub app_language: String,
     pub selected: String,
     pub language: String,
-    /// The language notes come out in. Empty means the spoken language.
     pub output_language: String,
     pub show_hotkey: String,
-    /// Shows the bar and starts recording. Empty when turned off.
     pub record_hotkey: String,
     pub copy_notes: bool,
     pub clean_fillers: bool,
-    /// Empty means the system default input.
     pub input_device: String,
     pub open_on_startup: bool,
     pub show_in_menu_bar: bool,
-    /// "Open Spotify" launches the app instead of typing the words.
     pub voice_commands: bool,
-    /// The assistant sees the front app, selection and a screenshot.
     pub screen_context: bool,
-    /// The model Vercel AI Gateway transcribes with: "grok" or "openai".
     pub gateway_model: String,
 }
 
@@ -189,7 +178,7 @@ impl Default for Preferences {
             show_in_menu_bar: true,
             voice_commands: true,
             screen_context: true,
-            gateway_model: crate::cloud::GatewayModel::Grok.id().into(),
+            gateway_model: crate::transcription::cloud::GatewayModel::Grok.id().into(),
         }
     }
 }
@@ -200,7 +189,6 @@ impl Preferences {
     }
 }
 
-/// A language's English name, such as "Danish" for `da`. Not for "auto".
 pub fn language_name(id: &str) -> Option<&'static str> {
     LANGUAGES
         .iter()
@@ -216,13 +204,29 @@ pub fn load() -> Preferences {
 }
 
 pub fn save(prefs: &Preferences) {
+    if let Err(err) = try_save(prefs) {
+        eprintln!("could not save Whisple settings: {err}");
+    }
+}
+
+pub fn try_save(prefs: &Preferences) -> Result<(), String> {
     let path = path();
+    try_save_to(&path, prefs)
+}
+
+fn try_save_to(path: &Path, prefs: &Preferences) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
-    if let Ok(raw) = serde_json::to_string_pretty(&File::from(prefs)) {
-        let _ = fs::write(path, raw);
-    }
+    let raw = serde_json::to_vec_pretty(&File::from(prefs)).map_err(|err| err.to_string())?;
+    let parent = path
+        .parent()
+        .ok_or("Settings location has no parent directory")?;
+    let mut pending = tempfile::NamedTempFile::new_in(parent).map_err(|err| err.to_string())?;
+    pending.write_all(&raw).map_err(|err| err.to_string())?;
+    pending.flush().map_err(|err| err.to_string())?;
+    pending.persist(path).map_err(|err| err.error.to_string())?;
+    Ok(())
 }
 
 pub fn needs_onboarding() -> bool {
@@ -260,12 +264,12 @@ pub fn decode(raw: &str) -> Preferences {
     if language_name(&file.output_language).is_some() {
         prefs.output_language = file.output_language;
     }
-    if let Some(chord) = crate::hotkey::parse(&file.show_hotkey) {
+    if let Some(chord) = crate::platform::hotkey::parse(&file.show_hotkey) {
         if chord.has_modifier() {
             prefs.show_hotkey = chord.canonical();
         }
     }
-    prefs.record_hotkey = match crate::hotkey::parse(&file.record_hotkey) {
+    prefs.record_hotkey = match crate::platform::hotkey::parse(&file.record_hotkey) {
         Some(chord) if chord.has_modifier() => chord.canonical(),
         // A saved empty value means the user turned the shortcut off.
         _ if file.record_hotkey.is_empty() => String::new(),
@@ -282,7 +286,7 @@ pub fn decode(raw: &str) -> Preferences {
     prefs.show_in_menu_bar = file.show_in_menu_bar;
     prefs.voice_commands = file.voice_commands;
     prefs.screen_context = file.screen_context;
-    if let Some(model) = crate::cloud::GatewayModel::from_id(&file.gateway_model) {
+    if let Some(model) = crate::transcription::cloud::GatewayModel::from_id(&file.gateway_model) {
         prefs.gateway_model = model.id().into();
     }
     prefs
@@ -293,10 +297,21 @@ fn clean_device(name: &str) -> String {
 }
 
 fn path() -> PathBuf {
+    #[cfg(debug_assertions)]
+    if let Some(root) = dev_data_dir() {
+        return root.join("settings.json");
+    }
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("whisp")
         .join("settings.json")
+}
+
+#[cfg(debug_assertions)]
+pub(crate) fn dev_data_dir() -> Option<PathBuf> {
+    std::env::var_os("WHISPLE_DEV_DATA_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
 }
 
 impl From<&Preferences> for File {
@@ -324,6 +339,27 @@ impl From<&Preferences> for File {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_save_replaces_a_complete_file_and_reports_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, "old").unwrap();
+        let prefs = Preferences {
+            onboarding_complete: true,
+            selected: "preview".into(),
+            ..Preferences::default()
+        };
+        try_save_to(&path, &prefs).unwrap();
+        let saved = decode(&fs::read_to_string(&path).unwrap());
+        assert!(saved.onboarding_complete);
+        assert_eq!(saved.selected, "preview");
+
+        let barrier = dir.path().join("not-a-directory");
+        fs::write(&barrier, "keep").unwrap();
+        assert!(try_save_to(&barrier.join("settings.json"), &prefs).is_err());
+        assert_eq!(fs::read_to_string(&barrier).unwrap(), "keep");
+    }
 
     #[test]
     fn the_gateway_model_defaults_to_grok_and_keeps_a_known_choice() {

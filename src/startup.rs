@@ -1,8 +1,3 @@
-//! Login item so Whisple opens when the session starts.
-//!
-//! Linux writes an XDG autostart entry. macOS writes a per-user Launch Agent.
-//! The file always points at the binary that is running now.
-
 use std::fs;
 use std::path::{Path, PathBuf};
 

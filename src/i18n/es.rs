@@ -1,5 +1,3 @@
-//! Spanish interface text, keyed by the English original.
-
 pub const STRINGS: &[(&str, &str)] = &[
     ("Connect to the internet to continue your trial.", "Conéctate a internet para continuar la prueba."),
     ("Connect to the internet within {} to continue your 3-day free trial.", "Conéctate a internet en un plazo de {} para continuar tu prueba gratuita de 3 días."),
@@ -65,6 +63,7 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("Copy to clipboard when done", "Copiar al portapapeles al terminar"),
     ("Could not install the update: {}", "No se pudo instalar la actualización: {}"),
     ("Could not open that", "No se pudo abrir"),
+    ("Could not save settings: {}", "No se pudo guardar la configuración: {}"),
     ("Could not register the shortcut: {}", "No se pudo registrar el atajo: {}"),
     ("Could not use that shortcut: {}", "No se puede usar ese atajo: {}"),
     ("Could not verify access", "No se pudo verificar el acceso"),
@@ -142,7 +141,9 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("Norwegian", "Noruego"),
     ("Not allowed yet", "Aún no permitido"),
     ("Not set", "Sin definir"),
-    ("Now try it", "Ahora pruébalo"),
+    ("Ready to start", "Todo listo para empezar"),
+    ("Click Start using Whisple, then press the shortcut to record. Press it again to finish.", "Haz clic en Empezar a usar Whisple y luego pulsa el atajo para grabar. Púlsalo otra vez para terminar."),
+    ("Voice bar preview", "Vista previa de la barra de voz"),
     ("On device", "En el dispositivo"),
     ("On this Mac", "En este Mac"),
     ("On-device models keep your voice on this computer. Cloud models are optional.", "Los modelos en el dispositivo mantienen tu voz en este ordenador. Los modelos en la nube son opcionales."),
@@ -165,8 +166,6 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("Polish", "Polaco"),
     ("Portuguese", "Portugués"),
     ("Press shortcut…", "Pulsa el atajo…"),
-    ("Press the shortcut, say a sentence, then press it again. Your words go into the selected text field. Clipboard copying is optional.", "Pulsa el atajo, di una frase y púlsalo de nuevo. Tus palabras van al campo de texto seleccionado. Copiar al portapapeles es opcional."),
-    ("Press the shortcut, say a sentence, then press it again. Your words land on the clipboard.", "Pulsa el atajo, di una frase y púlsalo de nuevo. Tus palabras quedan en el portapapeles."),
     ("Press {} to start talking and again to finish. Your words are copied, ready to paste.", "Pulsa {} para empezar a hablar y otra vez para terminar. Tus palabras se copian, listas para pegar."),
     ("Press {} to start talking and again to finish. Your words are typed into the app you were using.", "Pulsa {} para empezar a hablar y otra vez para terminar. Tus palabras se escriben en la app que estabas usando."),
     ("Private by default", "Privado por defecto"),
@@ -206,6 +205,7 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("Spanish", "Español"),
     ("Spoken language", "Idioma hablado"),
     ("Start recording", "Empezar a grabar"),
+    ("Stop recording", "Detener grabación"),
     ("Start talking", "Empieza a hablar"),
     ("Start using Whisple", "Empezar a usar Whisple"),
     ("Start with “Hey Whisple” to ask about what you see, or have it write a reply for you. Uses your OpenAI or Groq key.", "Empieza con «Hey Whisple» para preguntar por lo que ves o pedirle que escriba una respuesta. Usa tu clave de OpenAI o Groq."),

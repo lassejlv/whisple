@@ -9,6 +9,7 @@ cd "$project_dir"
 
 selected_arch="both"
 use_packaged_app=false
+with_licensing=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --arch)
@@ -20,12 +21,18 @@ while [[ $# -gt 0 ]]; do
             use_packaged_app=true
             shift
             ;;
+        --with-licensing)
+            with_licensing=true
+            shift
+            ;;
         *)
-            echo "Usage: $0 [--arch arm64|x86_64] [--use-packaged-app]" >&2
+            echo "Usage: $0 [--arch arm64|x86_64] [--use-packaged-app] [--with-licensing]" >&2
             exit 2
             ;;
     esac
 done
+package_args=()
+if [[ "$with_licensing" == true ]]; then package_args+=(--with-licensing); fi
 case "$selected_arch" in
     both|arm64|x86_64) ;;
     *) echo "Unsupported architecture: $selected_arch" >&2; exit 2 ;;
@@ -72,9 +79,9 @@ for target_triple in aarch64-apple-darwin x86_64-apple-darwin; do
     elif [[ "$use_packaged_app" == true ]]; then
         app_bundle="$project_dir/target/macos/$target_triple/Whisple.app"
     elif [[ "$target_triple" == "$host_triple" ]]; then
-        app_bundle="$("$project_dir/scripts/package-macos.sh" | tail -n 1)"
+        app_bundle="$("$project_dir/scripts/package-macos.sh" "${package_args[@]}" | tail -n 1)"
     else
-        app_bundle="$("$project_dir/scripts/package-macos.sh" --target "$target_triple" | tail -n 1)"
+        app_bundle="$("$project_dir/scripts/package-macos.sh" "${package_args[@]}" --target "$target_triple" | tail -n 1)"
     fi
     codesign --verify --deep --strict "$app_bundle"
     binary_arch="$(lipo -archs "$app_bundle/Contents/MacOS/whisple")"

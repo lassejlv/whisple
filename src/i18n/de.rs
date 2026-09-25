@@ -1,5 +1,3 @@
-//! German interface text, keyed by the English original.
-
 pub const STRINGS: &[(&str, &str)] = &[
     ("Connect to the internet to continue your trial.", "Verbinde dich mit dem Internet, um die Testphase fortzusetzen."),
     ("Connect to the internet within {} to continue your 3-day free trial.", "Verbinde dich innerhalb von {} mit dem Internet, um deine kostenlose 3-tägige Testphase fortzusetzen."),
@@ -65,6 +63,7 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("Copy to clipboard when done", "Danach in die Zwischenablage kopieren"),
     ("Could not install the update: {}", "Update konnte nicht installiert werden: {}"),
     ("Could not open that", "Konnte nicht geöffnet werden"),
+    ("Could not save settings: {}", "Einstellungen konnten nicht gespeichert werden: {}"),
     ("Could not register the shortcut: {}", "Kurzbefehl konnte nicht registriert werden: {}"),
     ("Could not use that shortcut: {}", "Dieser Kurzbefehl geht nicht: {}"),
     ("Could not verify access", "Zugang konnte nicht geprüft werden"),
@@ -142,7 +141,9 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("Norwegian", "Norwegisch"),
     ("Not allowed yet", "Noch nicht erlaubt"),
     ("Not set", "Nicht festgelegt"),
-    ("Now try it", "Probier es aus"),
+    ("Ready to start", "Bereit zum Start"),
+    ("Click Start using Whisple, then press the shortcut to record. Press it again to finish.", "Klicke auf Whisple verwenden und drücke dann den Kurzbefehl, um aufzunehmen. Drücke ihn erneut, um die Aufnahme zu beenden."),
+    ("Voice bar preview", "Vorschau der Sprachleiste"),
     ("On device", "Auf dem Gerät"),
     ("On this Mac", "Auf diesem Mac"),
     ("On-device models keep your voice on this computer. Cloud models are optional.", "Modelle auf dem Gerät halten deine Stimme auf diesem Computer. Cloud-Modelle sind optional."),
@@ -165,8 +166,6 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("Polish", "Polnisch"),
     ("Portuguese", "Portugiesisch"),
     ("Press shortcut…", "Kurzbefehl drücken…"),
-    ("Press the shortcut, say a sentence, then press it again. Your words go into the selected text field. Clipboard copying is optional.", "Drück den Kurzbefehl, sag einen Satz und drück ihn noch einmal. Deine Worte landen im ausgewählten Textfeld. Kopieren in die Zwischenablage ist optional."),
-    ("Press the shortcut, say a sentence, then press it again. Your words land on the clipboard.", "Drück den Kurzbefehl, sag einen Satz und drück ihn noch einmal. Deine Worte landen in der Zwischenablage."),
     ("Press {} to start talking and again to finish. Your words are copied, ready to paste.", "Drück {}, um zu sprechen, und noch einmal zum Beenden. Deine Worte werden kopiert und sind bereit zum Einfügen."),
     ("Press {} to start talking and again to finish. Your words are typed into the app you were using.", "Drück {}, um zu sprechen, und noch einmal zum Beenden. Deine Worte werden in die App getippt, die du gerade genutzt hast."),
     ("Private by default", "Standardmäßig privat"),
@@ -206,6 +205,7 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("Spanish", "Spanisch"),
     ("Spoken language", "Gesprochene Sprache"),
     ("Start recording", "Aufnahme starten"),
+    ("Stop recording", "Aufnahme beenden"),
     ("Start talking", "Losreden"),
     ("Start using Whisple", "Whisple verwenden"),
     ("Start with “Hey Whisple” to ask about what you see, or have it write a reply for you. Uses your OpenAI or Groq key.", "Beginne mit „Hey Whisple“, um nach dem zu fragen, was du siehst, oder lass dir eine Antwort schreiben. Nutzt deinen OpenAI- oder Groq-Schlüssel."),

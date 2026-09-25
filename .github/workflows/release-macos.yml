@@ -68,10 +68,10 @@ jobs:
           fi
 
       - name: Run Rust tests
-        run: cargo test --locked
+        run: cargo test --locked --features licensing
 
       - name: Build app
-        run: ./scripts/package-macos.sh
+        run: ./scripts/package-macos.sh --with-licensing
 
       - name: Build DMG and updater archive
         run: ./scripts/build-macos-dmgs.sh --arch "${{ matrix.arch }}" --use-packaged-app

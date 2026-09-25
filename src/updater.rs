@@ -1,7 +1,3 @@
-//! macOS release updates. GitHub's public release API is the update feed;
-//! the binary asset's SHA-256 digest and the app signature are checked before
-//! a separate helper swaps bundles after Whisple exits.
-
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};

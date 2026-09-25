@@ -1,5 +1,3 @@
-//! Danish interface text, keyed by the English original.
-
 pub const STRINGS: &[(&str, &str)] = &[
     ("Connect to the internet to continue your trial.", "Opret forbindelse til internettet for at fortsætte prøveperioden."),
     ("Connect to the internet within {} to continue your 3-day free trial.", "Opret forbindelse til internettet inden for {} for at fortsætte din gratis prøveperiode på 3 dage."),
@@ -65,6 +63,7 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("Copy to clipboard when done", "Kopiér til udklipsholderen bagefter"),
     ("Could not install the update: {}", "Opdateringen kunne ikke installeres: {}"),
     ("Could not open that", "Det kunne ikke åbnes"),
+    ("Could not save settings: {}", "Indstillingerne kunne ikke gemmes: {}"),
     ("Could not register the shortcut: {}", "Genvejen kunne ikke registreres: {}"),
     ("Could not use that shortcut: {}", "Genvejen kan ikke bruges: {}"),
     ("Could not verify access", "Adgangen kunne ikke bekræftes"),
@@ -142,7 +141,9 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("Norwegian", "Norsk"),
     ("Not allowed yet", "Ikke tilladt endnu"),
     ("Not set", "Ikke valgt"),
-    ("Now try it", "Prøv det nu"),
+    ("Ready to start", "Klar til at begynde"),
+    ("Click Start using Whisple, then press the shortcut to record. Press it again to finish.", "Klik på Begynd at bruge Whisple, og tryk derefter på genvejen for at optage. Tryk igen for at afslutte."),
+    ("Voice bar preview", "Forhåndsvisning af stemmebjælken"),
     ("On device", "På enheden"),
     ("On this Mac", "På denne Mac"),
     ("On-device models keep your voice on this computer. Cloud models are optional.", "Modeller på enheden holder din stemme på denne computer. Skymodeller er valgfrie."),
@@ -165,8 +166,6 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("Polish", "Polsk"),
     ("Portuguese", "Portugisisk"),
     ("Press shortcut…", "Tryk på genvej…"),
-    ("Press the shortcut, say a sentence, then press it again. Your words go into the selected text field. Clipboard copying is optional.", "Tryk på genvejen, sig en sætning, og tryk igen. Dine ord skrives i det valgte tekstfelt. Kopiering til udklipsholderen er valgfri."),
-    ("Press the shortcut, say a sentence, then press it again. Your words land on the clipboard.", "Tryk på genvejen, sig en sætning, og tryk igen. Dine ord lander i udklipsholderen."),
     ("Press {} to start talking and again to finish. Your words are copied, ready to paste.", "Tryk på {} for at begynde at tale og igen for at afslutte. Dine ord kopieres, klar til at blive indsat."),
     ("Press {} to start talking and again to finish. Your words are typed into the app you were using.", "Tryk på {} for at begynde at tale og igen for at afslutte. Dine ord skrives i den app, du brugte."),
     ("Private by default", "Privat som standard"),
@@ -206,6 +205,7 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("Spanish", "Spansk"),
     ("Spoken language", "Talt sprog"),
     ("Start recording", "Start optagelse"),
+    ("Stop recording", "Stop optagelse"),
     ("Start talking", "Begynd at tale"),
     ("Start using Whisple", "Begynd at bruge Whisple"),
     ("Start with “Hey Whisple” to ask about what you see, or have it write a reply for you. Uses your OpenAI or Groq key.", "Start med »Hej Whisple« for at spørge om det, du ser, eller få den til at skrive et svar for dig. Bruger din OpenAI- eller Groq-nøgle."),

@@ -1,5 +1,14 @@
 # Whisple licensing
 
+Licensing and the free trial are opt-in at compile time. `cargo build --release`
+and `./scripts/package-macos.sh` build an unrestricted app with no trial,
+license checks, or License page. To build with the commercial license flow, use
+`cargo build --release --features licensing` or
+`./scripts/package-macos.sh --with-licensing`. The macOS release workflow uses
+the licensed build explicitly.
+Unlicensed builds do not auto-install release binaries; their update actions
+open the release notes, and users can rebuild from source when they want an update.
+
 Whisple validates its license directly against Polar's public customer-portal
 license-key endpoints. The desktop app does not contain an organization access
 token or need a Whisple backend.
@@ -13,7 +22,7 @@ token or need a Whisple backend.
   Lifetime product. Customers can release activations in Polar's portal.
 
 These are public identifiers. Keep organization API tokens out of the desktop
-app. If the benefit is replaced, update `BENEFIT_ID` in `src/license.rs` and
+app. If the benefit is replaced, update `BENEFIT_ID` in `src/licensing/mod.rs` and
 verify the product grants the replacement before distributing the build.
 
 ## App behavior
@@ -42,7 +51,7 @@ ended, deactivating returns the app to trial access. A saved paid key that
 fails validation does not block remaining trial time: the License page still
 shows its validation issue, but dictation uses the trial until it expires.
 
-Whisple costs $19 once after the trial (`PRICE` in `src/license.rs`). Change
+Whisple costs $19 once after the trial (`PRICE` in `src/licensing/mod.rs`). Change
 that constant together with the Polar product price and the website.
 
 When the trial ends, nothing opens by itself. The voice bar says "Free trial

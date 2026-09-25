@@ -6,6 +6,7 @@ profile="release"
 bundle_name="Whisple"
 bundle_id="app.whisp"
 target_triple=""
+with_licensing=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -23,8 +24,12 @@ while [[ $# -gt 0 ]]; do
             target_triple="$2"
             shift 2
             ;;
+        --with-licensing)
+            with_licensing=true
+            shift
+            ;;
         *)
-            echo "Usage: $0 [--debug] [--target aarch64-apple-darwin|x86_64-apple-darwin]" >&2
+            echo "Usage: $0 [--debug] [--with-licensing] [--target aarch64-apple-darwin|x86_64-apple-darwin]" >&2
             exit 2
             ;;
     esac
@@ -46,6 +51,7 @@ cd "$project_dir"
 build_args=(build)
 if [[ "$profile" == "release" ]]; then build_args+=(--release); fi
 if [[ -n "$target_triple" ]]; then build_args+=(--target "$target_triple"); fi
+if [[ "$with_licensing" == true ]]; then build_args+=(--features licensing); fi
 cargo "${build_args[@]}"
 
 if [[ -n "$target_triple" ]]; then

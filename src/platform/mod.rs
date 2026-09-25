@@ -1,0 +1,10 @@
+pub(crate) mod hotkey;
+#[cfg(not(target_os = "macos"))]
+pub(crate) mod linux;
+#[cfg(target_os = "macos")]
+pub(crate) mod macos;
+pub(crate) mod microphone_permission;
+pub(crate) mod placement;
+pub(crate) mod tray;
+#[cfg(target_os = "windows")]
+pub(crate) mod windows;

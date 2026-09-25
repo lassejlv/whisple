@@ -1,0 +1,188 @@
+use gpui_kit::component::select::{SearchableVec, SelectItem};
+use gpui_kit::{div, prelude::*, px, Context, Div, IntoElement, SharedString, Styled};
+
+use crate::audio::Mic;
+use crate::i18n::t;
+use crate::settings::Preferences;
+use crate::ui::settings::widgets::*;
+use crate::ui::settings::SettingsWindow;
+use crate::ui::theme;
+
+#[derive(Clone)]
+pub(in crate::ui::settings) struct Choice {
+    id: String,
+    label: SharedString,
+}
+
+impl SelectItem for Choice {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.id
+    }
+}
+
+pub(in crate::ui::settings) fn microphone_choices(names: &[String]) -> SearchableVec<Choice> {
+    let mut choices = vec![Choice {
+        id: String::new(),
+        label: t("System default").into(),
+    }];
+    choices.extend(names.iter().map(|name| Choice {
+        id: name.clone(),
+        label: name.clone().into(),
+    }));
+    SearchableVec::new(choices)
+}
+
+pub(in crate::ui::settings) fn language_choices() -> SearchableVec<Choice> {
+    SearchableVec::new(
+        Preferences::languages()
+            .iter()
+            .map(|language| Choice {
+                id: language.id.into(),
+                label: t(language.name).into(),
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+pub(in crate::ui::settings) fn app_language_choices() -> SearchableVec<Choice> {
+    SearchableVec::new(
+        crate::i18n::Lang::ALL
+            .into_iter()
+            .map(|lang| Choice {
+                id: lang.code().into(),
+                label: lang.native_name().into(),
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+pub(in crate::ui::settings) fn output_language_choices() -> SearchableVec<Choice> {
+    let same = Choice {
+        id: String::new(),
+        label: t("Same as spoken").into(),
+    };
+    SearchableVec::new(
+        std::iter::once(same)
+            .chain(
+                Preferences::languages()
+                    .iter()
+                    .filter(|language| language.id != "auto")
+                    .map(|language| Choice {
+                        id: language.id.into(),
+                        label: t(language.name).into(),
+                    }),
+            )
+            .collect::<Vec<_>>(),
+    )
+}
+
+impl SettingsWindow {
+    pub(in crate::ui::settings) fn choose_microphone(
+        &mut self,
+        name: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if !name.is_empty()
+            && !self
+                .microphone_names
+                .iter()
+                .any(|candidate| candidate == name)
+        {
+            return;
+        }
+        self.monitor = None;
+        self.hud
+            .update(cx, |hud, cx| hud.set_input_device(name, cx));
+        self.monitor = Mic::monitor(name).ok();
+        cx.notify();
+    }
+
+    pub(in crate::ui::settings) fn choose_language(
+        &mut self,
+        language: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.hud
+            .update(cx, |hud, cx| hud.choose_language(language, cx));
+        cx.notify();
+    }
+
+    pub(in crate::ui::settings) fn choose_output_language(
+        &mut self,
+        language: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.hud
+            .update(cx, |hud, cx| hud.choose_output_language(language, cx));
+        cx.notify();
+    }
+
+    pub(in crate::ui::settings) fn audio(&self, _cx: &mut Context<Self>) -> Div {
+        let bars =
+            (0..18).map(|index| {
+                let threshold = (index + 1) as f32 / 18.0;
+                div().w(px(4.0)).h(px(12.0)).rounded(px(2.0)).bg(
+                    if self.monitor_level >= threshold {
+                        theme::AMBER
+                    } else {
+                        theme::TRACK
+                    },
+                )
+            });
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(26.0))
+            .child(section(
+                t("Input"),
+                vec![
+                    selector_row(
+                        t("Microphone"),
+                        None,
+                        selector_control(&self.microphone_select, t("Microphone"))
+                            .into_any_element(),
+                        false,
+                    ),
+                    div()
+                        .h(px(58.0))
+                        .px(px(16.0))
+                        .border_t_1()
+                        .border_color(theme::HAIRLINE)
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(label_stack(
+                            t("Input level"),
+                            Some(t("Say something to test your microphone.")),
+                        ))
+                        .child(div().flex().gap(px(3.0)).items_center().children(bars))
+                        .into_any_element(),
+                ],
+            ))
+            .child(section(
+                t("Language"),
+                vec![
+                    selector_row(
+                        t("Spoken language"),
+                        Some(t("English-only models always transcribe English.")),
+                        selector_control(&self.language_select, t("Spoken language"))
+                            .into_any_element(),
+                        false,
+                    ),
+                    selector_row(
+                        t("Output language"),
+                        Some(t("Translates your notes with your OpenAI or Groq key.")),
+                        selector_control(&self.output_select, t("Output language"))
+                            .into_any_element(),
+                        true,
+                    ),
+                ],
+            ))
+    }
+}

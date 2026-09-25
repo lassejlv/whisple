@@ -1,32 +1,20 @@
 mod app;
-mod apps;
 mod assistant;
 mod audio;
-mod boot_clock;
-mod cloud;
-mod commands;
-#[cfg(target_os = "macos")]
-mod dictation;
-mod hotkey;
 mod i18n;
-mod license;
-mod microphone_permission;
-mod models;
-mod motion;
-mod onboarding;
-mod place;
-mod screen;
+#[cfg(feature = "licensing")]
+mod licensing;
+mod platform;
 mod settings;
-mod settings_window;
 mod startup;
-mod stt;
-mod text;
-mod theme;
-mod tray;
-mod trial_server;
+mod transcription;
 mod ui;
 #[cfg(target_os = "macos")]
 mod updater;
+
+use platform::tray;
+use transcription::cloud;
+use ui::{onboarding, theme};
 
 use std::borrow::Cow;
 
@@ -38,7 +26,6 @@ use gpui_kit::{
 
 struct Assets;
 
-// Lucide icons the panels use beyond the kit's default component bundle.
 gpui_kit::assets::icon_assets!(
     ExtraIcons,
     [
@@ -119,13 +106,11 @@ fn main() {
             if settings::needs_onboarding() {
                 onboarding::open(cx);
             } else {
-                open_hud(cx, !menu_bar);
+                open_hud(cx, !menu_bar || dev_ui_test());
             }
         });
 }
 
-/// Switches the model Vercel AI Gateway transcribes with, saves it, and
-/// redraws every window that names it.
 pub(crate) fn choose_gateway_model(model: cloud::GatewayModel, cx: &mut App) {
     cloud::set_gateway_model(model);
     let mut prefs = settings::load();
@@ -134,7 +119,6 @@ pub(crate) fn choose_gateway_model(model: cloud::GatewayModel, cx: &mut App) {
     cx.refresh_windows();
 }
 
-/// Switches the interface language, saves it, and redraws every window.
 pub(crate) fn set_app_language(lang: i18n::Lang, cx: &mut App) {
     i18n::set(lang);
     let mut prefs = settings::load();
@@ -153,7 +137,11 @@ pub(crate) fn open_hud(cx: &mut App, visible: bool) {
             titlebar: None,
             focus: visible,
             show: visible,
-            kind: WindowKind::PopUp,
+            kind: if dev_ui_test() {
+                WindowKind::Normal
+            } else {
+                WindowKind::PopUp
+            },
             is_movable: false,
             // AppKit only adds the resizable style bit when a titlebar is
             // present, and setContentSize keeps the top-left fixed. The
@@ -186,6 +174,17 @@ pub(crate) fn open_hud(cx: &mut App, visible: bool) {
     .expect("open the voice window");
     if visible {
         cx.activate(true);
+    }
+}
+
+fn dev_ui_test() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        std::env::var_os("WHISPLE_DEV_UI_TEST").is_some()
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        false
     }
 }
 

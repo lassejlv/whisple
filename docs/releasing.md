@@ -2,6 +2,10 @@
 
 Whisple publishes separate Apple silicon and Intel DMGs and ZIP update archives. The app checks the public GitHub releases feed on startup and every six hours. It follows the newest published release with a complete asset for its architecture, including prereleases. Once an update is downloaded and verified, the menu bar offers **Install Whisple v…**. Installing waits for the app to exit, replaces the app bundle, and relaunches it.
 
+Cargo builds and local packages omit licensing by default. The release workflow
+passes `--features licensing` for tests and `--with-licensing` to the package
+script so published binaries retain the paid trial and license flow.
+
 ## Publish a release
 
 1. Set the `Cargo.toml` version and update `Cargo.lock`. Use a semantic prerelease version such as `0.2.0-rc.1` for prereleases.
@@ -20,5 +24,5 @@ For local test images:
 ```sh
 python3 -m venv target/release-tools
 target/release-tools/bin/python -m pip install dmgbuild==1.6.7
-PATH="$PWD/target/release-tools/bin:$PATH" ./scripts/build-macos-dmgs.sh
+PATH="$PWD/target/release-tools/bin:$PATH" ./scripts/build-macos-dmgs.sh --with-licensing
 ```
