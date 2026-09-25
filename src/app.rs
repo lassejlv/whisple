@@ -552,7 +552,16 @@ impl Whisp {
                         if view.last_update_check.elapsed() >= Duration::from_secs(6 * 60 * 60) {
                             view.check_for_updates(cx);
                         }
-                        if view.last_license_check.elapsed() >= Duration::from_secs(6 * 60 * 60) {
+                        // A trial records the time often, so setting the clock
+                        // back between sessions costs the time used, not
+                        // just the time since launch.
+                        let license_interval =
+                            if matches!(view.license_access, Access::Trial { .. }) {
+                                Duration::from_secs(5 * 60)
+                            } else {
+                                Duration::from_secs(6 * 60 * 60)
+                            };
+                        if view.last_license_check.elapsed() >= license_interval {
                             view.refresh_license(cx);
                         }
                         if view.bar_visible {

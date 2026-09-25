@@ -129,7 +129,7 @@ pub fn trial_left(remaining: Duration, compact: bool) -> String {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct SavedTrial {
     started_at: i64,
     last_seen: i64,
@@ -181,6 +181,51 @@ fn use_trial_if_available(trial: &Result<Access, String>, paid_failure: Access) 
     paid_failure
 }
 
+/// The trial as the Keychain and the file copy remember it. Either one alone
+/// keeps the trial going, so deleting one of them does not start a new one:
+/// the earliest start and the latest time seen win.
+fn merge_trials(
+    keychain: Option<SavedTrial>,
+    file: Option<SavedTrial>,
+    checked_at: i64,
+) -> SavedTrial {
+    let records = [keychain, file];
+    let mut known = records.iter().flatten();
+    let Some(first) = known.next() else {
+        return SavedTrial {
+            started_at: checked_at,
+            last_seen: checked_at,
+        };
+    };
+    known.fold(first.clone(), |merged, record| SavedTrial {
+        started_at: merged.started_at.min(record.started_at),
+        last_seen: merged.last_seen.max(record.last_seen),
+    })
+}
+
+/// A second copy of the trial beside the settings, so removing the Keychain
+/// item alone does not reset it.
+fn trial_file() -> Option<std::path::PathBuf> {
+    Some(dirs::config_dir()?.join("whisp").join(".first-run"))
+}
+
+fn read_trial_file() -> Option<SavedTrial> {
+    let raw = std::fs::read_to_string(trial_file()?).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn write_trial_file(record: &SavedTrial) {
+    let Some(path) = trial_file() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(raw) = serde_json::to_string(record) {
+        let _ = std::fs::write(path, raw);
+    }
+}
+
 /// Starts on first launch, independently of any Polar activation. Never delete
 /// this credential when deactivating a paid key.
 pub fn start_trial() -> Result<Access, String> {
@@ -190,25 +235,24 @@ pub fn start_trial() -> Result<Access, String> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, TRIAL_USER)
         .map_err(|err| format!("Could not open the system credential store: {err}"))?;
     let checked_at = now();
-    let (mut record, created) = match entry.get_password() {
-        Ok(raw) => serde_json::from_str::<SavedTrial>(&raw)
-            .map(|record| (record, false))
-            .map_err(|_| "The saved trial could not be read.".to_string())?,
-        Err(keyring::Error::NoEntry) => (
-            SavedTrial {
-                started_at: checked_at,
-                last_seen: checked_at,
-            },
-            true,
+    let keychain = match entry.get_password() {
+        Ok(raw) => Some(
+            serde_json::from_str::<SavedTrial>(&raw)
+                .map_err(|_| "The saved trial could not be read.".to_string())?,
         ),
+        Err(keyring::Error::NoEntry) => None,
         Err(err) => return Err(format!("Could not read the saved trial: {err}")),
     };
+    let file = read_trial_file();
+    let mut record = merge_trials(keychain.clone(), file.clone(), checked_at);
     let access = trial_state(&record, checked_at);
     // Persist the highest observed time, including expiration. A restart or a
     // small clock adjustment cannot create a fresh 72-hour window.
-    let observed = checked_at.max(record.last_seen);
-    if observed != record.last_seen || created {
-        record.last_seen = observed;
+    record.last_seen = checked_at.max(record.last_seen);
+    if file.as_ref() != Some(&record) {
+        write_trial_file(&record);
+    }
+    if keychain.as_ref() != Some(&record) {
         entry
             .set_password(&serde_json::to_string(&record).map_err(|err| err.to_string())?)
             .map_err(|err| format!("Could not save the trial in the credential store: {err}"))?;
@@ -224,6 +268,10 @@ struct SavedLicense {
     /// Last successful online check. Zero disables offline access.
     verified_at: i64,
     expires_at: Option<i64>,
+    /// The latest clock time seen, so offline use cannot be stretched by
+    /// setting the clock back.
+    #[serde(default)]
+    last_seen: i64,
 }
 
 #[derive(Deserialize)]
@@ -368,11 +416,15 @@ fn post_at(
     Err(ApiError::Rejected(status, message.into()))
 }
 
+/// Offline use lasts 72 hours from the last online check, counted on the
+/// latest clock time ever seen, and ends if the clock went back.
 fn offline_access(record: &SavedLicense, checked_at: i64) -> bool {
+    let observed = checked_at.max(record.last_seen);
     record.verified_at > 0
         && checked_at >= record.verified_at
-        && checked_at - record.verified_at <= OFFLINE_GRACE
-        && record.expires_at.is_none_or(|expires| expires > checked_at)
+        && checked_at.saturating_add(CLOCK_TOLERANCE) >= record.last_seen
+        && observed - record.verified_at <= OFFLINE_GRACE
+        && record.expires_at.is_none_or(|expires| expires > observed)
 }
 
 /// Refreshes the saved key. A recent successful check permits short offline use.
@@ -436,6 +488,7 @@ pub fn check_saved() -> Access {
                 display_key: display_key.clone(),
                 verified_at: checked_at,
                 expires_at,
+                last_seen: checked_at.max(record.last_seen),
                 ..record
             };
             match save(&updated) {
@@ -460,13 +513,23 @@ pub fn check_saved() -> Access {
                 reason,
             }
         }
-        Err(ApiError::Unavailable(_reason)) if offline_access(&record, checked_at) => {
-            Access::Offline(record.display_key)
+        Err(ApiError::Unavailable(reason)) => {
+            let allowed = offline_access(&record, checked_at);
+            if checked_at > record.last_seen {
+                let _ = save(&SavedLicense {
+                    last_seen: checked_at,
+                    ..record.clone()
+                });
+            }
+            if allowed {
+                Access::Offline(record.display_key)
+            } else {
+                Access::Unavailable {
+                    display_key: record.display_key,
+                    reason,
+                }
+            }
         }
-        Err(ApiError::Unavailable(reason)) => Access::Unavailable {
-            display_key: record.display_key,
-            reason,
-        },
     };
     use_trial_if_available(&trial, paid)
 }
@@ -516,17 +579,20 @@ pub fn activate(key: &str) -> Result<Access, String> {
                 display_key: activation.license_key.display_key,
                 verified_at: 0,
                 expires_at: None,
+                last_seen: 0,
             };
             let _ = deactivate_record(&client, &failed);
             return Err(reason);
         }
     };
+    let activated_at = now();
     let saved = SavedLicense {
         key: key.to_string(),
         activation_id: activation.id,
         display_key: activation.license_key.display_key,
-        verified_at: now(),
+        verified_at: activated_at,
         expires_at,
+        last_seen: activated_at,
     };
     if let Err(reason) = save(&saved) {
         let _ = deactivate_record(&client, &saved);
@@ -625,12 +691,61 @@ mod tests {
             display_key: "****-ABCD".into(),
             verified_at: 100,
             expires_at: None,
+            last_seen: 0,
         };
         assert!(offline_access(&saved, 100 + OFFLINE_GRACE));
         assert!(!offline_access(&saved, 100 + OFFLINE_GRACE + 1));
         assert!(!offline_access(&saved, 99));
         saved.expires_at = Some(200);
         assert!(!offline_access(&saved, 200));
+    }
+
+    #[test]
+    fn offline_use_cannot_be_stretched_by_setting_the_clock_back() {
+        let mut saved = SavedLicense {
+            key: "key".into(),
+            activation_id: "device".into(),
+            display_key: "****-ABCD".into(),
+            verified_at: 1_000,
+            expires_at: None,
+            last_seen: 1_000 + OFFLINE_GRACE - 10,
+        };
+        assert!(offline_access(&saved, 1_000 + OFFLINE_GRACE - 5));
+        // Back to just after the last online check, far behind the latest
+        // time seen.
+        assert!(!offline_access(&saved, 1_010));
+        // Seen past the grace once, the clock going back does not reopen it.
+        saved.last_seen = 1_000 + OFFLINE_GRACE + 60;
+        assert!(!offline_access(&saved, 1_000 + OFFLINE_GRACE + 30));
+        // Records saved before last_seen existed keep working.
+        saved.last_seen = 0;
+        assert!(offline_access(&saved, 1_010));
+    }
+
+    #[test]
+    fn a_trial_survives_losing_one_of_its_two_copies() {
+        let started = SavedTrial {
+            started_at: 1_000,
+            last_seen: 5_000,
+        };
+        let fresh = SavedTrial {
+            started_at: 9_000,
+            last_seen: 9_000,
+        };
+        // Keychain item deleted: the file copy keeps the original start.
+        assert_eq!(merge_trials(None, Some(started.clone()), 9_000), started);
+        // File deleted: the Keychain copy does.
+        assert_eq!(merge_trials(Some(started.clone()), None, 9_000), started);
+        // A copy replaced with a later start cannot move the start forward.
+        assert_eq!(
+            merge_trials(Some(fresh.clone()), Some(started.clone()), 9_000),
+            SavedTrial {
+                started_at: 1_000,
+                last_seen: 9_000,
+            }
+        );
+        // Only with neither copy does a trial begin now.
+        assert_eq!(merge_trials(None, None, 9_000), fresh);
     }
 
     #[test]
