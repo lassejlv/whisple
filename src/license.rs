@@ -12,6 +12,8 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::i18n::tf;
+
 pub const CHECKOUT_URL: &str =
     "https://buy.polar.sh/polar_cl_jvWJVAZBAHpctw43ZsWUNlIfBCYx0f6jizX8x4Hoqud";
 pub const CUSTOMER_PORTAL_URL: &str = "https://polar.sh/whisple/portal";
@@ -95,16 +97,35 @@ pub fn trial_left(remaining: Duration, compact: bool) -> String {
     let days = total_minutes / (24 * 60);
     let hours = total_minutes % (24 * 60) / 60;
     let minutes = total_minutes % 60;
-    let plural =
-        |count: u64, unit: &str| format!("{count} {unit}{}", if count == 1 { "" } else { "s" });
+    let day_count = || {
+        if days == 1 {
+            tf("{} day", &[&days])
+        } else {
+            tf("{} days", &[&days])
+        }
+    };
+    let hour_count = || {
+        if hours == 1 {
+            tf("{} hour", &[&hours])
+        } else {
+            tf("{} hours", &[&hours])
+        }
+    };
+    let minute_count = || {
+        if minutes == 1 {
+            tf("{} minute", &[&minutes])
+        } else {
+            tf("{} minutes", &[&minutes])
+        }
+    };
     match (compact, days, hours) {
-        (true, 1.., _) => format!("{days}d {hours}h"),
-        (true, 0, 1..) => format!("{hours}h"),
-        (true, 0, 0) => format!("{minutes}m"),
-        (false, 1.., 0) => format!("{} left", plural(days, "day")),
-        (false, 1.., _) => format!("{} {} left", plural(days, "day"), plural(hours, "hour")),
-        (false, 0, 1..) => format!("{hours}h {minutes}m left"),
-        (false, 0, 0) => format!("{} left", plural(minutes, "minute")),
+        (true, 1.., _) => tf("{}d {}h", &[&days, &hours]),
+        (true, 0, 1..) => tf("{}h", &[&hours]),
+        (true, 0, 0) => tf("{}m", &[&minutes]),
+        (false, 1.., 0) => tf("{} left", &[&day_count()]),
+        (false, 1.., _) => tf("{} {} left", &[&day_count(), &hour_count()]),
+        (false, 0, 1..) => tf("{}h {}m left", &[&hours, &minutes]),
+        (false, 0, 0) => tf("{} left", &[&minute_count()]),
     }
 }
 

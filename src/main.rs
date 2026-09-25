@@ -7,6 +7,7 @@ mod commands;
 #[cfg(target_os = "macos")]
 mod dictation;
 mod hotkey;
+mod i18n;
 mod license;
 mod microphone_permission;
 mod models;
@@ -38,7 +39,20 @@ struct Assets;
 // Lucide icons the panels use beyond the kit's default component bundle.
 gpui_kit::assets::icon_assets!(
     ExtraIcons,
-    [Check, Copy, Cpu, Info, KeyRound, Mic, SlidersHorizontal, X,]
+    [
+        AppWindow,
+        Check,
+        Copy,
+        Cpu,
+        Info,
+        KeyRound,
+        Keyboard,
+        Mic,
+        ScanEye,
+        ShieldCheck,
+        SlidersHorizontal,
+        X,
+    ]
 );
 
 impl AssetSource for Assets {
@@ -89,6 +103,7 @@ fn main() {
     gpui_kit::application()
         .with_assets(Assets)
         .run(|cx: &mut App| {
+            i18n::set(i18n::resolve(&settings::load().app_language));
             gpui_kit::init(cx);
             theme::install(cx);
             app::bind_keys(cx);
@@ -99,6 +114,16 @@ fn main() {
                 open_hud(cx, !menu_bar);
             }
         });
+}
+
+/// Switches the interface language, saves it, and redraws every window.
+pub(crate) fn set_app_language(lang: i18n::Lang, cx: &mut App) {
+    i18n::set(lang);
+    let mut prefs = settings::load();
+    prefs.app_language = lang.code().to_string();
+    settings::save(&prefs);
+    tray::relabel(cx);
+    cx.refresh_windows();
 }
 
 pub(crate) fn open_hud(cx: &mut App, visible: bool) {

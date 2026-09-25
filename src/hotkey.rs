@@ -1,18 +1,63 @@
-//! The shortcut that shows the bar.
+//! The global shortcuts: one shows the bar, one opens it and starts
+//! recording straight away.
 //!
 //! Native macOS hotkeys and passive X grabs listen while the panel is hidden.
-//! Recording a new shortcut pauses the registration so settings receives it.
+//! Recording a new shortcut pauses the registrations so settings receives it.
 
 use gpui_kit::{Keystroke, Modifiers};
 
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub use macos::{install, set_paused, take_press};
+pub use macos::{install, set_paused, take_presses};
 #[cfg(not(target_os = "macos"))]
 mod x11;
 #[cfg(not(target_os = "macos"))]
-pub use x11::{install, set_paused, take_press};
+pub use x11::{install, set_paused, take_presses};
+
+/// Which global shortcut a chord belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shortcut {
+    /// Shows or hides the bar.
+    Show,
+    /// Shows the bar and starts recording, or stops a running recording.
+    Record,
+}
+
+impl Shortcut {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub const ALL: [Self; 2] = [Self::Show, Self::Record];
+
+    pub fn index(self) -> usize {
+        match self {
+            Self::Show => 0,
+            Self::Record => 1,
+        }
+    }
+}
+
+/// The shortcuts pressed since the last check.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Presses {
+    pub show: bool,
+    pub record: bool,
+}
+
+impl Presses {
+    pub fn any(self) -> bool {
+        self.show || self.record
+    }
+
+    /// Two presses before the app looks cancel out, like a quick double tap
+    /// on a toggle.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn flip(&mut self, shortcut: Shortcut) {
+        match shortcut {
+            Shortcut::Show => self.show = !self.show,
+            Shortcut::Record => self.record = !self.record,
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Chord {
@@ -178,6 +223,15 @@ mod tests {
     fn a_bare_letter_is_not_a_global_shortcut() {
         let chord = parse("a").unwrap();
         assert!(!chord.has_modifier());
+    }
+
+    #[test]
+    fn repeated_presses_cancel_out() {
+        let mut presses = Presses::default();
+        presses.flip(Shortcut::Record);
+        assert!(presses.record && presses.any());
+        presses.flip(Shortcut::Record);
+        assert!(!presses.any());
     }
 
     #[test]

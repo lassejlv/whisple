@@ -1,6 +1,7 @@
-//! About: version, updates, and links.
+//! About: version, updates, setting up again, and links.
 use gpui_kit::{div, prelude::*, px, Context, Div, FontWeight, IntoElement, Styled};
 
+use crate::i18n::{t, tf};
 use crate::settings_window::widgets::*;
 use crate::settings_window::{SettingsWindow, RELEASES_URL};
 use crate::theme;
@@ -21,9 +22,9 @@ impl SettingsWindow {
             .child(label_stack(
                 &update_summary,
                 Some(if ready {
-                    "Whisple restarts in a few seconds after installing."
+                    t("Whisple restarts in a few seconds after installing.")
                 } else {
-                    "Updates are checked against GitHub releases."
+                    t("Updates are checked against GitHub releases.")
                 }),
             ))
             .child(
@@ -31,9 +32,9 @@ impl SettingsWindow {
                     .id("settings-update-action")
                     .role(gpui_kit::Role::Button)
                     .aria_label(if ready {
-                        "Install and restart"
+                        t("Install and restart")
                     } else {
-                        "Check for updates"
+                        t("Check for updates")
                     })
                     .h(px(28.0))
                     .px(px(12.0))
@@ -55,17 +56,17 @@ impl SettingsWindow {
                         })
                     }))
                     .child(if ready {
-                        "Install & restart"
+                        t("Install & restart")
                     } else {
-                        "Check now"
+                        t("Check now")
                     }),
             )
             .into_any_element()];
         if ready {
             update_rows.push(link_row(
                 "settings-release-notes",
-                "What’s new",
-                "Release notes on GitHub ↗",
+                t("What’s new"),
+                t("Release notes on GitHub ↗"),
                 RELEASES_URL,
                 true,
                 cx,
@@ -110,19 +111,53 @@ impl SettingsWindow {
                         div()
                             .text_size(px(12.0))
                             .text_color(theme::SECONDARY)
-                            .child(format!(
+                            .child(tf(
                                 "Version {} · Local-first voice dictation",
-                                env!("CARGO_PKG_VERSION")
+                                &[&env!("CARGO_PKG_VERSION")],
                             )),
                     ),
             )
-            .child(section("Updates", update_rows))
+            .child(section(t("Updates"), update_rows))
             .child(section(
-                "More",
+                t("Setup"),
+                vec![div()
+                    .h(px(58.0))
+                    .px(px(16.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.0))
+                    .child(label_stack(
+                        t("Set up Whisple again"),
+                        Some(t("Walk through the features, microphone and model steps.")),
+                    ))
+                    .child(
+                        div()
+                            .id("settings-restart-onboarding")
+                            .role(gpui_kit::Role::Button)
+                            .aria_label(t("Restart onboarding"))
+                            .h(px(28.0))
+                            .px(px(12.0))
+                            .rounded(px(8.0))
+                            .bg(theme::RAISED)
+                            .flex()
+                            .items_center()
+                            .text_size(px(12.0))
+                            .text_color(theme::LABEL)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.hud.update(cx, |hud, cx| hud.restart_onboarding(cx))
+                            }))
+                            .child(t("Restart onboarding")),
+                    )
+                    .into_any_element()],
+            ))
+            .child(section(
+                t("More"),
                 vec![
                     link_row(
                         "settings-website",
-                        "Website",
+                        t("Website"),
                         "whisple.app ↗",
                         "https://whisple.app",
                         false,
@@ -130,7 +165,7 @@ impl SettingsWindow {
                     ),
                     link_row(
                         "settings-source",
-                        "Source code",
+                        t("Source code"),
                         "GitHub ↗",
                         "https://github.com/lassejlv/whisple",
                         true,
@@ -138,7 +173,7 @@ impl SettingsWindow {
                     ),
                     link_row(
                         "settings-acknowledgements",
-                        "Acknowledgements",
+                        t("Acknowledgements"),
                         "whisper.cpp, GPUI ›",
                         "https://github.com/ggerganov/whisper.cpp",
                         true,
@@ -151,7 +186,7 @@ impl SettingsWindow {
                     .pl(px(4.0))
                     .text_size(px(11.0))
                     .text_color(theme::TERTIARY)
-                    .child("MIT licensed · Made with GPUI"),
+                    .child(t("MIT licensed · Made with GPUI")),
             )
     }
 }

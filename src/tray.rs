@@ -27,6 +27,8 @@ mod macos {
     use cocoa::appkit::{NSApplication, NSApplicationActivationPolicy};
     use cocoa::base::nil;
     use gpui_kit::Global;
+
+    use crate::i18n::{t, tf};
     use tray_icon::{
         menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
         Icon, TrayIcon, TrayIconBuilder,
@@ -34,19 +36,45 @@ mod macos {
 
     struct MenuBar {
         _icon: TrayIcon,
+        show: MenuItem,
         hide: MenuItem,
+        settings: MenuItem,
         update: MenuItem,
+        quit: MenuItem,
+        /// The last update state, so the item can be relabelled.
+        update_label: UpdateLabel,
+    }
+
+    #[derive(Clone)]
+    enum UpdateLabel {
+        Check,
+        Checking,
+        Available(String),
+        UpToDate,
+        Error,
+    }
+
+    impl UpdateLabel {
+        fn text(&self) -> String {
+            match self {
+                Self::Check => t("Check for Updates…").to_string(),
+                Self::Checking => t("Checking for Updates…").to_string(),
+                Self::Available(version) => tf("Whisple v{} Ready…", &[version]),
+                Self::UpToDate => t("Whisple is Up to Date").to_string(),
+                Self::Error => t("Update Check Failed — Retry").to_string(),
+            }
+        }
     }
 
     impl Global for MenuBar {}
 
     pub fn install(cx: &mut App) -> Result<(), String> {
         let menu = Menu::new();
-        let show = MenuItem::with_id("show", "Show Whisple", true, None);
-        let hide = MenuItem::with_id("hide", "Hide Whisple", false, None);
-        let settings = MenuItem::with_id("settings", "Settings…", true, None);
-        let update = MenuItem::with_id("update", "Check for Updates…", true, None);
-        let quit = MenuItem::with_id("quit", "Quit Whisple", true, None);
+        let show = MenuItem::with_id("show", t("Show Whisple"), true, None);
+        let hide = MenuItem::with_id("hide", t("Hide Whisple"), false, None);
+        let settings = MenuItem::with_id("settings", t("Settings…"), true, None);
+        let update = MenuItem::with_id("update", UpdateLabel::Check.text(), true, None);
+        let quit = MenuItem::with_id("quit", t("Quit Whisple"), true, None);
         menu.append_items(&[
             &show,
             &hide,
@@ -74,8 +102,12 @@ mod macos {
         }
         cx.set_global(MenuBar {
             _icon: icon,
+            show,
             hide,
+            settings,
             update,
+            quit,
+            update_label: UpdateLabel::Check,
         });
         Ok(())
     }
@@ -109,16 +141,29 @@ mod macos {
         Ok(())
     }
 
-    pub fn set_update(status: UpdateStatus<'_>, cx: &App) {
+    /// Puts the menu in the current interface language.
+    pub fn relabel(cx: &App) {
         if let Some(menu) = cx.try_global::<MenuBar>() {
-            let update_ready = matches!(status, UpdateStatus::Available(_));
+            menu.show.set_text(t("Show Whisple"));
+            menu.hide.set_text(t("Hide Whisple"));
+            menu.settings.set_text(t("Settings…"));
+            menu.update.set_text(menu.update_label.text());
+            menu.quit.set_text(t("Quit Whisple"));
+        }
+    }
+
+    pub fn set_update(status: UpdateStatus<'_>, cx: &mut App) {
+        if cx.try_global::<MenuBar>().is_some() {
             let label = match status {
-                UpdateStatus::Checking => "Checking for Updates…".to_string(),
-                UpdateStatus::Available(version) => format!("Whisple v{version} Ready…"),
-                UpdateStatus::UpToDate => "Whisple is Up to Date".to_string(),
-                UpdateStatus::Error => "Update Check Failed — Retry".to_string(),
+                UpdateStatus::Checking => UpdateLabel::Checking,
+                UpdateStatus::Available(version) => UpdateLabel::Available(version.to_string()),
+                UpdateStatus::UpToDate => UpdateLabel::UpToDate,
+                UpdateStatus::Error => UpdateLabel::Error,
             };
-            menu.update.set_text(label);
+            cx.global_mut::<MenuBar>().update_label = label;
+            let menu = cx.global::<MenuBar>();
+            let update_ready = matches!(status, UpdateStatus::Available(_));
+            menu.update.set_text(menu.update_label.text());
             menu.update
                 .set_enabled(!matches!(status, UpdateStatus::Checking));
             if let Err(err) = menu._icon.set_icon(Some(waveform_icon(update_ready))) {
@@ -193,6 +238,14 @@ pub fn set_icon_visible(visible: bool, cx: &App) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn set_update(status: UpdateStatus<'_>, cx: &App) {
+pub fn set_update(status: UpdateStatus<'_>, cx: &mut App) {
     macos::set_update(status, cx);
+}
+
+/// Puts the menu bar menu in the current interface language.
+pub fn relabel(cx: &App) {
+    #[cfg(target_os = "macos")]
+    macos::relabel(cx);
+    #[cfg(not(target_os = "macos"))]
+    let _ = cx;
 }

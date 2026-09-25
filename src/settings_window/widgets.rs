@@ -4,31 +4,15 @@ use gpui_kit::component::select::{SearchableVec, Select, SelectState};
 use gpui_kit::component::{Icon, Sizable};
 use gpui_kit::{
     div, prelude::*, px, Animation, AnimationExt, AnyElement, Context, Div, Entity, FontWeight,
-    IntoElement, SharedString, Stateful, Styled, Window,
+    IntoElement, SharedString, Stateful, Styled,
 };
 
 use super::{Choice, SettingsWindow};
 use crate::cloud::Provider;
 use crate::hotkey;
+use crate::i18n::t;
 use crate::motion;
 use crate::theme;
-
-pub(super) fn traffic_light(
-    color: u32,
-    label: &'static str,
-    cx: &mut Context<SettingsWindow>,
-    action: impl Fn(&mut SettingsWindow, &mut Window, &mut Context<SettingsWindow>) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(SharedString::from(label))
-        .role(gpui_kit::Role::Button)
-        .aria_label(label)
-        .size(px(12.0))
-        .rounded_full()
-        .bg(gpui_kit::rgba(color))
-        .cursor_pointer()
-        .on_click(cx.listener(move |view, _, window, cx| action(view, window, cx)))
-}
 
 pub(super) fn section(title: &'static str, rows: Vec<AnyElement>) -> Div {
     labeled_section(section_label(title), rows)
@@ -262,7 +246,14 @@ pub(super) fn shortcut_control(shortcut: &str, capturing: bool) -> AnyElement {
         div()
             .text_size(px(12.0))
             .text_color(theme::AMBER)
-            .child("Press shortcut…")
+            .child(t("Press shortcut…"))
+            .into_any_element()
+    } else if shortcut.is_empty() {
+        div()
+            .px(px(6.0))
+            .text_size(px(12.0))
+            .text_color(theme::TERTIARY)
+            .child(t("Not set"))
             .into_any_element()
     } else {
         div()
@@ -303,7 +294,7 @@ pub(super) fn shortcut_control(shortcut: &str, capturing: bool) -> AnyElement {
                 .text_size(px(12.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme::AMBER)
-                .child("Change"),
+                .child(t("Change")),
         )
         .into_any_element()
 }

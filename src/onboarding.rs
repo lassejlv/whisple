@@ -1,9 +1,11 @@
-//! First-run setup, translated from Whisple's four Paper onboarding frames.
+//! First-run setup: welcome, what Whisple can do, the microphone, a voice
+//! model, and a first try. Settings › About can open it again.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::input::{Input, InputContentType, InputEvent, InputState};
 use gpui_kit::component::Root;
 use gpui_kit::component::{Icon, Sizable};
@@ -15,6 +17,7 @@ use gpui_kit::{
 
 use crate::cloud::{self, Provider};
 use crate::hotkey;
+use crate::i18n::{self, t, tf, Lang};
 use crate::license;
 use crate::microphone_permission;
 use crate::models::{self, ModelSpec};
@@ -25,23 +28,65 @@ use crate::tray;
 const WIDTH: f32 = 720.0;
 const HEIGHT: f32 = 540.0;
 
+const WELCOME: usize = 0;
+const FEATURES: usize = 1;
+const MICROPHONE: usize = 2;
+const MODEL: usize = 3;
+const TRY_IT: usize = 4;
+const STEPS: usize = 5;
+
 struct Download {
     received: Arc<AtomicU64>,
     total: u64,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ModelSource {
-    OnDevice,
-    Cloud,
+/// A voice model to start with: one of the local downloads or a cloud
+/// provider. Onboarding lists them all together.
+#[derive(Clone, Copy)]
+enum Choice {
+    Local(&'static ModelSpec),
+    Cloud(Provider),
+}
+
+impl Choice {
+    /// Every choice: the recommended download, the other downloads from
+    /// smallest to largest, then the cloud providers.
+    fn all() -> Vec<Self> {
+        let mut local: Vec<&'static ModelSpec> = models::CATALOG.iter().collect();
+        local.sort_by_key(|spec| (!spec.recommended, spec.bytes));
+        local
+            .into_iter()
+            .map(Self::Local)
+            .chain(Provider::ALL.map(Self::Cloud))
+            .collect()
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Local(spec) => spec.id,
+            Self::Cloud(provider) => provider.id(),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Local(spec) => t(spec.name),
+            Self::Cloud(provider) => provider.name(),
+        }
+    }
+
+    fn chip(self) -> &'static str {
+        match self {
+            Self::Local(spec) => spec.chip,
+            Self::Cloud(provider) => provider.name(),
+        }
+    }
 }
 
 pub(crate) struct Onboarding {
     focus_handle: FocusHandle,
     step: usize,
-    selected: &'static ModelSpec,
-    source: ModelSource,
-    cloud_provider: Provider,
+    choice: Choice,
     cloud_config: Option<Provider>,
     key_input: Option<Entity<InputState>>,
     key_visible: bool,
@@ -113,10 +158,12 @@ pub(crate) fn open(cx: &mut App) {
 impl Onboarding {
     fn new(window: &Window, cx: &mut Context<Self>) -> Self {
         let prefs = settings::load();
-        let saved_cloud = Provider::from_id(&prefs.selected);
-        let selected = models::spec(&prefs.selected)
-            .filter(|spec| ["preview", "turbo-q5", "turbo-q8"].contains(&spec.id))
-            .unwrap_or_else(|| models::spec(models::recommended_id()).unwrap());
+        let choice = Provider::from_id(&prefs.selected)
+            .map(Choice::Cloud)
+            .or_else(|| models::spec(&prefs.selected).map(Choice::Local))
+            .unwrap_or_else(|| {
+                Choice::Local(models::spec(models::recommended_id()).expect("recommended model"))
+            });
         let handle = window.window_handle();
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
@@ -128,7 +175,7 @@ impl Onboarding {
                         if view.download.is_some() {
                             cx.notify();
                         }
-                        if hotkey::take_press() {
+                        if hotkey::take_presses().any() {
                             window.activate_window();
                             cx.activate(true);
                         }
@@ -155,14 +202,8 @@ impl Onboarding {
         .detach();
         Self {
             focus_handle: cx.focus_handle(),
-            step: 0,
-            selected,
-            source: if saved_cloud.is_some() {
-                ModelSource::Cloud
-            } else {
-                ModelSource::OnDevice
-            },
-            cloud_provider: saved_cloud.unwrap_or(Provider::OpenAi),
+            step: WELCOME,
+            choice,
             cloud_config: None,
             key_input: None,
             key_visible: false,
@@ -189,13 +230,16 @@ impl Onboarding {
 
     fn next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.step {
-            0 => self.step = 1,
-            1 if self.microphone_allowed => self.step = 2,
-            1 => self.request_microphone(cx),
-            2 if self.cloud_config.is_some() => self.save_cloud_key(window, cx),
-            2 if self.source == ModelSource::Cloud => self.prepare_cloud(window, cx),
-            2 => self.prepare_model(cx),
-            3 => self.finish(window, cx),
+            WELCOME => self.step = FEATURES,
+            FEATURES => self.step = MICROPHONE,
+            MICROPHONE if self.microphone_allowed => self.step = MODEL,
+            MICROPHONE => self.request_microphone(cx),
+            MODEL if self.cloud_config.is_some() => self.save_cloud_key(window, cx),
+            MODEL => match self.choice {
+                Choice::Cloud(provider) => self.prepare_cloud(provider, window, cx),
+                Choice::Local(spec) => self.prepare_model(spec, cx),
+            },
+            TRY_IT => self.finish(window, cx),
             _ => {}
         }
         cx.notify();
@@ -217,10 +261,10 @@ impl Onboarding {
                 match result {
                     Ok(()) => {
                         view.microphone_allowed = true;
-                        view.step = 2;
+                        view.step = MODEL;
                     }
                     Err(err) => {
-                        view.error = Some(format!("Microphone access is unavailable: {err}"))
+                        view.error = Some(tf("Microphone access is unavailable: {}", &[&err]))
                     }
                 }
                 cx.notify();
@@ -230,14 +274,13 @@ impl Onboarding {
         .detach();
     }
 
-    fn prepare_model(&mut self, cx: &mut Context<Self>) {
+    fn prepare_model(&mut self, spec: &'static ModelSpec, cx: &mut Context<Self>) {
         if self.download.is_some() {
             return;
         }
-        let spec = self.selected;
         if models::is_downloaded(spec) {
             models::save_selected(spec.id);
-            self.step = 3;
+            self.step = TRY_IT;
             self.error = None;
             return;
         }
@@ -258,7 +301,7 @@ impl Onboarding {
                 match result {
                     Ok(_) => {
                         models::save_selected(spec.id);
-                        view.step = 3;
+                        view.step = TRY_IT;
                     }
                     Err(err) => view.error = Some(err),
                 }
@@ -269,12 +312,11 @@ impl Onboarding {
         .detach();
     }
 
-    fn prepare_cloud(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let provider = self.cloud_provider;
+    fn prepare_cloud(&mut self, provider: Provider, window: &mut Window, cx: &mut Context<Self>) {
         match cloud::has_key(provider) {
             Ok(true) => {
                 models::save_selected(provider.id());
-                self.step = 3;
+                self.step = TRY_IT;
                 self.error = None;
             }
             Ok(false) => {
@@ -283,7 +325,7 @@ impl Onboarding {
                 self.key_visible = false;
                 let input = cx.new(|cx| {
                     InputState::new(window, cx)
-                        .placeholder("Paste API key")
+                        .placeholder(t("Paste API key"))
                         .masked(true)
                 });
                 cx.subscribe(&input, |_, _, _: &InputEvent, cx| cx.notify())
@@ -311,37 +353,20 @@ impl Onboarding {
                 self.key_input = None;
                 self.key_visible = false;
                 window.focus(&self.focus_handle, cx);
-                self.step = 3;
+                self.step = TRY_IT;
                 self.error = None;
             }
             Err(err) => self.error = Some(err),
         }
     }
 
-    fn selected_id(&self) -> &'static str {
-        match self.source {
-            ModelSource::OnDevice => self.selected.id,
-            ModelSource::Cloud => self.cloud_provider.id(),
-        }
-    }
-
-    fn selected_name(&self) -> &'static str {
-        match self.source {
-            ModelSource::OnDevice => self.selected.name,
-            ModelSource::Cloud => self.cloud_provider.name(),
-        }
-    }
-
-    fn selected_chip(&self) -> &'static str {
-        match self.source {
-            ModelSource::OnDevice => self.selected.chip,
-            ModelSource::Cloud => self.cloud_provider.name(),
-        }
-    }
-
     fn finish(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut prefs = settings::load();
-        prefs.selected = self.selected_id().to_string();
+        prefs.selected = self.choice.id().to_string();
+        // Keep the detected language once the user has seen it.
+        if prefs.app_language.is_empty() {
+            prefs.app_language = i18n::current().code().to_string();
+        }
         prefs.onboarding_complete = true;
         settings::save(&prefs);
         crate::open_hud(cx, true);
@@ -350,10 +375,11 @@ impl Onboarding {
 
     fn content(&self, cx: &mut Context<Self>) -> Div {
         let inner = match self.step {
-            0 => self.welcome().into_any_element(),
-            1 => self.microphone().into_any_element(),
-            2 if self.cloud_config.is_some() => self.cloud_key_panel(cx).into_any_element(),
-            2 => self.model_choice(cx).into_any_element(),
+            WELCOME => self.welcome(cx).into_any_element(),
+            FEATURES => self.features().into_any_element(),
+            MICROPHONE => self.microphone().into_any_element(),
+            MODEL if self.cloud_config.is_some() => self.cloud_key_panel(cx).into_any_element(),
+            MODEL => self.model_choice(cx).into_any_element(),
             _ => self.try_it().into_any_element(),
         };
         div()
@@ -367,7 +393,7 @@ impl Onboarding {
             .child(inner)
     }
 
-    fn welcome(&self) -> Div {
+    fn welcome(&self, cx: &mut Context<Self>) -> Div {
         let bars = [15.0, 30.0, 40.0, 24.0, 12.0];
         div()
             .flex()
@@ -406,41 +432,23 @@ impl Onboarding {
                     .flex_col()
                     .items_center()
                     .gap(px(12.0))
-                    .child(heading("Welcome to Whisple", 34.0))
+                    .child(heading(t("Welcome to Whisple"), 34.0))
                     .child(description(
-                        "A voice bar for your whole Mac. Three quick steps and you’re talking instead of typing.",
+                        t("A voice bar for your whole computer. A few quick steps and you’re talking instead of typing."),
                         420.0,
                         16.0,
                     )),
             )
-            .child(
-                div()
-                    .h(px(28.0))
-                    .px(px(12.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .rounded_full()
-                    .bg(theme::INSET)
-                    .shadow(vec![theme::inner_ring(theme::HAIRLINE)])
-                    .child(div().size(px(6.0)).rounded_full().bg(theme::AMBER))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme::SECONDARY)
-                            .child("On-device or cloud · your choice"),
-                    ),
-            )
+            .child(language_picker(cx))
     }
 
     fn microphone(&self) -> Div {
         let status = if self.microphone_allowed {
-            "Allowed"
+            t("Allowed")
         } else if self.requesting_microphone {
-            "Waiting for macOS"
+            t("Waiting for macOS")
         } else {
-            "Not allowed yet"
+            t("Not allowed yet")
         };
         div()
             .w_full()
@@ -471,9 +479,9 @@ impl Onboarding {
                     .flex_col()
                     .items_center()
                     .gap(px(12.0))
-                    .child(heading("Let Whisple hear you", 30.0))
+                    .child(heading(t("Let Whisple hear you"), 30.0))
                     .child(description(
-                        "macOS will ask for microphone access. Whisple only listens while recording. With a local model, audio stays on your Mac.",
+                        t("macOS will ask for microphone access. Whisple only listens while recording. With a local model, audio stays on your Mac."),
                         440.0,
                         15.0,
                     )),
@@ -514,7 +522,7 @@ impl Onboarding {
                                     .text_size(px(14.0))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme::LABEL)
-                                    .child("Microphone"),
+                                    .child(t("Microphone")),
                             )
                             .child(
                                 div()
@@ -544,7 +552,7 @@ impl Onboarding {
                             .items_center()
                             .text_size(px(12.0))
                             .text_color(theme::TERTIARY)
-                            .child("You can change this later in System Settings › Privacy & Security."),
+                            .child(t("You can change this later in System Settings › Privacy & Security.")),
                     ),
             )
             .when_some(self.error.as_ref(), |this, error| {
@@ -559,192 +567,225 @@ impl Onboarding {
             })
     }
 
-    fn model_choice(&self, cx: &mut Context<Self>) -> Div {
+    fn features(&self) -> Div {
+        let shortcut = hotkey::symbols(&record_shortcut());
+        #[cfg(target_os = "macos")]
+        let dictate = tf(
+            "Press {} to start talking and again to finish. Your words are typed into the app you were using.",
+            &[&shortcut],
+        );
+        #[cfg(not(target_os = "macos"))]
+        let dictate = tf(
+            "Press {} to start talking and again to finish. Your words are copied, ready to paste.",
+            &[&shortcut],
+        );
+        let rows = [
+            (Lucide::Keyboard, t("Dictate anywhere"), dictate),
+            (
+                Lucide::AppWindow,
+                t("Open apps by voice"),
+                t("Say “Open Spotify” or “Go to github.com” and Whisple opens it.").to_string(),
+            ),
+            (
+                Lucide::ScanEye,
+                t("Ask about your screen"),
+                t("Start with “Hey Whisple” to ask about what you see, or have it write a reply for you. Uses your OpenAI or Groq key.").to_string(),
+            ),
+            (
+                Lucide::ShieldCheck,
+                t("Private by default"),
+                t("On-device models keep your voice on this computer. Cloud models are optional.")
+                    .to_string(),
+            ),
+        ];
         div()
             .w_full()
             .flex()
             .flex_col()
             .items_center()
-            .gap(px(18.0))
+            .gap(px(22.0))
             .pb(px(8.0))
+            .child(heading(t("What Whisple can do"), 30.0))
+            .child(
+                div()
+                    .w(px(520.0))
+                    .flex()
+                    .flex_col()
+                    .rounded(px(12.0))
+                    .overflow_hidden()
+                    .bg(theme::INSET)
+                    .children(rows.into_iter().enumerate().map(
+                        |(index, (icon, title, detail))| {
+                            div()
+                                .px(px(16.0))
+                                .py(px(13.0))
+                                .flex()
+                                .items_start()
+                                .gap(px(14.0))
+                                .when(index > 0, |row| {
+                                    row.border_t_1().border_color(theme::HAIRLINE)
+                                })
+                                .child(
+                                    div()
+                                        .size(px(32.0))
+                                        .flex_shrink_0()
+                                        .rounded(px(9.0))
+                                        .bg(theme::AMBER_SOFT)
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(
+                                            Icon::new(icon)
+                                                .text_color(theme::AMBER)
+                                                .with_size(px(16.0)),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(2.0))
+                                        .child(
+                                            div()
+                                                .text_size(px(14.0))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(theme::LABEL)
+                                                .child(title),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(12.0))
+                                                .line_height(px(17.0))
+                                                .text_color(theme::SECONDARY)
+                                                .child(detail),
+                                        ),
+                                )
+                        },
+                    )),
+            )
+    }
+
+    fn model_choice(&self, cx: &mut Context<Self>) -> Div {
+        let choices = Choice::all();
+        let last = choices.len() - 1;
+        let detail = match self.choice {
+            Choice::Local(spec) => tf("{} · Runs on this computer", &[&t(spec.blurb)]),
+            Choice::Cloud(provider) => {
+                tf("{} · Uses your own API key", &[&t(provider.description())])
+            }
+        };
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(14.0))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .items_center()
-                    .gap(px(8.0))
-                    .child(heading("Pick a voice model", 30.0))
-                    .child(description(if self.source == ModelSource::OnDevice {
-                        "It downloads once and runs entirely on your Mac. Switch models any time from the bar."
-                    } else {
-                        "Use an online model with your own API key. No model download needed."
-                    }, 440.0, 15.0)),
+                    .gap(px(6.0))
+                    .child(heading(t("Pick a voice model"), 30.0))
+                    .child(description(
+                        t("You can switch any time from the bar."),
+                        440.0,
+                        14.0,
+                    )),
             )
-            .child(self.model_source_switch(cx))
             .child(
                 div()
-                    .w_full()
+                    .w(px(440.0))
                     .flex()
-                    .gap(px(12.0))
-                    .justify_center()
-                    .when(self.source == ModelSource::OnDevice, |this| {
-                        this.children(
-                            ["preview", "turbo-q5", "turbo-q8"]
-                                .into_iter()
-                                .filter_map(models::spec)
-                                .map(|spec| self.model_card(spec, cx)),
-                        )
-                    })
-                    .when(self.source == ModelSource::Cloud, |this| {
-                        this.children(Provider::ALL.map(|provider| self.cloud_card(provider, cx)))
-                    }),
-            )
-            .child(
-                div()
-                    .h(px(18.0))
-                    .text_size(px(12.0))
-                    .text_color(theme::TERTIARY)
-                    .child(if self.source == ModelSource::OnDevice {
-                        "More models are in Settings › Models, from 142 MB to 1.5 GB."
-                    } else {
-                        "Recordings are sent to the selected provider. Provider charges may apply."
-                    }),
-            )
-            .when_some(self.error.as_ref(), |this, error| {
-                this.child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(theme::RED)
-                        .child(error.clone()),
-                )
-            })
-    }
-
-    fn model_source_switch(&self, cx: &mut Context<Self>) -> Div {
-        div()
-            .h(px(34.0))
-            .p(px(3.0))
-            .flex()
-            .gap(px(3.0))
-            .rounded_full()
-            .bg(theme::INSET)
-            .children(
-                [
-                    (ModelSource::OnDevice, "On device"),
-                    (ModelSource::Cloud, "Cloud"),
-                ]
-                .map(|(source, label)| {
-                    div()
-                        .id(SharedString::from(format!("onboarding-source-{label}")))
-                        .h_full()
-                        .px(px(18.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_full()
-                        .bg(if self.source == source {
-                            theme::RAISED
-                        } else {
-                            theme::INSET
-                        })
-                        .text_size(px(12.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(if self.source == source {
-                            theme::LABEL
-                        } else {
-                            theme::SECONDARY
-                        })
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |view, _, _, cx| {
-                            view.source = source;
-                            view.error = None;
-                            cx.notify();
-                        }))
-                        .child(label)
-                }),
-            )
-    }
-
-    fn cloud_card(&self, provider: Provider, cx: &mut Context<Self>) -> impl IntoElement {
-        let selected = self.cloud_provider == provider;
-        div()
-            .id(SharedString::from(format!(
-                "onboarding-cloud-{}",
-                provider.id()
-            )))
-            .w(px(250.0))
-            .h(px(168.0))
-            .p(px(18.0))
-            .flex()
-            .flex_col()
-            .gap(px(7.0))
-            .rounded(px(14.0))
-            .bg(if selected {
-                theme::AMBER_SOFT
-            } else {
-                theme::INSET
-            })
-            .shadow(vec![theme::inner_ring(if selected {
-                theme::AMBER
-            } else {
-                theme::HAIRLINE
-            })])
-            .cursor_pointer()
-            .on_click(cx.listener(move |view, _, _, cx| {
-                view.cloud_provider = provider;
-                view.error = None;
-                cx.notify();
-            }))
-            .child(
-                div()
-                    .h(px(28.0))
-                    .flex()
-                    .items_start()
-                    .justify_between()
-                    .child(Icon::empty().path(provider.icon()).with_size(px(23.0)))
-                    .child(
-                        div()
-                            .size(px(18.0))
-                            .rounded_full()
-                            .border_2()
-                            .border_color(if selected {
-                                theme::AMBER
-                            } else {
-                                theme::TERTIARY
-                            })
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .when(selected, |this| {
-                                this.bg(theme::AMBER).text_color(theme::HUD).child("✓")
-                            }),
+                    .flex_col()
+                    .rounded(px(12.0))
+                    .overflow_hidden()
+                    .bg(theme::INSET)
+                    .children(
+                        choices
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, choice)| self.choice_row(choice, index == last, cx)),
                     ),
             )
             .child(
                 div()
-                    .pt(px(5.0))
-                    .text_size(px(16.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme::LABEL)
-                    .child(provider.name()),
+                    .w(px(440.0))
+                    .h(px(16.0))
+                    .text_center()
+                    .text_size(px(12.0))
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_color(if self.error.is_some() {
+                        theme::RED
+                    } else {
+                        theme::SECONDARY
+                    })
+                    .child(self.error.clone().unwrap_or(detail)),
             )
+    }
+
+    fn choice_row(&self, choice: Choice, last: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = self.choice.id() == choice.id();
+        let (tag, recommended) = match choice {
+            Choice::Local(spec) => (models::format_size(spec.bytes), spec.recommended),
+            Choice::Cloud(_) => (t("Cloud").to_string(), false),
+        };
+        div()
+            .id(SharedString::from(format!(
+                "onboarding-model-{}",
+                choice.id()
+            )))
+            .h(px(34.0))
+            .px(px(14.0))
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .when(!last, |row| row.border_b_1().border_color(theme::HAIRLINE))
+            .when(selected, |row| row.bg(theme::AMBER_SOFT))
+            .cursor_pointer()
+            .hover(|row| row.bg(theme::RAISED))
+            .on_click(cx.listener(move |view, _, _, cx| {
+                if view.download.is_none() {
+                    view.choice = choice;
+                    view.error = None;
+                    cx.notify();
+                }
+            }))
+            .child(radio(selected))
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .font_weight(if selected {
+                        FontWeight::SEMIBOLD
+                    } else {
+                        FontWeight::MEDIUM
+                    })
+                    .text_color(theme::LABEL)
+                    .child(choice.name()),
+            )
+            .when(recommended, |row| {
+                row.child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme::AMBER)
+                        .child(t("Recommended")),
+                )
+            })
+            .child(div().flex_1())
             .child(
                 div()
                     .text_size(px(12.0))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_features(theme::tabular())
                     .text_color(if selected {
                         theme::AMBER
                     } else {
                         theme::TERTIARY
                     })
-                    .child(provider.model()),
-            )
-            .child(
-                div()
-                    .text_size(px(13.0))
-                    .line_height(px(19.0))
-                    .text_color(theme::SECONDARY)
-                    .child(provider.description()),
+                    .child(tag),
             )
     }
 
@@ -764,8 +805,8 @@ impl Onboarding {
                     .flex_col()
                     .items_center()
                     .gap(px(10.0))
-                    .child(heading("Connect your cloud model", 28.0))
-                    .child(description("Enter your API key to use this model in Whisple.", 440.0, 15.0)),
+                    .child(heading(t("Connect your cloud model"), 28.0))
+                    .child(description(t("Enter your API key to use this model in Whisple."), 440.0, 15.0)),
             )
             .child(
                 div()
@@ -819,7 +860,7 @@ impl Onboarding {
                                         }
                                         cx.notify();
                                     }))
-                                    .child(if self.key_visible { "Hide" } else { "Show" }),
+                                    .child(if self.key_visible { t("Hide") } else { t("Show") }),
                             ),
                     )
                     .child(
@@ -827,7 +868,7 @@ impl Onboarding {
                             .text_size(px(12.0))
                             .line_height(px(18.0))
                             .text_color(theme::SECONDARY)
-                            .child(format!("Your key is saved in the system credential store. Recordings are sent to {} for transcription. Provider charges may apply.", provider.name())),
+                            .child(tf("Your key is saved in the system credential store. Recordings are sent to {} for transcription. Provider charges may apply.", &[&provider.name()])),
                     ),
             )
             .when_some(self.error.as_ref(), |this, error| {
@@ -835,102 +876,8 @@ impl Onboarding {
             })
     }
 
-    fn model_card(&self, spec: &'static ModelSpec, cx: &mut Context<Self>) -> impl IntoElement {
-        let selected = self.selected.id == spec.id;
-        div()
-            .id(SharedString::from(format!("onboarding-model-{}", spec.id)))
-            .w(px(184.0))
-            .h(px(168.0))
-            .p(px(18.0))
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .rounded(px(14.0))
-            .bg(if selected {
-                theme::AMBER_SOFT
-            } else {
-                theme::INSET
-            })
-            .shadow(vec![theme::inner_ring(if selected {
-                theme::AMBER
-            } else {
-                theme::HAIRLINE
-            })])
-            .cursor_pointer()
-            .on_click(cx.listener(move |view, _, _, cx| {
-                if view.download.is_none() {
-                    view.selected = spec;
-                    view.error = None;
-                    cx.notify();
-                }
-            }))
-            .child(
-                div()
-                    .h(px(32.0))
-                    .flex()
-                    .items_start()
-                    .justify_between()
-                    .child(
-                        div()
-                            .size(px(18.0))
-                            .rounded_full()
-                            .border_2()
-                            .border_color(if selected {
-                                theme::AMBER
-                            } else {
-                                theme::TERTIARY
-                            })
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .when(selected, |this| {
-                                this.bg(theme::AMBER).text_color(theme::HUD).child("✓")
-                            }),
-                    )
-                    .when(spec.recommended, |this| {
-                        this.child(
-                            div()
-                                .px(px(7.0))
-                                .py(px(2.0))
-                                .rounded_full()
-                                .bg(theme::AMBER_BADGE)
-                                .text_size(px(9.0))
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(theme::AMBER)
-                                .child("RECOMMENDED"),
-                        )
-                    }),
-            )
-            .child(
-                div()
-                    .pt(px(10.0))
-                    .text_size(px(16.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme::LABEL)
-                    .child(spec.name),
-            )
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(if selected {
-                        theme::AMBER
-                    } else {
-                        theme::TERTIARY
-                    })
-                    .child(models::format_size(spec.bytes)),
-            )
-            .child(
-                div()
-                    .text_size(px(13.0))
-                    .line_height(px(19.0))
-                    .text_color(theme::SECONDARY)
-                    .child(spec.blurb),
-            )
-    }
-
     fn try_it(&self) -> Div {
-        let caps = hotkey::keycaps(&settings::load().show_hotkey);
+        let caps = hotkey::keycaps(&record_shortcut());
         div()
             .w_full()
             .flex()
@@ -949,7 +896,7 @@ impl Onboarding {
                     .text_size(px(12.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme::AMBER)
-                    .child(format!("✓  {} is ready", self.selected_name())),
+                    .child(tf("✓  {} is ready", &[&self.choice.name()])),
             )
             .child(
                 div()
@@ -957,13 +904,13 @@ impl Onboarding {
                     .flex_col()
                     .items_center()
                     .gap(px(12.0))
-                    .child(heading("Now try it", 30.0))
+                    .child(heading(t("Now try it"), 30.0))
                     .child(description(
                         {
                             #[cfg(target_os = "macos")]
-                            let instructions = "Press the shortcut, say a sentence, then press Space. Your words go into the selected text field. Clipboard copying is optional.";
+                            let instructions = t("Press the shortcut, say a sentence, then press it again. Your words go into the selected text field. Clipboard copying is optional.");
                             #[cfg(not(target_os = "macos"))]
-                            let instructions = "Press the shortcut, say a sentence, then press Space. Your words land on the clipboard.";
+                            let instructions = t("Press the shortcut, say a sentence, then press it again. Your words land on the clipboard.");
                             instructions
                         },
                         440.0,
@@ -1053,7 +1000,7 @@ impl Onboarding {
                             .text_size(px(12.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme::LABEL)
-                            .child(self.selected_chip()),
+                            .child(self.choice.chip()),
                     ),
             )
             .child(
@@ -1067,42 +1014,45 @@ impl Onboarding {
                             .text_size(px(13.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme::AMBER)
-                            .child(format!(
+                            .child(tf(
                                 "Your 3-day free trial has started. After that, Whisple is {} once.",
-                                license::PRICE
+                                &[&license::PRICE],
                             )),
                     )
                     .child(
                         div()
                             .text_size(px(13.0))
                             .text_color(theme::TERTIARY)
-                            .child("You can change the shortcut any time in Settings."),
+                            .child(t("You can change the shortcut any time in Settings.")),
                     ),
             )
     }
 
     fn footer(&self, cx: &mut Context<Self>) -> Div {
         let label = match self.step {
-            0 => "Get started".to_string(),
-            1 if self.requesting_microphone => "Waiting for macOS…".to_string(),
-            1 if self.microphone_allowed => "Continue".to_string(),
-            1 => "Allow microphone".to_string(),
-            2 if self.download.is_some() => {
+            WELCOME => t("Get started").to_string(),
+            FEATURES => t("Continue").to_string(),
+            MICROPHONE if self.requesting_microphone => t("Waiting for macOS…").to_string(),
+            MICROPHONE if self.microphone_allowed => t("Continue").to_string(),
+            MICROPHONE => t("Allow microphone").to_string(),
+            MODEL if self.download.is_some() => {
                 let download = self.download.as_ref().unwrap();
                 let fraction =
                     download.received.load(Ordering::Relaxed) as f64 / download.total.max(1) as f64;
-                format!(
+                tf(
                     "Downloading {}%",
-                    (fraction * 100.0).clamp(0.0, 100.0) as u32
+                    &[&((fraction * 100.0).clamp(0.0, 100.0) as u32)],
                 )
             }
-            2 if self.cloud_config.is_some() => {
-                format!("Save and use {}", self.cloud_provider.name())
-            }
-            2 if self.source == ModelSource::Cloud => format!("Use {}", self.cloud_provider.name()),
-            2 if models::is_downloaded(self.selected) => format!("Use {}", self.selected.name),
-            2 => format!("Download {}", self.selected.name),
-            _ => "Start using Whisple".to_string(),
+            MODEL if self.cloud_config.is_some() => tf("Save and use {}", &[&self.choice.name()]),
+            MODEL => match self.choice {
+                Choice::Cloud(provider) => tf("Use {}", &[&provider.name()]),
+                Choice::Local(spec) if models::is_downloaded(spec) => {
+                    tf("Use {}", &[&t(spec.name)])
+                }
+                Choice::Local(spec) => tf("Download {}", &[&t(spec.name)]),
+            },
+            _ => t("Start using Whisple").to_string(),
         };
         let busy = self.download.is_some() || self.requesting_microphone;
         div()
@@ -1119,7 +1069,7 @@ impl Onboarding {
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .children((0..4).map(|index| {
+                    .children((0..STEPS).map(|index| {
                         div()
                             .w(px(if self.step == index { 20.0 } else { 6.0 }))
                             .h(px(6.0))
@@ -1150,7 +1100,7 @@ impl Onboarding {
                                 .text_color(theme::SECONDARY)
                                 .cursor_pointer()
                                 .on_click(cx.listener(|view, _, window, cx| view.back(window, cx)))
-                                .child("Back"),
+                                .child(t("Back")),
                         )
                     })
                     .child(
@@ -1242,6 +1192,89 @@ fn heading(label: &'static str, size: f32) -> Div {
         .child(label)
 }
 
+/// The interface languages as chips, the current one highlighted. Picking
+/// one switches every window at once.
+fn language_picker(cx: &mut Context<Onboarding>) -> Div {
+    let current = i18n::current();
+    div()
+        .flex()
+        .flex_wrap()
+        .justify_center()
+        .gap(px(6.0))
+        .children(Lang::ALL.into_iter().map(|lang| {
+            let selected = lang == current;
+            div()
+                .id(SharedString::from(format!(
+                    "onboarding-language-{}",
+                    lang.code()
+                )))
+                .role(gpui_kit::Role::Button)
+                .aria_label(lang.native_name())
+                .h(px(28.0))
+                .px(px(12.0))
+                .flex()
+                .items_center()
+                .rounded_full()
+                .bg(if selected {
+                    theme::AMBER_SOFT
+                } else {
+                    theme::INSET
+                })
+                .shadow(vec![theme::inner_ring(if selected {
+                    theme::AMBER
+                } else {
+                    theme::HAIRLINE
+                })])
+                .text_size(px(12.0))
+                .font_weight(if selected {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::MEDIUM
+                })
+                .text_color(if selected {
+                    theme::AMBER
+                } else {
+                    theme::SECONDARY
+                })
+                .cursor_pointer()
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    crate::set_app_language(lang, cx);
+                    cx.notify();
+                }))
+                .child(lang.native_name())
+        }))
+}
+
+/// The shortcut that starts recording, or the show shortcut when it is off.
+fn record_shortcut() -> String {
+    let prefs = settings::load();
+    if prefs.record_hotkey.is_empty() {
+        prefs.show_hotkey
+    } else {
+        prefs.record_hotkey
+    }
+}
+
+/// The round selection mark on a model row.
+fn radio(selected: bool) -> Div {
+    div()
+        .size(px(16.0))
+        .flex_shrink_0()
+        .rounded_full()
+        .border_2()
+        .border_color(if selected {
+            theme::AMBER
+        } else {
+            theme::TERTIARY
+        })
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(selected, |this| {
+            this.child(div().size(px(8.0)).rounded_full().bg(theme::AMBER))
+        })
+}
+
 fn description(label: &'static str, width: f32, size: f32) -> Div {
     div()
         .w(px(width))
@@ -1250,4 +1283,31 @@ fn description(label: &'static str, width: f32, size: f32) -> Div {
         .line_height(px(size + 8.0))
         .text_color(theme::SECONDARY)
         .child(label)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_model_is_offered_in_one_list() {
+        let choices = Choice::all();
+        assert_eq!(choices.len(), models::CATALOG.len() + Provider::ALL.len());
+        let local: Vec<u64> = choices
+            .iter()
+            .filter_map(|choice| match choice {
+                Choice::Local(spec) => Some(spec.bytes),
+                Choice::Cloud(_) => None,
+            })
+            .collect();
+        // The recommended model leads; the rest go smallest first.
+        assert!(matches!(choices[0], Choice::Local(spec) if spec.recommended));
+        assert!(local[1..].windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!(choices[models::CATALOG.len()..]
+            .iter()
+            .all(|choice| matches!(choice, Choice::Cloud(_))));
+        assert!(choices
+            .iter()
+            .any(|choice| choice.id() == models::recommended_id()));
+    }
 }

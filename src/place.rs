@@ -131,7 +131,8 @@ fn find_pid(
     if depth > 8 {
         return None;
     }
-    if window_pid(conn, window, pid_atom) == Some(pid) {
+    // Settings and onboarding share the process; only the bar is docked.
+    if window_pid(conn, window, pid_atom) == Some(pid) && is_voice_window(conn, window) {
         return Some(window);
     }
     let tree = conn.query_tree(window).ok()?.reply().ok()?;
@@ -141,6 +142,21 @@ fn find_pid(
         }
     }
     None
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn is_voice_window(conn: &impl Connection, window: Window) -> bool {
+    conn.get_property(false, window, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 64)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .is_some_and(|reply| is_voice_class(&reply.value))
+}
+
+/// WM_CLASS is "instance\0class\0"; the bar's instance is its app id,
+/// "whisple", while Settings is "whisple-settings".
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn is_voice_class(value: &[u8]) -> bool {
+    value.split(|&byte| byte == 0).next() == Some(b"whisple".as_slice())
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -474,4 +490,17 @@ fn circle_inset(radius: u16, row: u16) -> u16 {
     let y = r - row as f32 - 0.5;
     let inside = (r * r - y * y).max(0.0).sqrt();
     (r - inside).ceil().clamp(0.0, r) as u16
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "freebsd")))]
+mod tests {
+    use super::is_voice_class;
+
+    #[test]
+    fn only_the_bar_is_docked() {
+        assert!(is_voice_class(b"whisple\0whisple\0"));
+        assert!(!is_voice_class(b"whisple-settings\0whisple-settings\0"));
+        assert!(!is_voice_class(b"whisple-onboarding\0whisple-onboarding\0"));
+        assert!(!is_voice_class(b""));
+    }
 }

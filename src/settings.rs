@@ -9,13 +9,20 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_HOTKEY: &str = "ctrl-shift-space";
+pub const DEFAULT_RECORD_HOTKEY: &str = "ctrl-alt-space";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Preferences {
     pub onboarding_complete: bool,
+    /// The interface language's code. Empty follows the system language.
+    pub app_language: String,
     pub selected: String,
     pub language: String,
+    /// The language notes come out in. Empty means the spoken language.
+    pub output_language: String,
     pub show_hotkey: String,
+    /// Shows the bar and starts recording. Empty when turned off.
+    pub record_hotkey: String,
     pub copy_notes: bool,
     pub clean_fillers: bool,
     /// Empty means the system default input.
@@ -126,11 +133,17 @@ struct File {
     #[serde(default = "yes")]
     onboarding_complete: bool,
     #[serde(default)]
+    app_language: String,
+    #[serde(default)]
     selected: String,
     #[serde(default)]
     language: String,
     #[serde(default)]
+    output_language: String,
+    #[serde(default)]
     show_hotkey: String,
+    #[serde(default = "default_record_hotkey")]
+    record_hotkey: String,
     #[serde(default = "yes")]
     copy_notes: bool,
     #[serde(default = "yes")]
@@ -151,13 +164,20 @@ fn yes() -> bool {
     true
 }
 
+fn default_record_hotkey() -> String {
+    DEFAULT_RECORD_HOTKEY.into()
+}
+
 impl Default for Preferences {
     fn default() -> Self {
         Self {
             onboarding_complete: false,
+            app_language: String::new(),
             selected: String::new(),
             language: "en".into(),
+            output_language: String::new(),
             show_hotkey: DEFAULT_HOTKEY.into(),
+            record_hotkey: DEFAULT_RECORD_HOTKEY.into(),
             copy_notes: true,
             clean_fillers: true,
             input_device: String::new(),
@@ -173,6 +193,14 @@ impl Preferences {
     pub fn languages() -> &'static [Language] {
         LANGUAGES
     }
+}
+
+/// A language's English name, such as "Danish" for `da`. Not for "auto".
+pub fn language_name(id: &str) -> Option<&'static str> {
+    LANGUAGES
+        .iter()
+        .find(|language| language.id == id && id != "auto")
+        .map(|language| language.name)
 }
 
 pub fn load() -> Preferences {
@@ -212,6 +240,9 @@ pub fn decode(raw: &str) -> Preferences {
         onboarding_complete: file.onboarding_complete,
         ..Preferences::default()
     };
+    if let Some(lang) = crate::i18n::Lang::from_code(&file.app_language) {
+        prefs.app_language = lang.code().to_string();
+    }
     if !file.selected.is_empty() {
         prefs.selected = file.selected;
     }
@@ -221,10 +252,23 @@ pub fn decode(raw: &str) -> Preferences {
     {
         prefs.language = file.language;
     }
+    if language_name(&file.output_language).is_some() {
+        prefs.output_language = file.output_language;
+    }
     if let Some(chord) = crate::hotkey::parse(&file.show_hotkey) {
         if chord.has_modifier() {
             prefs.show_hotkey = chord.canonical();
         }
+    }
+    prefs.record_hotkey = match crate::hotkey::parse(&file.record_hotkey) {
+        Some(chord) if chord.has_modifier() => chord.canonical(),
+        // A saved empty value means the user turned the shortcut off.
+        _ if file.record_hotkey.is_empty() => String::new(),
+        _ => DEFAULT_RECORD_HOTKEY.into(),
+    };
+    // One chord cannot do both jobs; the show shortcut came first.
+    if prefs.record_hotkey == prefs.show_hotkey {
+        prefs.record_hotkey.clear();
     }
     prefs.copy_notes = file.copy_notes;
     prefs.clean_fillers = file.clean_fillers;
@@ -251,9 +295,12 @@ impl From<&Preferences> for File {
     fn from(prefs: &Preferences) -> Self {
         Self {
             onboarding_complete: prefs.onboarding_complete,
+            app_language: prefs.app_language.clone(),
             selected: prefs.selected.clone(),
             language: prefs.language.clone(),
+            output_language: prefs.output_language.clone(),
             show_hotkey: prefs.show_hotkey.clone(),
+            record_hotkey: prefs.record_hotkey.clone(),
             copy_notes: prefs.copy_notes,
             clean_fillers: prefs.clean_fillers,
             input_device: prefs.input_device.clone(),
@@ -275,6 +322,7 @@ mod tests {
         assert_eq!(prefs.selected, "small-en");
         assert_eq!(prefs.language, "en");
         assert_eq!(prefs.show_hotkey, DEFAULT_HOTKEY);
+        assert_eq!(prefs.record_hotkey, DEFAULT_RECORD_HOTKEY);
         assert!(prefs.copy_notes);
         assert!(prefs.clean_fillers);
         assert!(prefs.input_device.is_empty());
@@ -319,9 +367,61 @@ mod tests {
     }
 
     #[test]
+    fn the_output_language_survives_a_round_trip() {
+        let prefs = decode(r#"{"language":"da","output_language":"en"}"#);
+        assert_eq!(prefs.language, "da");
+        assert_eq!(prefs.output_language, "en");
+        let raw = serde_json::to_string(&File::from(&prefs)).unwrap();
+        assert_eq!(decode(&raw).output_language, "en");
+        assert!(Preferences::default().output_language.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_output_language_means_the_spoken_one() {
+        assert!(decode(r#"{"output_language":"zz"}"#)
+            .output_language
+            .is_empty());
+        assert!(decode(r#"{"output_language":"auto"}"#)
+            .output_language
+            .is_empty());
+        assert_eq!(language_name("da"), Some("Danish"));
+        assert_eq!(language_name("auto"), None);
+    }
+
+    #[test]
+    fn the_app_language_survives_a_round_trip() {
+        assert!(Preferences::default().app_language.is_empty());
+        let prefs = decode(r#"{"app_language":"sv"}"#);
+        assert_eq!(prefs.app_language, "sv");
+        let raw = serde_json::to_string(&File::from(&prefs)).unwrap();
+        assert_eq!(decode(&raw).app_language, "sv");
+        assert!(decode(r#"{"app_language":"xx"}"#).app_language.is_empty());
+    }
+
+    #[test]
     fn unknown_language_falls_back_to_english() {
         let prefs = decode(r#"{"language":"zz"}"#);
         assert_eq!(prefs.language, "en");
+    }
+
+    #[test]
+    fn the_record_shortcut_survives_a_round_trip() {
+        let prefs = decode(r#"{"record_hotkey":"super-shift-r"}"#);
+        assert_eq!(prefs.record_hotkey, "shift-super-r");
+        let raw = serde_json::to_string(&File::from(&prefs)).unwrap();
+        assert_eq!(decode(&raw).record_hotkey, "shift-super-r");
+
+        let off = decode(r#"{"record_hotkey":""}"#);
+        assert!(off.record_hotkey.is_empty());
+        let raw = serde_json::to_string(&File::from(&off)).unwrap();
+        assert!(decode(&raw).record_hotkey.is_empty());
+    }
+
+    #[test]
+    fn the_record_shortcut_never_repeats_the_show_shortcut() {
+        let prefs = decode(r#"{"show_hotkey":"ctrl-alt-space"}"#);
+        assert_eq!(prefs.show_hotkey, "ctrl-alt-space");
+        assert!(prefs.record_hotkey.is_empty());
     }
 
     #[test]

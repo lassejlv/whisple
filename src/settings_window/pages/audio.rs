@@ -1,9 +1,11 @@
-//! Audio: the input device, a live level meter, and the spoken language.
+//! Audio: the input device, a live level meter, the spoken language, and
+//! the language notes come out in.
 
 use gpui_kit::component::select::{SearchableVec, SelectItem};
 use gpui_kit::{div, prelude::*, px, Context, Div, IntoElement, SharedString, Styled};
 
 use crate::audio::Mic;
+use crate::i18n::t;
 use crate::settings::Preferences;
 use crate::settings_window::widgets::*;
 use crate::settings_window::SettingsWindow;
@@ -30,7 +32,7 @@ impl SelectItem for Choice {
 pub(in crate::settings_window) fn microphone_choices(names: &[String]) -> SearchableVec<Choice> {
     let mut choices = vec![Choice {
         id: String::new(),
-        label: "System default".into(),
+        label: t("System default").into(),
     }];
     choices.extend(names.iter().map(|name| Choice {
         id: name.clone(),
@@ -45,8 +47,42 @@ pub(in crate::settings_window) fn language_choices() -> SearchableVec<Choice> {
             .iter()
             .map(|language| Choice {
                 id: language.id.into(),
-                label: language.name.into(),
+                label: t(language.name).into(),
             })
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// The interface languages, each under its own name.
+pub(in crate::settings_window) fn app_language_choices() -> SearchableVec<Choice> {
+    SearchableVec::new(
+        crate::i18n::Lang::ALL
+            .into_iter()
+            .map(|lang| Choice {
+                id: lang.code().into(),
+                label: lang.native_name().into(),
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// "Same as spoken" first, then every language a note can be translated to.
+pub(in crate::settings_window) fn output_language_choices() -> SearchableVec<Choice> {
+    let same = Choice {
+        id: String::new(),
+        label: t("Same as spoken").into(),
+    };
+    SearchableVec::new(
+        std::iter::once(same)
+            .chain(
+                Preferences::languages()
+                    .iter()
+                    .filter(|language| language.id != "auto")
+                    .map(|language| Choice {
+                        id: language.id.into(),
+                        label: t(language.name).into(),
+                    }),
+            )
             .collect::<Vec<_>>(),
     )
 }
@@ -82,6 +118,16 @@ impl SettingsWindow {
         cx.notify();
     }
 
+    pub(in crate::settings_window) fn choose_output_language(
+        &mut self,
+        language: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.hud
+            .update(cx, |hud, cx| hud.choose_output_language(language, cx));
+        cx.notify();
+    }
+
     pub(in crate::settings_window) fn audio(&self, _cx: &mut Context<Self>) -> Div {
         let bars =
             (0..18).map(|index| {
@@ -99,12 +145,13 @@ impl SettingsWindow {
             .flex_col()
             .gap(px(26.0))
             .child(section(
-                "Input",
+                t("Input"),
                 vec![
                     selector_row(
-                        "Microphone",
+                        t("Microphone"),
                         None,
-                        selector_control(&self.microphone_select, "Microphone").into_any_element(),
+                        selector_control(&self.microphone_select, t("Microphone"))
+                            .into_any_element(),
                         false,
                     ),
                     div()
@@ -116,21 +163,31 @@ impl SettingsWindow {
                         .items_center()
                         .justify_between()
                         .child(label_stack(
-                            "Input level",
-                            Some("Say something to test your microphone."),
+                            t("Input level"),
+                            Some(t("Say something to test your microphone.")),
                         ))
                         .child(div().flex().gap(px(3.0)).items_center().children(bars))
                         .into_any_element(),
                 ],
             ))
             .child(section(
-                "Language",
-                vec![selector_row(
-                    "Spoken language",
-                    Some("English-only models always transcribe English."),
-                    selector_control(&self.language_select, "Spoken language").into_any_element(),
-                    false,
-                )],
+                t("Language"),
+                vec![
+                    selector_row(
+                        t("Spoken language"),
+                        Some(t("English-only models always transcribe English.")),
+                        selector_control(&self.language_select, t("Spoken language"))
+                            .into_any_element(),
+                        false,
+                    ),
+                    selector_row(
+                        t("Output language"),
+                        Some(t("Translates your notes with your OpenAI or Groq key.")),
+                        selector_control(&self.output_select, t("Output language"))
+                            .into_any_element(),
+                        true,
+                    ),
+                ],
             ))
     }
 }
