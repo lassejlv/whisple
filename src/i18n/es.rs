@@ -2,6 +2,7 @@
 
 pub const STRINGS: &[(&str, &str)] = &[
     ("Connect to the internet to continue your trial.", "Conéctate a internet para continuar la prueba."),
+    ("Connect to the internet within {} to continue your 3-day free trial.", "Conéctate a internet en un plazo de {} para continuar tu prueba gratuita de 3 días."),
     ("A key is saved on this device. Paste a new one to replace it. Audio goes to {} only when selected.", "Hay una clave guardada en este dispositivo. Pega una nueva para reemplazarla. El audio solo va a {} cuando está seleccionado."),
     ("A recent verification allows temporary offline use.", "Una verificación reciente permite usarlo sin conexión por un tiempo."),
     ("A voice bar for your whole computer. A few quick steps and you’re talking instead of typing.", "Una barra de voz para todo tu ordenador. Unos pasos rápidos y estarás hablando en lugar de escribir."),
@@ -55,7 +56,6 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("Cloud unavailable", "Nube no disponible"),
     ("Confirm remove", "Confirmar eliminación"),
     ("Confirm remove {}", "Confirmar eliminación de {}"),
-    ("Connect to the internet and check your license again.", "Conéctate a internet y vuelve a comprobar tu licencia."),
     ("Connect your cloud model", "Conecta tu modelo en la nube"),
     ("Connect {}", "Conectar {}"),
     ("Contacting Polar to verify access.", "Contactando con Polar para verificar el acceso."),

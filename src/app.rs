@@ -558,7 +558,7 @@ impl Whisp {
                         // for the server tries again as often.
                         let license_interval = if matches!(
                             view.license_access,
-                            Access::Trial { .. } | Access::Unavailable { .. }
+                            Access::Trial { .. } | Access::Offline(_) | Access::Unavailable { .. }
                         ) {
                             Duration::from_secs(5 * 60)
                         } else {
@@ -967,9 +967,23 @@ impl Whisp {
     /// Ends the trial the moment its time is up. Nothing opens by itself: the
     /// bar shows the ended trial and Unlock leads to the License page.
     fn expire_trial_if_needed(&mut self, cx: &mut Context<Self>) -> bool {
-        if matches!(&self.license_access, Access::Trial { .. }) && !self.license_access.allowed() {
-            self.set_license_access(Access::TrialExpired, cx);
-            return true;
+        if let Access::Trial {
+            confirmation_required,
+            ..
+        } = &self.license_access
+        {
+            if !self.license_access.allowed() {
+                let expired = if *confirmation_required {
+                    Access::Unavailable {
+                        display_key: String::new(),
+                        reason: t("Connect to the internet to continue your trial.").into(),
+                    }
+                } else {
+                    Access::TrialExpired
+                };
+                self.set_license_access(expired, cx);
+                return true;
+            }
         }
         false
     }
@@ -981,6 +995,15 @@ impl Whisp {
 
     /// Trial time left, but only on the last day, when the bar mentions it.
     pub(crate) fn trial_ending(&self) -> Option<Duration> {
+        if matches!(
+            self.license_access,
+            Access::Trial {
+                confirmation_required: true,
+                ..
+            }
+        ) {
+            return None;
+        }
         self.license_access
             .trial_remaining()
             .filter(|left| !left.is_zero() && *left < Duration::from_secs(24 * 60 * 60))

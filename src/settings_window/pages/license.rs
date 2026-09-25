@@ -118,11 +118,25 @@ impl SettingsWindow {
     pub(in crate::settings_window) fn license(&self, cx: &mut Context<Self>) -> Div {
         let status = self.hud.read(cx).license_access.clone();
         let has_key = status.display_key().is_some_and(|key| !key.is_empty());
+        let has_active_key = matches!(&status, Access::Active(_) | Access::Offline(_));
         let trial_detail = status.trial_remaining().map(|remaining| {
-            tf(
-                "{} of your 3-day free trial. Then {} once to keep Whisple.",
-                &[&license::trial_left(remaining, false), &license::PRICE],
-            )
+            if matches!(
+                &status,
+                Access::Trial {
+                    confirmation_required: true,
+                    ..
+                }
+            ) {
+                tf(
+                    "Connect to the internet within {} to continue your 3-day free trial.",
+                    &[&license::trial_left(remaining, true)],
+                )
+            } else {
+                tf(
+                    "{} of your 3-day free trial. Then {} once to keep Whisple.",
+                    &[&license::trial_left(remaining, false), &license::PRICE],
+                )
+            }
         });
         let ended_detail = tf(
             "Your 3-day free trial has ended. Buy Whisple for {} once to keep dictating.",
@@ -158,10 +172,7 @@ impl SettingsWindow {
                 t("License needs attention"),
                 t("Check the message below or enter another key."),
             ),
-            Access::Unavailable { .. } => (
-                t("Could not verify access"),
-                t("Connect to the internet and check your license again."),
-            ),
+            Access::Unavailable { reason, .. } => (t("Could not verify access"), reason.as_str()),
         };
         div()
             .flex()
@@ -327,7 +338,7 @@ impl SettingsWindow {
                                                 })),
                                         )
                                     })
-                                    .when(!has_key, |links| {
+                                    .when(!has_active_key, |links| {
                                         links.child(
                                             text_button("license-portal", t("Find your key ↗"))
                                                 .aria_label(t("Open Polar purchases"))

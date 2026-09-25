@@ -2,6 +2,7 @@ mod app;
 mod apps;
 mod assistant;
 mod audio;
+mod boot_clock;
 mod cloud;
 mod commands;
 #[cfg(target_os = "macos")]

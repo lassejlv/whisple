@@ -12,6 +12,7 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::boot_clock::{self, Snapshot};
 use crate::i18n::{t, tf};
 use crate::trial_server::{self, ServerTrial};
 
@@ -38,6 +39,7 @@ pub enum Access {
     Trial {
         expires_at: i64,
         last_seen: i64,
+        confirmation_required: bool,
         license_issue: Option<String>,
     },
     TrialExpired,
@@ -156,6 +158,7 @@ fn trial_state(record: &SavedTrial, checked_at: i64) -> Access {
         Access::Trial {
             expires_at,
             last_seen: record.last_seen.max(checked_at),
+            confirmation_required: false,
             license_issue: None,
         }
     }
@@ -165,12 +168,14 @@ fn use_trial_if_available(trial: &Result<Access, String>, paid_failure: Access) 
     if let Ok(Access::Trial {
         expires_at,
         last_seen,
+        confirmation_required,
         ..
     }) = trial
     {
         let trial_access = Access::Trial {
             expires_at: *expires_at,
             last_seen: *last_seen,
+            confirmation_required: *confirmation_required,
             license_issue: None,
         };
         if trial_access.allowed() {
@@ -183,6 +188,7 @@ fn use_trial_if_available(trial: &Result<Access, String>, paid_failure: Access) 
             return Access::Trial {
                 expires_at: *expires_at,
                 last_seen: *last_seen,
+                confirmation_required: *confirmation_required,
                 license_issue: Some(reason),
             };
         }
@@ -241,14 +247,23 @@ fn apply_server_trial(record: &mut SavedTrial, server: ServerTrial) {
 
 /// The trial's state, locked after an hour until the server has confirmed it.
 fn trial_access(record: &SavedTrial, confirmed: bool, checked_at: i64) -> Access {
-    let access = trial_state(record, checked_at);
-    let unconfirmed_for = checked_at.max(record.last_seen) - record.started_at;
-    if !confirmed && matches!(access, Access::Trial { .. }) && unconfirmed_for >= UNCONFIRMED_TRIAL
-    {
-        return Access::Unavailable {
-            display_key: String::new(),
-            reason: t("Connect to the internet to continue your trial.").into(),
-        };
+    let mut access = trial_state(record, checked_at);
+    if !confirmed {
+        if let Access::Trial {
+            expires_at,
+            confirmation_required,
+            ..
+        } = &mut access
+        {
+            *expires_at = (*expires_at).min(record.started_at.saturating_add(UNCONFIRMED_TRIAL));
+            *confirmation_required = true;
+            if checked_at.max(record.last_seen) >= *expires_at {
+                return Access::Unavailable {
+                    display_key: String::new(),
+                    reason: t("Connect to the internet to continue your trial.").into(),
+                };
+            }
+        }
     }
     access
 }
@@ -259,21 +274,47 @@ fn trial_file() -> Option<std::path::PathBuf> {
     Some(dirs::config_dir()?.join("whisp").join(".first-run"))
 }
 
-fn read_trial_file() -> Option<SavedTrial> {
-    let raw = std::fs::read_to_string(trial_file()?).ok()?;
-    serde_json::from_str(&raw).ok()
+fn read_trial_file() -> Result<Option<SavedTrial>, String> {
+    let path = trial_file().ok_or("Could not locate the saved trial.")?;
+    match std::fs::read_to_string(path) {
+        Ok(raw) => serde_json::from_str(&raw)
+            .map(Some)
+            .map_err(|_| "The trial backup could not be read.".into()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(format!("Could not read the trial backup: {err}")),
+    }
 }
 
-fn write_trial_file(record: &SavedTrial) {
-    let Some(path) = trial_file() else {
-        return;
-    };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+fn write_trial_file(record: &SavedTrial) -> Result<(), String> {
+    let path = trial_file().ok_or("Could not locate the saved trial.")?;
+    let parent = path
+        .parent()
+        .ok_or("Could not locate the trial backup folder.")?;
+    std::fs::create_dir_all(parent)
+        .map_err(|err| format!("Could not save the trial backup: {err}"))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|err| format!("Could not save the trial backup: {err}"))?;
+    serde_json::to_writer(&mut temporary, record).map_err(|err| err.to_string())?;
+    temporary
+        .persist(path)
+        .map_err(|err| format!("Could not save the trial backup: {}", err.error))?;
+    Ok(())
+}
+
+fn recover_trial_copies(
+    keychain: Result<Option<SavedTrial>, String>,
+    file: Result<Option<SavedTrial>, String>,
+) -> Result<(Option<SavedTrial>, Option<SavedTrial>), String> {
+    let keychain_error = keychain.as_ref().err().cloned();
+    let file_error = file.as_ref().err().cloned();
+    let keychain = keychain.ok().flatten();
+    let file = file.ok().flatten();
+    if keychain.is_none() && file.is_none() {
+        if let Some(reason) = keychain_error.or(file_error) {
+            return Err(reason);
+        }
     }
-    if let Ok(raw) = serde_json::to_string(record) {
-        let _ = std::fs::write(path, raw);
-    }
+    Ok((keychain, file))
 }
 
 /// Starts on first launch, independently of any Polar activation. Never delete
@@ -286,14 +327,13 @@ pub fn start_trial() -> Result<Access, String> {
         .map_err(|err| format!("Could not open the system credential store: {err}"))?;
     let checked_at = now();
     let keychain = match entry.get_password() {
-        Ok(raw) => Some(
-            serde_json::from_str::<SavedTrial>(&raw)
-                .map_err(|_| "The saved trial could not be read.".to_string())?,
-        ),
-        Err(keyring::Error::NoEntry) => None,
-        Err(err) => return Err(format!("Could not read the saved trial: {err}")),
+        Ok(raw) => serde_json::from_str::<SavedTrial>(&raw)
+            .map(Some)
+            .map_err(|_| "The saved trial could not be read.".to_string()),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(err) => Err(format!("Could not read the saved trial: {err}")),
     };
-    let file = read_trial_file();
+    let (keychain, file) = recover_trial_copies(keychain, read_trial_file())?;
     let mut record = merge_trials(keychain.clone(), file.clone(), checked_at);
     let saved_tokens = [
         keychain.as_ref().and_then(|saved| saved.token.as_deref()),
@@ -309,18 +349,18 @@ pub fn start_trial() -> Result<Access, String> {
     // Persist the highest observed time, including expiration. A restart or a
     // small clock adjustment cannot create a fresh 72-hour window.
     record.last_seen = checked_at.max(record.last_seen);
-    if file.as_ref() != Some(&record) {
-        write_trial_file(&record);
-    }
-    if keychain.as_ref() != Some(&record) {
-        entry
+    let file_saved = file.as_ref() == Some(&record) || write_trial_file(&record).is_ok();
+    let keychain_saved = keychain.as_ref() == Some(&record)
+        || entry
             .set_password(&serde_json::to_string(&record).map_err(|err| err.to_string())?)
-            .map_err(|err| format!("Could not save the trial in the credential store: {err}"))?;
+            .is_ok();
+    if !file_saved && !keychain_saved {
+        return Err("Could not save the trial in the credential store or its backup.".into());
     }
     Ok(access)
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct SavedLicense {
     key: String,
     activation_id: String,
@@ -332,6 +372,27 @@ struct SavedLicense {
     /// setting the clock back.
     #[serde(default)]
     last_seen: i64,
+    /// A clock that keeps running while the app is closed. Offline access
+    /// needs a new online check after reboot because its boot ID changes.
+    #[serde(default)]
+    offline_clock: Option<OfflineClock>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct OfflineClock {
+    boot_id: String,
+    anchored_at: u64,
+    remaining_secs: u64,
+}
+
+impl OfflineClock {
+    fn from_snapshot(snapshot: &Snapshot, remaining_secs: u64) -> Self {
+        Self {
+            boot_id: snapshot.boot_id.clone(),
+            anchored_at: snapshot.seconds,
+            remaining_secs,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -476,31 +537,52 @@ fn post_at(
     Err(ApiError::Rejected(status, message.into()))
 }
 
-/// Offline use lasts 72 hours from the last online check, counted on the
-/// latest clock time ever seen, and ends if the clock went back.
-fn offline_access(record: &SavedLicense, checked_at: i64) -> bool {
+/// Offline use must satisfy both wall time and elapsed time in this boot. The
+/// latter keeps advancing if the user holds the system clock still.
+fn offline_access(
+    record: &SavedLicense,
+    checked_at: i64,
+    snapshot: &Snapshot,
+) -> Option<OfflineClock> {
     let observed = checked_at.max(record.last_seen);
-    record.verified_at > 0
+    let wall_allowed = record.verified_at > 0
         && checked_at >= record.verified_at
         && checked_at.saturating_add(CLOCK_TOLERANCE) >= record.last_seen
         && observed - record.verified_at <= OFFLINE_GRACE
-        && record.expires_at.is_none_or(|expires| expires > observed)
+        && record.expires_at.is_none_or(|expires| expires > observed);
+    if !wall_allowed {
+        return None;
+    }
+    if let Some(anchor) = &record.offline_clock {
+        if anchor.boot_id != snapshot.boot_id
+            || snapshot.seconds.checked_sub(anchor.anchored_at)? > anchor.remaining_secs
+        {
+            return None;
+        }
+        return Some(anchor.clone());
+    }
+    // Older records have no boot anchor. Preserve their remaining wall-clock
+    // grace once, then persist this anchor before granting offline access.
+    let remaining_secs = OFFLINE_GRACE.saturating_sub(checked_at - record.verified_at) as u64;
+    Some(OfflineClock::from_snapshot(snapshot, remaining_secs))
 }
 
 /// Refreshes the saved key. A recent successful check permits short offline use.
 pub fn check_saved() -> Access {
-    let trial = start_trial();
+    // Keep the trial's last-seen time current even for paying users. Its
+    // server request can be slow, so paid validation must not wait for it.
+    let trial_check = std::thread::spawn(start_trial);
     let record = match load() {
         Ok(Some(record)) => record,
         Ok(None) => {
-            return trial.unwrap_or_else(|reason| Access::Unavailable {
+            return finish_trial_check(trial_check).unwrap_or_else(|reason| Access::Unavailable {
                 display_key: String::new(),
                 reason,
             })
         }
         Err(reason) => {
             return use_trial_if_available(
-                &trial,
+                &finish_trial_check(trial_check),
                 Access::Unavailable {
                     display_key: String::new(),
                     reason,
@@ -513,7 +595,7 @@ pub fn check_saved() -> Access {
         Ok(client) => client,
         Err(reason) => {
             return use_trial_if_available(
-                &trial,
+                &finish_trial_check(trial_check),
                 Access::Unavailable {
                     display_key: record.display_key,
                     reason,
@@ -549,6 +631,9 @@ pub fn check_saved() -> Access {
                 verified_at: checked_at,
                 expires_at,
                 last_seen: checked_at.max(record.last_seen),
+                offline_clock: boot_clock::snapshot()
+                    .as_ref()
+                    .map(|snapshot| OfflineClock::from_snapshot(snapshot, OFFLINE_GRACE as u64)),
                 ..record
             };
             match save(&updated) {
@@ -574,14 +659,16 @@ pub fn check_saved() -> Access {
             }
         }
         Err(ApiError::Unavailable(reason)) => {
-            let allowed = offline_access(&record, checked_at);
-            if checked_at > record.last_seen {
-                let _ = save(&SavedLicense {
-                    last_seen: checked_at,
-                    ..record.clone()
-                });
+            let anchor = boot_clock::snapshot()
+                .as_ref()
+                .and_then(|snapshot| offline_access(&record, checked_at, snapshot));
+            let mut updated = record.clone();
+            updated.last_seen = checked_at.max(updated.last_seen);
+            if let Some(anchor) = &anchor {
+                updated.offline_clock = Some(anchor.clone());
             }
-            if allowed {
+            let persisted = updated == record || save(&updated).is_ok();
+            if anchor.is_some() && persisted {
                 Access::Offline(record.display_key)
             } else {
                 Access::Unavailable {
@@ -591,7 +678,19 @@ pub fn check_saved() -> Access {
             }
         }
     };
-    use_trial_if_available(&trial, paid)
+    if matches!(&paid, Access::Active(_) | Access::Offline(_)) {
+        paid
+    } else {
+        use_trial_if_available(&finish_trial_check(trial_check), paid)
+    }
+}
+
+fn finish_trial_check(
+    check: std::thread::JoinHandle<Result<Access, String>>,
+) -> Result<Access, String> {
+    check
+        .join()
+        .map_err(|_| "Could not check the saved trial.".to_string())?
 }
 
 /// Activates a new key for this device and saves it after checking the grant.
@@ -640,6 +739,7 @@ pub fn activate(key: &str) -> Result<Access, String> {
                 verified_at: 0,
                 expires_at: None,
                 last_seen: 0,
+                offline_clock: None,
             };
             let _ = deactivate_record(&client, &failed);
             return Err(reason);
@@ -653,6 +753,9 @@ pub fn activate(key: &str) -> Result<Access, String> {
         verified_at: activated_at,
         expires_at,
         last_seen: activated_at,
+        offline_clock: boot_clock::snapshot()
+            .as_ref()
+            .map(|snapshot| OfflineClock::from_snapshot(snapshot, OFFLINE_GRACE as u64)),
     };
     if let Err(reason) = save(&saved) {
         let _ = deactivate_record(&client, &saved);
@@ -704,6 +807,13 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
 
+    fn snapshot(seconds: u64) -> Snapshot {
+        Snapshot {
+            boot_id: "boot-1".into(),
+            seconds,
+        }
+    }
+
     fn response(status: &str, benefit_id: &str, activation_id: Option<&str>) -> LicenseResponse {
         LicenseResponse {
             organization_id: ORGANIZATION_ID.into(),
@@ -752,12 +862,13 @@ mod tests {
             verified_at: 100,
             expires_at: None,
             last_seen: 0,
+            offline_clock: None,
         };
-        assert!(offline_access(&saved, 100 + OFFLINE_GRACE));
-        assert!(!offline_access(&saved, 100 + OFFLINE_GRACE + 1));
-        assert!(!offline_access(&saved, 99));
+        assert!(offline_access(&saved, 100 + OFFLINE_GRACE, &snapshot(10)).is_some());
+        assert!(offline_access(&saved, 100 + OFFLINE_GRACE + 1, &snapshot(10)).is_none());
+        assert!(offline_access(&saved, 99, &snapshot(10)).is_none());
         saved.expires_at = Some(200);
-        assert!(!offline_access(&saved, 200));
+        assert!(offline_access(&saved, 200, &snapshot(10)).is_none());
     }
 
     #[test]
@@ -769,17 +880,52 @@ mod tests {
             verified_at: 1_000,
             expires_at: None,
             last_seen: 1_000 + OFFLINE_GRACE - 10,
+            offline_clock: None,
         };
-        assert!(offline_access(&saved, 1_000 + OFFLINE_GRACE - 5));
+        assert!(offline_access(&saved, 1_000 + OFFLINE_GRACE - 5, &snapshot(10)).is_some());
         // Back to just after the last online check, far behind the latest
         // time seen.
-        assert!(!offline_access(&saved, 1_010));
+        assert!(offline_access(&saved, 1_010, &snapshot(10)).is_none());
         // Seen past the grace once, the clock going back does not reopen it.
         saved.last_seen = 1_000 + OFFLINE_GRACE + 60;
-        assert!(!offline_access(&saved, 1_000 + OFFLINE_GRACE + 30));
+        assert!(offline_access(&saved, 1_000 + OFFLINE_GRACE + 30, &snapshot(10)).is_none());
         // Records saved before last_seen existed keep working.
         saved.last_seen = 0;
-        assert!(offline_access(&saved, 1_010));
+        assert!(offline_access(&saved, 1_010, &snapshot(10)).is_some());
+    }
+
+    #[test]
+    fn a_frozen_wall_clock_cannot_extend_offline_use() {
+        let saved = SavedLicense {
+            key: "key".into(),
+            activation_id: "device".into(),
+            display_key: "****-ABCD".into(),
+            verified_at: 1_000,
+            expires_at: None,
+            last_seen: 1_000,
+            offline_clock: Some(OfflineClock::from_snapshot(
+                &snapshot(100),
+                OFFLINE_GRACE as u64,
+            )),
+        };
+        let frozen_wall_time = 1_060;
+        assert!(offline_access(
+            &saved,
+            frozen_wall_time,
+            &snapshot(100 + OFFLINE_GRACE as u64)
+        )
+        .is_some());
+        assert!(offline_access(
+            &saved,
+            frozen_wall_time,
+            &snapshot(101 + OFFLINE_GRACE as u64)
+        )
+        .is_none());
+        let rebooted = Snapshot {
+            boot_id: "boot-2".into(),
+            seconds: 50,
+        };
+        assert!(offline_access(&saved, frozen_wall_time, &rebooted).is_none());
     }
 
     #[test]
@@ -789,6 +935,14 @@ mod tests {
             last_seen: 1_000,
             token: None,
         };
+        assert!(matches!(
+            trial_access(&record, false, 1_000),
+            Access::Trial {
+                expires_at,
+                confirmation_required: true,
+                ..
+            } if expires_at == 1_000 + UNCONFIRMED_TRIAL
+        ));
         assert!(matches!(
             trial_access(&record, false, 1_000 + UNCONFIRMED_TRIAL - 1),
             Access::Trial { .. }
@@ -901,6 +1055,26 @@ mod tests {
     }
 
     #[test]
+    fn a_valid_trial_copy_recovers_a_damaged_keychain_item() {
+        let saved = SavedTrial {
+            started_at: 1_000,
+            last_seen: 2_000,
+            token: None,
+        };
+        let (keychain, file) = recover_trial_copies(
+            Err("The saved trial could not be read.".into()),
+            Ok(Some(saved.clone())),
+        )
+        .unwrap();
+        assert_eq!(keychain, None);
+        assert_eq!(file, Some(saved));
+        assert!(
+            recover_trial_copies(Err("The saved trial could not be read.".into()), Ok(None))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn trial_time_left_reads_in_days_then_hours_then_minutes() {
         let hours = |h: u64| Duration::from_secs(h * 3600);
         assert_eq!(trial_left(hours(72), false), "3 days left");
@@ -966,12 +1140,14 @@ mod tests {
         let valid = Access::Trial {
             expires_at: current + 10,
             last_seen: current,
+            confirmation_required: false,
             license_issue: None,
         };
         assert!(valid.allowed());
         assert!(!Access::Trial {
             expires_at: current,
             last_seen: current,
+            confirmation_required: false,
             license_issue: None,
         }
         .allowed());
@@ -984,6 +1160,7 @@ mod tests {
         let trial = Ok(Access::Trial {
             expires_at: current + 60,
             last_seen: current,
+            confirmation_required: false,
             license_issue: None,
         });
         let failure = Access::Blocked {
