@@ -11,7 +11,7 @@ use crate::app::{
     Phase, Recovery, ResultKind, Reveal, Whisp, BAR_HEIGHT, COLLAPSED_HEIGHT, MENU_DIVIDER,
     MENU_PAD, MENU_ROW, NOTICE_EXTRA, RESULT_LINE, WINDOW_RADIUS,
 };
-use crate::cloud::Provider;
+use crate::cloud::{self, GatewayModel, Provider};
 use crate::hotkey;
 use crate::i18n::{t, tf};
 use crate::license::{self, Access};
@@ -925,5 +925,50 @@ fn voice_glyph() -> Div {
                 .h(px(height))
                 .rounded_full()
                 .bg(theme::AMBER)
+        }))
+}
+
+/// Chips that choose the model Vercel AI Gateway transcribes with, for the
+/// key dialogs in onboarding and Settings.
+pub(crate) fn gateway_model_picker(id: &'static str) -> Div {
+    let current = cloud::gateway_model();
+    div()
+        .flex()
+        .gap(px(6.0))
+        .children(GatewayModel::ALL.into_iter().map(move |model| {
+            let selected = model == current;
+            div()
+                .id(SharedString::from(format!("{id}-{}", model.id())))
+                .role(gpui_kit::Role::Button)
+                .aria_label(model.name())
+                .h(px(28.0))
+                .px(px(12.0))
+                .flex()
+                .items_center()
+                .rounded_full()
+                .bg(if selected {
+                    theme::AMBER_SOFT
+                } else {
+                    theme::HUD
+                })
+                .shadow(vec![theme::inner_ring(if selected {
+                    theme::AMBER
+                } else {
+                    theme::HAIRLINE
+                })])
+                .text_size(px(12.0))
+                .font_weight(if selected {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::MEDIUM
+                })
+                .text_color(if selected {
+                    theme::AMBER
+                } else {
+                    theme::SECONDARY
+                })
+                .cursor_pointer()
+                .on_click(move |_, _, cx| crate::choose_gateway_model(model, cx))
+                .child(model.name())
         }))
 }

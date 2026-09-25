@@ -270,6 +270,7 @@ fn endpoint(provider: Provider) -> &'static str {
         Provider::OpenAi => "https://api.openai.com/v1/chat/completions",
         Provider::Groq => "https://api.groq.com/openai/v1/chat/completions",
         Provider::Xai => "https://api.x.ai/v1/chat/completions",
+        Provider::Vercel => "https://ai-gateway.vercel.sh/v1/chat/completions",
     }
 }
 
@@ -279,6 +280,7 @@ fn model(provider: Provider) -> &'static str {
         Provider::OpenAi => "gpt-5.6",
         Provider::Groq => "qwen/qwen3.6-27b",
         Provider::Xai => "grok-4.7",
+        Provider::Vercel => cloud::gateway_model().chat(),
     }
 }
 
@@ -358,6 +360,11 @@ fn translation_body(provider: Provider, text: &str, language: &str) -> Value {
             "model": model(provider),
             "messages": messages,
             "max_completion_tokens": 2048,
+        }),
+        Provider::Vercel => json!({
+            "model": model(provider),
+            "messages": messages,
+            "max_tokens": 2048,
         }),
     }
 }
@@ -499,6 +506,13 @@ fn body(provider: Provider, question: &Question) -> Value {
             "model": model(provider),
             "messages": messages,
             "max_completion_tokens": 1024,
+            "response_format": {"type": "json_object"}
+        }),
+        // The gateway's OpenAI-compatible API, whichever model it routes to.
+        Provider::Vercel => json!({
+            "model": model(provider),
+            "messages": messages,
+            "max_tokens": 1024,
             "response_format": {"type": "json_object"}
         }),
     }

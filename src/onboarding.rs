@@ -681,7 +681,7 @@ impl Onboarding {
             .flex()
             .flex_col()
             .items_center()
-            .gap(px(14.0))
+            .gap(px(12.0))
             .child(
                 div()
                     .flex()
@@ -738,7 +738,7 @@ impl Onboarding {
                 "onboarding-model-{}",
                 choice.id()
             )))
-            .h(px(34.0))
+            .h(px(31.0))
             .px(px(14.0))
             .flex()
             .items_center()
@@ -824,6 +824,9 @@ impl Onboarding {
                             .text_color(theme::LABEL)
                             .child(format!("{} · {}", provider.name(), provider.model())),
                     )
+                    .when(provider == Provider::Vercel, |panel| {
+                        panel.child(crate::ui::gateway_model_picker("onboarding-gateway"))
+                    })
                     .child(
                         div()
                             .h(px(42.0))

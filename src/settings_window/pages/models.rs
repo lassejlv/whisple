@@ -432,6 +432,16 @@ impl SettingsWindow {
                         .flex_col()
                         .gap(px(18.0))
                         .child(cloud_modal_header(provider, connected))
+                        .when(provider == Provider::Vercel, |body| {
+                            body.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(8.0))
+                                    .child(section_label(t("MODEL")))
+                                    .child(crate::ui::gateway_model_picker("settings-gateway")),
+                            )
+                        })
                         .child(self.cloud_key_field(provider, connected, cx))
                         .when_some(self.error.as_ref(), |body, error| {
                             body.child(
@@ -457,6 +467,10 @@ impl SettingsWindow {
                 t("Get a key at console.groq.com ↗"),
             ),
             Provider::Xai => ("https://console.x.ai", t("Get a key at console.x.ai ↗")),
+            Provider::Vercel => (
+                "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai%2Fapi-keys",
+                t("Get a key at vercel.com ↗"),
+            ),
         };
         let note = if connected {
             tf(

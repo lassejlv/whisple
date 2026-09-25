@@ -76,6 +76,7 @@ impl AssetSource for Assets {
                 Some(Cow::Borrowed(include_bytes!("../assets/groq-mark.svg")))
             }
             "icons/whisp/xai.svg" => Some(Cow::Borrowed(include_bytes!("../assets/xai.svg"))),
+            "icons/whisp/vercel.svg" => Some(Cow::Borrowed(include_bytes!("../assets/vercel.svg"))),
             "icons/whisp/onboarding-mic.svg" => Some(Cow::Borrowed(include_bytes!(
                 "../assets/onboarding-mic.svg"
             ))),
@@ -104,7 +105,11 @@ fn main() {
     gpui_kit::application()
         .with_assets(Assets)
         .run(|cx: &mut App| {
-            i18n::set(i18n::resolve(&settings::load().app_language));
+            let prefs = settings::load();
+            i18n::set(i18n::resolve(&prefs.app_language));
+            if let Some(model) = cloud::GatewayModel::from_id(&prefs.gateway_model) {
+                cloud::set_gateway_model(model);
+            }
             gpui_kit::init(cx);
             theme::install(cx);
             app::bind_keys(cx);
@@ -115,6 +120,16 @@ fn main() {
                 open_hud(cx, !menu_bar);
             }
         });
+}
+
+/// Switches the model Vercel AI Gateway transcribes with, saves it, and
+/// redraws every window that names it.
+pub(crate) fn choose_gateway_model(model: cloud::GatewayModel, cx: &mut App) {
+    cloud::set_gateway_model(model);
+    let mut prefs = settings::load();
+    prefs.gateway_model = model.id().to_string();
+    settings::save(&prefs);
+    cx.refresh_windows();
 }
 
 /// Switches the interface language, saves it, and redraws every window.

@@ -1675,6 +1675,7 @@ impl Whisp {
             show_in_menu_bar: settings::load().show_in_menu_bar,
             voice_commands: self.voice_commands,
             screen_context: self.screen_context,
+            gateway_model: cloud::gateway_model().id().into(),
         });
     }
 
