@@ -521,7 +521,11 @@ impl Onboarding {
         let status = if self.microphone_allowed {
             t("Allowed")
         } else if self.requesting_microphone {
-            t("Waiting for macOS")
+            if cfg!(target_os = "windows") {
+                t("Checking the microphone")
+            } else {
+                t("Waiting for macOS")
+            }
         } else {
             t("Not allowed yet")
         };
@@ -556,7 +560,7 @@ impl Onboarding {
                     .gap(px(12.0))
                     .child(heading(t("Let Whisple hear you"), 30.0))
                     .child(description(
-                        t("macOS will ask for microphone access. Whisple only listens while recording. With a local model, audio stays on your Mac."),
+                        if cfg!(target_os = "windows") { t("Whisple only listens while recording. With a local model, audio stays on your PC.") } else { t("macOS will ask for microphone access. Whisple only listens while recording. With a local model, audio stays on your Mac.") },
                         440.0,
                         15.0,
                     )),
@@ -627,7 +631,7 @@ impl Onboarding {
                             .items_center()
                             .text_size(px(12.0))
                             .text_color(theme::TERTIARY)
-                            .child(t("You can change this later in System Settings › Privacy & Security.")),
+                            .child(if cfg!(target_os = "windows") { t("You can change this later in Settings › Privacy & security › Microphone.") } else { t("You can change this later in System Settings › Privacy & Security.") }),
                     ),
             )
             .when_some(self.error.as_ref(), |this, error| {
@@ -1114,7 +1118,12 @@ impl Onboarding {
         let label = match self.step {
             WELCOME => t("Get started").to_string(),
             FEATURES => t("Continue").to_string(),
-            MICROPHONE if self.requesting_microphone => t("Waiting for macOS…").to_string(),
+            MICROPHONE if self.requesting_microphone => if cfg!(target_os = "windows") {
+                t("Checking the microphone…")
+            } else {
+                t("Waiting for macOS…")
+            }
+            .to_string(),
             MICROPHONE if self.microphone_allowed => t("Continue").to_string(),
             MICROPHONE => t("Allow microphone").to_string(),
             MODEL if self.download.is_some() => {

@@ -48,7 +48,7 @@ impl Whisp {
                 self.snap_chrome();
             }
             Phase::Transcribing => {}
-            Phase::Idle | Phase::Result(_) => match Mic::start(&self.input_device) {
+            Phase::Idle | Phase::Result(_) => match self.start_mic() {
                 Ok(mic) => {
                     self.failed_audio = None;
                     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -376,6 +376,16 @@ impl Whisp {
         self.transcribe_audio(samples, rate, local_override, true, cx);
         self.snap_chrome();
         cx.notify();
+    }
+
+    /// Opens the chosen input. A Windows privacy block fails first, since
+    /// the device could otherwise open and record only silence.
+    fn start_mic(&self) -> Result<Mic, String> {
+        #[cfg(target_os = "windows")]
+        if crate::platform::microphone_permission::is_blocked() {
+            return Err(crate::platform::microphone_permission::BLOCKED.into());
+        }
+        Mic::start(&self.input_device)
     }
 
     pub(super) fn stop_recording(&mut self) {
