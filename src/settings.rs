@@ -33,6 +33,8 @@ pub struct Preferences {
     pub voice_commands: bool,
     /// The assistant sees the front app, selection and a screenshot.
     pub screen_context: bool,
+    /// The model Vercel AI Gateway transcribes with: "grok" or "openai".
+    pub gateway_model: String,
 }
 
 pub struct Language {
@@ -158,6 +160,8 @@ struct File {
     voice_commands: bool,
     #[serde(default = "yes")]
     screen_context: bool,
+    #[serde(default)]
+    gateway_model: String,
 }
 
 fn yes() -> bool {
@@ -185,6 +189,7 @@ impl Default for Preferences {
             show_in_menu_bar: true,
             voice_commands: true,
             screen_context: true,
+            gateway_model: crate::cloud::GatewayModel::Grok.id().into(),
         }
     }
 }
@@ -277,6 +282,9 @@ pub fn decode(raw: &str) -> Preferences {
     prefs.show_in_menu_bar = file.show_in_menu_bar;
     prefs.voice_commands = file.voice_commands;
     prefs.screen_context = file.screen_context;
+    if let Some(model) = crate::cloud::GatewayModel::from_id(&file.gateway_model) {
+        prefs.gateway_model = model.id().into();
+    }
     prefs
 }
 
@@ -308,6 +316,7 @@ impl From<&Preferences> for File {
             show_in_menu_bar: prefs.show_in_menu_bar,
             voice_commands: prefs.voice_commands,
             screen_context: prefs.screen_context,
+            gateway_model: prefs.gateway_model.clone(),
         }
     }
 }
@@ -315,6 +324,28 @@ impl From<&Preferences> for File {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_gateway_model_defaults_to_grok_and_keeps_a_known_choice() {
+        assert_eq!(
+            decode(r#"{"selected":"cloud-vercel"}"#).gateway_model,
+            "grok"
+        );
+        assert_eq!(
+            decode(r#"{"gateway_model":"openai"}"#).gateway_model,
+            "openai"
+        );
+        assert_eq!(
+            decode(r#"{"gateway_model":"whisper"}"#).gateway_model,
+            "grok"
+        );
+        let prefs = Preferences {
+            gateway_model: "openai".into(),
+            ..Preferences::default()
+        };
+        let raw = serde_json::to_string(&File::from(&prefs)).unwrap();
+        assert_eq!(decode(&raw).gateway_model, "openai");
+    }
 
     #[test]
     fn old_model_file_keeps_the_new_defaults() {

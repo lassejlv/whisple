@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::apps;
-use crate::cloud::{self, Provider, TranscriptionError};
+use crate::cloud::{self, Models, Provider, TranscriptionError};
 use crate::commands::{self, Command};
 use crate::screen::{self, Snapshot};
 
@@ -269,15 +269,25 @@ fn endpoint(provider: Provider) -> &'static str {
     match provider {
         Provider::OpenAi => "https://api.openai.com/v1/chat/completions",
         Provider::Groq => "https://api.groq.com/openai/v1/chat/completions",
+        Provider::Xai => "https://api.x.ai/v1/chat/completions",
+        Provider::Vercel => "https://ai-gateway.vercel.sh/v1/chat/completions",
     }
 }
 
-/// Chat models that read screenshots.
-fn model(provider: Provider) -> &'static str {
+/// Chat models that read screenshots, newest first.
+fn chat_models(provider: Provider) -> Models {
     match provider {
-        Provider::OpenAi => "gpt-5.6",
-        Provider::Groq => "qwen/qwen3.6-27b",
+        // Luna is GPT-5.6's fast tier.
+        Provider::OpenAi => Models::new("gpt-5.6-luna", "gpt-5.5"),
+        // Groq retired Qwen 3.6 for Qwen 3.8, and keeps no older Qwen.
+        Provider::Groq => Models::only("qwen/qwen3.8-27b"),
+        Provider::Xai => Models::new("grok-4.7", "grok-4.3"),
+        Provider::Vercel => cloud::gateway_model().chat_models(),
     }
+}
+
+fn model(provider: Provider) -> &'static str {
+    chat_models(provider).current()
 }
 
 pub fn ask(provider: Provider, question: &Question) -> Result<Action, Error> {
@@ -352,11 +362,35 @@ fn translation_body(provider: Provider, text: &str, language: &str) -> Value {
             "reasoning_effort": "none",
             "max_completion_tokens": 2048,
         }),
+        // Grok 4.7 thinks hard by default; a note needs no deep thought.
+        Provider::Xai => json!({
+            "model": model(provider),
+            "messages": messages,
+            "reasoning_effort": "low",
+            "max_completion_tokens": 2048,
+        }),
+        Provider::Vercel => json!({
+            "model": model(provider),
+            "messages": messages,
+            "max_tokens": 2048,
+        }),
     }
 }
 
 /// Sends one chat request and returns the reply's text.
 fn complete(provider: Provider, endpoint: &str, key: &str, body: &Value) -> Result<String, Error> {
+    complete_with(provider, chat_models(provider), endpoint, key, body)
+}
+
+/// Like `complete`, retrying once with the fallback model when the provider
+/// does not know the newest one.
+fn complete_with(
+    provider: Provider,
+    models: Models,
+    endpoint: &str,
+    key: &str,
+    body: &Value,
+) -> Result<String, Error> {
     let client = Client::builder()
         .timeout(Duration::from_secs(60))
         .user_agent("Whisple/0.1")
@@ -367,24 +401,41 @@ fn complete(provider: Provider, endpoint: &str, key: &str, body: &Value) -> Resu
                 format!("Could not start the request: {err}"),
             )
         })?;
-    let response = client
-        .post(endpoint)
-        .bearer_auth(key)
-        .json(body)
-        .send()
-        .map_err(|err| {
-            Error::new(
-                ErrorKind::Offline,
-                format!("Could not reach {}: {err}", provider.name()),
-            )
-        })?;
+    let send = |body: &Value| {
+        client
+            .post(endpoint)
+            .bearer_auth(key)
+            .json(body)
+            .send()
+            .map_err(|err| {
+                Error::new(
+                    ErrorKind::Offline,
+                    format!("Could not reach {}: {err}", provider.name()),
+                )
+            })
+    };
+    let mut response = send(body)?;
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let text = response.text().unwrap_or_default();
+        let tried = body["model"].as_str().unwrap_or_default();
+        match models.fall_back_from(tried) {
+            Some(fallback) if cloud::is_unknown_model(status, &text) => {
+                let mut retry = body.clone();
+                retry["model"] = json!(fallback);
+                response = send(&retry)?;
+            }
+            _ => return Err(response_error(provider, status, error_message(&text))),
+        }
+    }
     let status = response.status();
     if !status.is_success() {
-        let detail = response
-            .json::<Value>()
-            .ok()
-            .and_then(|body| body["error"]["message"].as_str().map(str::to_string));
-        return Err(response_error(provider, status.as_u16(), detail));
+        let text = response.text().unwrap_or_default();
+        return Err(response_error(
+            provider,
+            status.as_u16(),
+            error_message(&text),
+        ));
     }
     let reply: Value = response.json().map_err(|err| {
         Error::new(
@@ -401,6 +452,13 @@ fn complete(provider: Provider, endpoint: &str, key: &str, body: &Value) -> Resu
                 format!("{} sent an empty answer.", provider.name()),
             )
         })
+}
+
+/// The `error.message` of an OpenAI-style error body.
+fn error_message(body: &str) -> Option<String> {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|body| body["error"]["message"].as_str().map(str::to_string))
 }
 
 fn response_error(provider: Provider, status: u16, detail: Option<String>) -> Error {
@@ -486,6 +544,20 @@ fn body(provider: Provider, question: &Question) -> Value {
             // Qwen can think first; a voice bar needs the answer now.
             "reasoning_effort": "none",
             "max_completion_tokens": 1024,
+            "response_format": {"type": "json_object"}
+        }),
+        Provider::Xai => json!({
+            "model": model(provider),
+            "messages": messages,
+            "reasoning_effort": "low",
+            "max_completion_tokens": 1024,
+            "response_format": {"type": "json_object"}
+        }),
+        // The gateway's OpenAI-compatible API, whichever model it routes to.
+        Provider::Vercel => json!({
+            "model": model(provider),
+            "messages": messages,
+            "max_tokens": 1024,
             "response_format": {"type": "json_object"}
         }),
     }
@@ -676,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    fn both_providers_send_the_screenshot_and_read_the_action() {
+    fn every_provider_sends_the_screenshot_and_reads_the_action() {
         for provider in Provider::ALL {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let url = format!("http://{}/chat/completions", listener.local_addr().unwrap());
@@ -764,7 +836,72 @@ mod tests {
     }
 
     #[test]
-    fn both_providers_translate_a_note() {
+    fn a_chat_model_the_provider_does_not_know_is_retried_with_the_fallback() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/chat/completions", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let mut models = Vec::new();
+            for attempt in 0..2 {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 8192];
+                let body_start = loop {
+                    let count = socket.read(&mut chunk).unwrap();
+                    assert!(count > 0, "request ended early");
+                    request.extend_from_slice(&chunk[..count]);
+                    if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let header = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                        let size: usize = header
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length: "))
+                            .unwrap()
+                            .trim()
+                            .parse()
+                            .unwrap();
+                        if request.len() >= end + 4 + size {
+                            break end + 4;
+                        }
+                    }
+                };
+                let body: Value = serde_json::from_slice(&request[body_start..]).unwrap();
+                models.push(body["model"].as_str().unwrap().to_string());
+                let (status, reply) = if attempt == 0 {
+                    (
+                        "404 Not Found",
+                        json!({"error": {"message": "The model does not exist", "code": "model_not_found"}}),
+                    )
+                } else {
+                    (
+                        "200 OK",
+                        json!({"choices": [{"message": {"role": "assistant", "content": "Hello."}}]}),
+                    )
+                };
+                let reply = reply.to_string();
+                write!(
+                    socket,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    reply.len()
+                )
+                .unwrap();
+            }
+            models
+        });
+        let models = Models::new("test-newest-chat", "test-older-chat");
+        let body = json!({"model": models.current(), "messages": []});
+        let reply = complete_with(Provider::OpenAi, models, &url, "test-key", &body).unwrap();
+        assert_eq!(reply, "Hello.");
+        assert_eq!(
+            server.join().unwrap(),
+            ["test-newest-chat", "test-older-chat"]
+        );
+        assert_eq!(models.current(), "test-older-chat");
+    }
+
+    #[test]
+    fn every_provider_translates_a_note() {
         for provider in Provider::ALL {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let url = format!("http://{}/chat/completions", listener.local_addr().unwrap());
