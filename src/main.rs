@@ -38,7 +38,20 @@ struct Assets;
 // Lucide icons the panels use beyond the kit's default component bundle.
 gpui_kit::assets::icon_assets!(
     ExtraIcons,
-    [Check, Copy, Cpu, Info, KeyRound, Mic, SlidersHorizontal, X,]
+    [
+        AppWindow,
+        Check,
+        Copy,
+        Cpu,
+        Info,
+        KeyRound,
+        Keyboard,
+        Mic,
+        ScanEye,
+        ShieldCheck,
+        SlidersHorizontal,
+        X,
+    ]
 );
 
 impl AssetSource for Assets {

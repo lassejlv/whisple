@@ -1,4 +1,4 @@
-//! About: version, updates, and links.
+//! About: version, updates, setting up again, and links.
 use gpui_kit::{div, prelude::*, px, Context, Div, FontWeight, IntoElement, Styled};
 
 use crate::settings_window::widgets::*;
@@ -117,6 +117,40 @@ impl SettingsWindow {
                     ),
             )
             .child(section("Updates", update_rows))
+            .child(section(
+                "Setup",
+                vec![div()
+                    .h(px(58.0))
+                    .px(px(16.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.0))
+                    .child(label_stack(
+                        "Set up Whisple again",
+                        Some("Walk through the features, microphone and model steps."),
+                    ))
+                    .child(
+                        div()
+                            .id("settings-restart-onboarding")
+                            .role(gpui_kit::Role::Button)
+                            .aria_label("Restart onboarding")
+                            .h(px(28.0))
+                            .px(px(12.0))
+                            .rounded(px(8.0))
+                            .bg(theme::RAISED)
+                            .flex()
+                            .items_center()
+                            .text_size(px(12.0))
+                            .text_color(theme::LABEL)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.hud.update(cx, |hud, cx| hud.restart_onboarding(cx))
+                            }))
+                            .child("Restart onboarding"),
+                    )
+                    .into_any_element()],
+            ))
             .child(section(
                 "More",
                 vec![

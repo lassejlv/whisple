@@ -116,6 +116,14 @@ pub(crate) struct SettingsHandle {
     view: Entity<SettingsWindow>,
 }
 
+impl SettingsHandle {
+    pub(crate) fn close(&self, cx: &mut App) {
+        self.window
+            .update(cx, |_, window, _| window.remove_window())
+            .ok();
+    }
+}
+
 pub(crate) fn open(
     cx: &mut App,
     hud: Entity<Whisp>,

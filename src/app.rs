@@ -887,6 +887,31 @@ impl Whisp {
         cx.notify();
     }
 
+    /// Closes the bar and Settings and walks through onboarding again. It
+    /// opens a fresh bar when it finishes.
+    pub(crate) fn restart_onboarding(&mut self, cx: &mut Context<Self>) {
+        if self.visibility_locked() {
+            self.error = Some("Finish recording before setting up again.".into());
+            self.snap_chrome();
+            cx.notify();
+            return;
+        }
+        self.stop_recording();
+        self.cancel_download(cx);
+        // Drop any result still in flight; this bar is about to close.
+        self.transcription_id = self.transcription_id.wrapping_add(1);
+        let hud = self.hud_window;
+        let settings = self.settings_window.take();
+        cx.defer(move |cx| {
+            // Open onboarding first so the app always has a window.
+            crate::onboarding::open(cx);
+            if let Some(settings) = settings {
+                settings.close(cx);
+            }
+            hud.update(cx, |_, window, _| window.remove_window()).ok();
+        });
+    }
+
     pub(crate) fn open_settings_window(&mut self, cx: &mut Context<Self>) {
         self.open_settings_at(SettingsTarget::General, cx);
     }
