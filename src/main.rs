@@ -22,6 +22,7 @@ mod stt;
 mod text;
 mod theme;
 mod tray;
+mod trial_server;
 mod ui;
 #[cfg(target_os = "macos")]
 mod updater;

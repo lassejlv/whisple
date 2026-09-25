@@ -8302,6 +8302,7 @@ dependencies = [
  "objc",
  "png 0.18.1",
  "reqwest",
+ "ring",
  "semver",
  "serde",
  "serde_json",
