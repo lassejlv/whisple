@@ -20,7 +20,6 @@ use gpui_kit::{
 };
 
 use pages::audio::{language_choices, microphone_choices, output_language_choices, Choice};
-use widgets::traffic_light;
 
 use crate::app::Whisp;
 use crate::audio::{self, Mic};
@@ -171,7 +170,14 @@ pub(crate) fn open(
         .open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: None,
+                // The system draws the window controls: macOS traffic lights
+                // over the sidebar, and the window manager's title bar on
+                // Linux.
+                titlebar: Some(gpui_kit::TitlebarOptions {
+                    title: Some("Whisple Settings".into()),
+                    appears_transparent: true,
+                    traffic_light_position: Some(gpui_kit::point(px(18.0), px(18.0))),
+                }),
                 focus: true,
                 show: true,
                 kind: WindowKind::Normal,
@@ -181,17 +187,22 @@ pub(crate) fn open(
                 is_resizable: false,
                 is_minimizable: true,
                 display_id: None,
-                window_background: WindowBackgroundAppearance::Transparent,
+                window_background: WindowBackgroundAppearance::Opaque,
                 icon: None,
                 app_id: Some("whisple-settings".into()),
                 window_min_size: Some(window_size),
-                window_decorations: Some(WindowDecorations::Client),
+                window_decorations: Some(WindowDecorations::Server),
                 tabbing_identifier: None,
             },
             |window, cx| {
                 let view = cx.new(|cx| SettingsWindow::new(window, hud, Page::General, cx));
                 view.update(cx, |view, cx| view.show_target(target, window, cx));
                 settings_view = Some(view.clone());
+                let closing = view.downgrade();
+                window.on_window_should_close(cx, move |_, cx| {
+                    closing.update(cx, |view, cx| view.release(cx)).ok();
+                    true
+                });
                 window.focus(&view.focus_handle(cx), cx);
                 cx.new(|cx| {
                     Root::new(view, window, cx)
@@ -429,9 +440,15 @@ impl SettingsWindow {
     }
 
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.release(cx);
+        window.remove_window();
+    }
+
+    /// Lets go of what Settings holds before its window closes, however it
+    /// is closed: a pending shortcut capture and the microphone meter.
+    fn release(&mut self, cx: &mut Context<Self>) {
         self.hud.update(cx, |hud, cx| hud.cancel_hotkey_capture(cx));
         self.monitor = None;
-        window.remove_window();
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> Div {
@@ -444,32 +461,13 @@ impl SettingsWindow {
             .bg(gpui_kit::rgba(0x101012ff))
             .border_r_1()
             .border_color(theme::HAIRLINE)
-            .child(
-                div()
-                    .h(px(52.0))
-                    .px(px(18.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(traffic_light(
-                        0xff5f57ff,
-                        "Close settings",
-                        cx,
-                        |view, window, cx| view.close(window, cx),
-                    ))
-                    .child(traffic_light(
-                        0xfebc2eff,
-                        "Minimize settings",
-                        cx,
-                        |_, window, _| window.minimize_window(),
-                    ))
-                    .child(traffic_light(
-                        0x28c840ff,
-                        "Zoom settings",
-                        cx,
-                        |_, window, _| window.zoom_window(),
-                    )),
-            )
+            // Room for the native traffic lights, which macOS draws over
+            // the sidebar. Elsewhere the title bar sits above the window.
+            .child(div().h(px(if cfg!(target_os = "macos") {
+                52.0
+            } else {
+                12.0
+            })))
             .child(
                 div()
                     .px(px(10.0))
@@ -642,11 +640,8 @@ impl Render for SettingsWindow {
             )
             .relative()
             .flex()
-            .rounded(px(16.0))
             .overflow_hidden()
             .bg(theme::HUD)
-            .border_1()
-            .border_color(theme::HAIRLINE)
             .font_family(theme::UI_FONT)
             .child(self.sidebar(cx))
             .child(self.pane(cx))

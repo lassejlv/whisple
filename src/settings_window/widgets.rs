@@ -4,7 +4,7 @@ use gpui_kit::component::select::{SearchableVec, Select, SelectState};
 use gpui_kit::component::{Icon, Sizable};
 use gpui_kit::{
     div, prelude::*, px, Animation, AnimationExt, AnyElement, Context, Div, Entity, FontWeight,
-    IntoElement, SharedString, Stateful, Styled, Window,
+    IntoElement, SharedString, Stateful, Styled,
 };
 
 use super::{Choice, SettingsWindow};
@@ -12,23 +12,6 @@ use crate::cloud::Provider;
 use crate::hotkey;
 use crate::motion;
 use crate::theme;
-
-pub(super) fn traffic_light(
-    color: u32,
-    label: &'static str,
-    cx: &mut Context<SettingsWindow>,
-    action: impl Fn(&mut SettingsWindow, &mut Window, &mut Context<SettingsWindow>) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(SharedString::from(label))
-        .role(gpui_kit::Role::Button)
-        .aria_label(label)
-        .size(px(12.0))
-        .rounded_full()
-        .bg(gpui_kit::rgba(color))
-        .cursor_pointer()
-        .on_click(cx.listener(move |view, _, window, cx| action(view, window, cx)))
-}
 
 pub(super) fn section(title: &'static str, rows: Vec<AnyElement>) -> Div {
     labeled_section(section_label(title), rows)
