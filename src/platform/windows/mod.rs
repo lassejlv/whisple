@@ -1,6 +1,11 @@
 pub(crate) mod dictation;
 pub(crate) mod placement;
 
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+};
+use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation};
+
 const HKEY_CURRENT_USER: isize = 0x8000_0001_u32 as i32 as isize;
 const RRF_RT_REG_DWORD: u32 = 0x0000_0010;
 
@@ -37,4 +42,18 @@ pub(crate) fn light_taskbar() -> bool {
         )
     };
     status == 0 && data != 0
+}
+
+/// Sets up COM on the calling thread. GPUI's main thread already has it, and
+/// a background thread joins the multithreaded apartment, which UI
+/// Automation and the shell prefer for callers without a message loop.
+pub(crate) fn com_ready() {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    }
+}
+
+pub(crate) fn automation() -> Option<IUIAutomation> {
+    com_ready();
+    unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok() }
 }
