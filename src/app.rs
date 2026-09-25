@@ -62,6 +62,8 @@ type TypingTarget = ();
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResultKind {
     Dictation,
+    /// A note translated into this language.
+    Translated(&'static str),
     /// A voice command's confirmation, like "Opened Spotify".
     Command,
     Answer(Provider),
@@ -173,6 +175,8 @@ pub(crate) struct Whisp {
     last_license_check: Instant,
     transcription_id: u64,
     pub language: String,
+    /// The language notes come out in. Empty means the spoken language.
+    pub output_language: String,
     pub show_hotkey: String,
     /// Shows the bar and starts recording. Empty when turned off.
     pub record_hotkey: String,
@@ -311,6 +315,7 @@ impl Whisp {
             last_license_check: Instant::now(),
             transcription_id: 0,
             language: prefs.language,
+            output_language: prefs.output_language,
             show_hotkey: prefs.show_hotkey,
             record_hotkey: prefs.record_hotkey,
             copy_notes: prefs.copy_notes,
@@ -458,7 +463,7 @@ impl Whisp {
     /// assistant's answer.
     pub(crate) fn result_lines(&self) -> usize {
         match self.result_kind {
-            ResultKind::Dictation | ResultKind::Command => 2,
+            ResultKind::Dictation | ResultKind::Translated(_) | ResultKind::Command => 2,
             ResultKind::Answer(_) | ResultKind::Typed(_) => self
                 .last_text
                 .chars()
@@ -1172,6 +1177,23 @@ impl Whisp {
         cx.notify();
     }
 
+    /// Sets the language notes come out in; empty keeps the spoken one.
+    pub(crate) fn choose_output_language(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !id.is_empty() && settings::language_name(id).is_none() {
+            return;
+        }
+        self.output_language = id.to_string();
+        self.persist();
+        cx.notify();
+    }
+
+    /// The language to translate notes into, unless it is the one spoken.
+    fn translation_target(&self) -> Option<&'static str> {
+        (self.output_language != self.language)
+            .then(|| settings::language_name(&self.output_language))
+            .flatten()
+    }
+
     pub(crate) fn toggle_voice_commands(&mut self, cx: &mut Context<Self>) {
         self.voice_commands = !self.voice_commands;
         self.persist();
@@ -1406,7 +1428,9 @@ impl Whisp {
                         view.failed_audio = None;
                         view.recovery = None;
                         match assistant::route(&text, view.voice_commands) {
-                            Route::Dictation => view.finish_dictation(text, target, copy, cx),
+                            Route::Dictation if view.translation_target().is_none() => {
+                                view.finish_dictation(text, target, copy, cx)
+                            }
                             route => view.act(route, text, target, copy, cx),
                         }
                     }
@@ -1473,8 +1497,8 @@ impl Whisp {
         self.error = None;
     }
 
-    /// Runs a voice command or asks the assistant, keeping the bar busy
-    /// until it is done.
+    /// Runs a voice command, asks the assistant, or translates a note,
+    /// keeping the bar busy until it is done.
     fn act(
         &mut self,
         route: Route,
@@ -1485,15 +1509,23 @@ impl Whisp {
     ) {
         let transcription_id = self.transcription_id;
         let asking = matches!(route, Route::Ask(_));
-        let provider = asking.then(|| self.assistant_provider()).flatten();
+        let translate_to = self.translation_target();
+        let provider = (asking || translate_to.is_some())
+            .then(|| self.assistant_provider())
+            .flatten();
         self.phase = Phase::Transcribing;
         self.transcribing_provider = provider;
-        self.working = Some(if asking { "Thinking…" } else { "Opening…" });
+        self.working = Some(match route {
+            Route::Ask(_) => "Thinking…",
+            Route::Command(_) => "Opening…",
+            Route::Dictation => "Translating…",
+        });
         let request = assistant::Request {
             transcript,
             route,
             provider,
             screen: self.screen_context.then(|| self.screen.clone()),
+            translate_to,
         };
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let outcome = cx
@@ -1507,7 +1539,19 @@ impl Whisp {
                 view.transcribing_provider = None;
                 view.working = None;
                 match outcome {
-                    Ok(Outcome::Dictation(text)) => view.finish_dictation(text, target, copy, cx),
+                    Ok(Outcome::Dictation {
+                        text,
+                        translated,
+                        warning,
+                    }) => {
+                        view.finish_dictation(text, target, copy, cx);
+                        if let Some(language) = translated {
+                            view.result_kind = ResultKind::Translated(language);
+                        }
+                        if warning.is_some() {
+                            view.error = warning;
+                        }
+                    }
                     Ok(Outcome::Opened(message)) => {
                         view.copied = false;
                         view.show_result(message, ResultKind::Command);
@@ -1618,6 +1662,7 @@ impl Whisp {
             onboarding_complete: settings::load().onboarding_complete,
             selected: self.selected.clone(),
             language: self.language.clone(),
+            output_language: self.output_language.clone(),
             show_hotkey: self.show_hotkey.clone(),
             record_hotkey: self.record_hotkey.clone(),
             copy_notes: self.copy_notes,

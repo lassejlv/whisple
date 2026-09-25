@@ -42,8 +42,15 @@ pub fn route(transcript: &str, commands_on: bool) -> Route {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// Not a command after all: type it as a note.
-    Dictation(String),
+    /// A note to type: not a command after all, or plain dictation that
+    /// needed translating.
+    Dictation {
+        text: String,
+        /// The language the note was translated into.
+        translated: Option<&'static str>,
+        /// Why a translation was skipped; the original words are kept.
+        warning: Option<String>,
+    },
     /// A short confirmation, like "Opened Spotify".
     Opened(String),
     Answer {
@@ -94,16 +101,28 @@ pub struct Request {
     pub provider: Option<Provider>,
     /// `None` when the user turned screen context off.
     pub screen: Option<Snapshot>,
+    /// The language to write notes and answers in, when it differs from
+    /// the spoken one.
+    pub translate_to: Option<&'static str>,
 }
 
 /// Carries out a command or asks the assistant. Blocking; run it off the UI
 /// thread.
 pub fn perform(request: Request) -> Result<Outcome, Error> {
     match request.route {
-        Route::Dictation => Ok(Outcome::Dictation(request.transcript)),
-        Route::Command(command) => {
-            run_command(&command)?.map_or(Ok(Outcome::Dictation(request.transcript)), Ok)
-        }
+        Route::Dictation => Ok(dictate(
+            request.transcript,
+            request.provider,
+            request.translate_to,
+        )),
+        Route::Command(command) => match run_command(&command)? {
+            Some(outcome) => Ok(outcome),
+            None => Ok(dictate(
+                request.transcript,
+                request.provider,
+                request.translate_to,
+            )),
+        },
         Route::Ask(question) => {
             // "Hey Whisple, open Spotify" needs no model when Spotify is
             // installed; it works offline and at once.
@@ -138,10 +157,41 @@ pub fn perform(request: Request) -> Result<Outcome, Error> {
                     screen: screen.as_ref(),
                     screenshot: screenshot.as_deref(),
                     apps: &names,
+                    reply_language: request.translate_to,
                 },
             )?;
             carry_out(action, provider, &apps)
         }
+    }
+}
+
+/// A note, translated when an output language is set. A failed translation
+/// keeps the spoken words, so nothing the user said is lost.
+fn dictate(text: String, provider: Option<Provider>, target: Option<&'static str>) -> Outcome {
+    let Some(language) = target else {
+        return Outcome::Dictation {
+            text,
+            translated: None,
+            warning: None,
+        };
+    };
+    let translation = match provider {
+        Some(provider) => translate(provider, &text, language).map_err(|err| err.message),
+        None => Err(format!(
+            "Add an OpenAI or Groq key in Settings › Models to translate into {language}."
+        )),
+    };
+    match translation {
+        Ok(translated) => Outcome::Dictation {
+            text: translated,
+            translated: Some(language),
+            warning: None,
+        },
+        Err(message) => Outcome::Dictation {
+            text,
+            translated: None,
+            warning: Some(message),
+        },
     }
 }
 
@@ -211,6 +261,8 @@ pub struct Question<'a> {
     pub screen: Option<&'a Snapshot>,
     pub screenshot: Option<&'a [u8]>,
     pub apps: &'a [String],
+    /// The language `text` should be written in, when the user set one.
+    pub reply_language: Option<&'a str>,
 }
 
 fn endpoint(provider: Provider) -> &'static str {
@@ -242,6 +294,69 @@ fn ask_with_key(
     key: &str,
     question: &Question,
 ) -> Result<Action, Error> {
+    let content = complete(provider, endpoint, key, &body(provider, question))?;
+    parse_action(&content)
+        .map_err(|message| Error::new(ErrorKind::Other, format!("{}: {message}", provider.name())))
+}
+
+/// Translates a note into `language` with the provider's chat model.
+pub fn translate(provider: Provider, text: &str, language: &str) -> Result<String, Error> {
+    let key = cloud::load_key(provider).map_err(|err| match err {
+        TranscriptionError::Unauthorized(message) => Error::new(ErrorKind::Key(provider), message),
+        other => Error::new(ErrorKind::Other, other.message()),
+    })?;
+    translate_with_key(provider, endpoint(provider), &key, text, language)
+}
+
+fn translate_with_key(
+    provider: Provider,
+    endpoint: &str,
+    key: &str,
+    text: &str,
+    language: &str,
+) -> Result<String, Error> {
+    let body = translation_body(provider, text, language);
+    let content = complete(provider, endpoint, key, &body)?;
+    let content = match content.rfind("</think>") {
+        Some(end) => &content[end + "</think>".len()..],
+        None => &content,
+    };
+    let translated = content.trim();
+    if translated.is_empty() {
+        return Err(Error::new(
+            ErrorKind::Other,
+            format!("{} sent an empty translation.", provider.name()),
+        ));
+    }
+    Ok(translated.to_string())
+}
+
+fn translation_body(provider: Provider, text: &str, language: &str) -> Value {
+    let messages = json!([
+        {
+            "role": "system",
+            "content": format!("Translate the user's dictated note into {language}. Keep its meaning, tone, names and punctuation. If it is already in {language}, return it unchanged. Reply with only the translation, no quotes or notes.")
+        },
+        {"role": "user", "content": text},
+    ]);
+    match provider {
+        Provider::OpenAi => json!({
+            "model": model(provider),
+            "messages": messages,
+            "reasoning_effort": "low",
+            "max_completion_tokens": 4000,
+        }),
+        Provider::Groq => json!({
+            "model": model(provider),
+            "messages": messages,
+            "reasoning_effort": "none",
+            "max_completion_tokens": 2048,
+        }),
+    }
+}
+
+/// Sends one chat request and returns the reply's text.
+fn complete(provider: Provider, endpoint: &str, key: &str, body: &Value) -> Result<String, Error> {
     let client = Client::builder()
         .timeout(Duration::from_secs(60))
         .user_agent("Whisple/0.1")
@@ -255,7 +370,7 @@ fn ask_with_key(
     let response = client
         .post(endpoint)
         .bearer_auth(key)
-        .json(&body(provider, question))
+        .json(body)
         .send()
         .map_err(|err| {
             Error::new(
@@ -277,16 +392,15 @@ fn ask_with_key(
             format!("Could not read {}'s answer: {err}", provider.name()),
         )
     })?;
-    let content = reply["choices"][0]["message"]["content"]
+    reply["choices"][0]["message"]["content"]
         .as_str()
+        .map(str::to_string)
         .ok_or_else(|| {
             Error::new(
                 ErrorKind::Other,
                 format!("{} sent an empty answer.", provider.name()),
             )
-        })?;
-    parse_action(content)
-        .map_err(|message| Error::new(ErrorKind::Other, format!("{}: {message}", provider.name())))
+        })
 }
 
 fn response_error(provider: Provider, status: u16, detail: Option<String>) -> Error {
@@ -402,6 +516,9 @@ fn prompt(question: &Question) -> String {
     if !question.apps.is_empty() {
         prompt.push_str(&format!("\nInstalled apps: {}\n", question.apps.join(", ")));
     }
+    if let Some(language) = question.reply_language {
+        prompt.push_str(&format!("\nWrite `text` in {language}.\n"));
+    }
     prompt
 }
 
@@ -471,9 +588,17 @@ mod tests {
             route: Route::Command(Command::OpenApp("Zzyzx Qqq".into())),
             provider: None,
             screen: None,
+            translate_to: None,
         })
         .unwrap();
-        assert_eq!(outcome, Outcome::Dictation("Open Zzyzx Qqq.".into()));
+        assert_eq!(
+            outcome,
+            Outcome::Dictation {
+                text: "Open Zzyzx Qqq.".into(),
+                translated: None,
+                warning: None,
+            }
+        );
     }
 
     #[test]
@@ -483,6 +608,7 @@ mod tests {
             route: Route::Ask("What is this?".into()),
             provider: None,
             screen: None,
+            translate_to: None,
         })
         .unwrap_err();
         assert_eq!(err.kind, ErrorKind::NoKey);
@@ -523,6 +649,7 @@ mod tests {
             screen: Some(&screen),
             screenshot: Some(b"png"),
             apps: &apps,
+            reply_language: Some("Danish"),
         });
         assert!(text.contains("Request: Reply that I can"));
         assert!(text.contains("- App: Mail"));
@@ -530,12 +657,14 @@ mod tests {
         assert!(text.contains("Can you make it at 5?"));
         assert!(text.contains("screenshot"));
         assert!(text.contains("Installed apps: Mail, Spotify"));
+        assert!(text.contains("Write `text` in Danish."));
 
         let private = prompt(&Question {
             text: "What time is it in Tokyo?",
             screen: None,
             screenshot: None,
             apps: &[],
+            reply_language: None,
         });
         assert!(private.contains("turned off sharing"));
     }
@@ -609,10 +738,81 @@ mod tests {
                     screen: Some(&Snapshot::default()),
                     screenshot: Some(&[0x89, b'P', b'N', b'G']),
                     apps: &[],
+                    reply_language: None,
                 },
             )
             .unwrap();
             assert_eq!(action, Action::Answer("A weather report.".into()));
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn a_note_that_cannot_be_translated_keeps_the_spoken_words() {
+        let outcome = dictate("Hej med dig.".into(), None, Some("English"));
+        let Outcome::Dictation {
+            text,
+            translated,
+            warning,
+        } = outcome
+        else {
+            panic!("expected a note");
+        };
+        assert_eq!(text, "Hej med dig.");
+        assert_eq!(translated, None);
+        assert!(warning.unwrap().contains("to translate into English"));
+    }
+
+    #[test]
+    fn both_providers_translate_a_note() {
+        for provider in Provider::ALL {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/chat/completions", listener.local_addr().unwrap());
+            let server = thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 8192];
+                let body_start = loop {
+                    let count = socket.read(&mut chunk).unwrap();
+                    assert!(count > 0, "request ended early");
+                    request.extend_from_slice(&chunk[..count]);
+                    if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let header = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                        let size: usize = header
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length: "))
+                            .unwrap()
+                            .trim()
+                            .parse()
+                            .unwrap();
+                        if request.len() >= end + 4 + size {
+                            break end + 4;
+                        }
+                    }
+                };
+                let body: Value = serde_json::from_slice(&request[body_start..]).unwrap();
+                assert_eq!(body["model"], model(provider));
+                assert!(body["messages"][0]["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("into English"));
+                assert_eq!(body["messages"][1]["content"], "Hej med dig.");
+                assert!(body.get("response_format").is_none());
+                let reply = json!({"choices": [{"message": {"role": "assistant", "content": "  Hi there.\n"}}]})
+                    .to_string();
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    reply.len()
+                )
+                .unwrap();
+            });
+            let translated =
+                translate_with_key(provider, &url, "test-key", "Hej med dig.", "English").unwrap();
+            assert_eq!(translated, "Hi there.");
             server.join().unwrap();
         }
     }

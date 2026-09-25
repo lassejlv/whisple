@@ -16,6 +16,8 @@ pub struct Preferences {
     pub onboarding_complete: bool,
     pub selected: String,
     pub language: String,
+    /// The language notes come out in. Empty means the spoken language.
+    pub output_language: String,
     pub show_hotkey: String,
     /// Shows the bar and starts recording. Empty when turned off.
     pub record_hotkey: String,
@@ -133,6 +135,8 @@ struct File {
     #[serde(default)]
     language: String,
     #[serde(default)]
+    output_language: String,
+    #[serde(default)]
     show_hotkey: String,
     #[serde(default = "default_record_hotkey")]
     record_hotkey: String,
@@ -166,6 +170,7 @@ impl Default for Preferences {
             onboarding_complete: false,
             selected: String::new(),
             language: "en".into(),
+            output_language: String::new(),
             show_hotkey: DEFAULT_HOTKEY.into(),
             record_hotkey: DEFAULT_RECORD_HOTKEY.into(),
             copy_notes: true,
@@ -183,6 +188,14 @@ impl Preferences {
     pub fn languages() -> &'static [Language] {
         LANGUAGES
     }
+}
+
+/// A language's English name, such as "Danish" for `da`. Not for "auto".
+pub fn language_name(id: &str) -> Option<&'static str> {
+    LANGUAGES
+        .iter()
+        .find(|language| language.id == id && id != "auto")
+        .map(|language| language.name)
 }
 
 pub fn load() -> Preferences {
@@ -231,6 +244,9 @@ pub fn decode(raw: &str) -> Preferences {
     {
         prefs.language = file.language;
     }
+    if language_name(&file.output_language).is_some() {
+        prefs.output_language = file.output_language;
+    }
     if let Some(chord) = crate::hotkey::parse(&file.show_hotkey) {
         if chord.has_modifier() {
             prefs.show_hotkey = chord.canonical();
@@ -273,6 +289,7 @@ impl From<&Preferences> for File {
             onboarding_complete: prefs.onboarding_complete,
             selected: prefs.selected.clone(),
             language: prefs.language.clone(),
+            output_language: prefs.output_language.clone(),
             show_hotkey: prefs.show_hotkey.clone(),
             record_hotkey: prefs.record_hotkey.clone(),
             copy_notes: prefs.copy_notes,
@@ -338,6 +355,28 @@ mod tests {
         assert!(!prefs.onboarding_complete);
         let raw = serde_json::to_string(&File::from(&prefs)).unwrap();
         assert!(!decode(&raw).onboarding_complete);
+    }
+
+    #[test]
+    fn the_output_language_survives_a_round_trip() {
+        let prefs = decode(r#"{"language":"da","output_language":"en"}"#);
+        assert_eq!(prefs.language, "da");
+        assert_eq!(prefs.output_language, "en");
+        let raw = serde_json::to_string(&File::from(&prefs)).unwrap();
+        assert_eq!(decode(&raw).output_language, "en");
+        assert!(Preferences::default().output_language.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_output_language_means_the_spoken_one() {
+        assert!(decode(r#"{"output_language":"zz"}"#)
+            .output_language
+            .is_empty());
+        assert!(decode(r#"{"output_language":"auto"}"#)
+            .output_language
+            .is_empty());
+        assert_eq!(language_name("da"), Some("Danish"));
+        assert_eq!(language_name("auto"), None);
     }
 
     #[test]

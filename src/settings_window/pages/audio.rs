@@ -1,4 +1,5 @@
-//! Audio: the input device, a live level meter, and the spoken language.
+//! Audio: the input device, a live level meter, the spoken language, and
+//! the language notes come out in.
 
 use gpui_kit::component::select::{SearchableVec, SelectItem};
 use gpui_kit::{div, prelude::*, px, Context, Div, IntoElement, SharedString, Styled};
@@ -51,6 +52,27 @@ pub(in crate::settings_window) fn language_choices() -> SearchableVec<Choice> {
     )
 }
 
+/// "Same as spoken" first, then every language a note can be translated to.
+pub(in crate::settings_window) fn output_language_choices() -> SearchableVec<Choice> {
+    let same = Choice {
+        id: String::new(),
+        label: "Same as spoken".into(),
+    };
+    SearchableVec::new(
+        std::iter::once(same)
+            .chain(
+                Preferences::languages()
+                    .iter()
+                    .filter(|language| language.id != "auto")
+                    .map(|language| Choice {
+                        id: language.id.into(),
+                        label: language.name.into(),
+                    }),
+            )
+            .collect::<Vec<_>>(),
+    )
+}
+
 impl SettingsWindow {
     pub(in crate::settings_window) fn choose_microphone(
         &mut self,
@@ -79,6 +101,16 @@ impl SettingsWindow {
     ) {
         self.hud
             .update(cx, |hud, cx| hud.choose_language(language, cx));
+        cx.notify();
+    }
+
+    pub(in crate::settings_window) fn choose_output_language(
+        &mut self,
+        language: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.hud
+            .update(cx, |hud, cx| hud.choose_output_language(language, cx));
         cx.notify();
     }
 
@@ -125,12 +157,21 @@ impl SettingsWindow {
             ))
             .child(section(
                 "Language",
-                vec![selector_row(
-                    "Spoken language",
-                    Some("English-only models always transcribe English."),
-                    selector_control(&self.language_select, "Spoken language").into_any_element(),
-                    false,
-                )],
+                vec![
+                    selector_row(
+                        "Spoken language",
+                        Some("English-only models always transcribe English."),
+                        selector_control(&self.language_select, "Spoken language")
+                            .into_any_element(),
+                        false,
+                    ),
+                    selector_row(
+                        "Output language",
+                        Some("Translates your notes with your OpenAI or Groq key."),
+                        selector_control(&self.output_select, "Output language").into_any_element(),
+                        true,
+                    ),
+                ],
             ))
     }
 }

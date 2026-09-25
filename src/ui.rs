@@ -507,6 +507,11 @@ impl Whisp {
                 if words == 1 { "word" } else { "words" },
                 clock(self.recorded)
             ),
+            ResultKind::Translated(language) => format!(
+                "{words} {} · {} · {language}",
+                if words == 1 { "word" } else { "words" },
+                clock(self.recorded)
+            ),
             ResultKind::Command => "Voice command".to_string(),
             ResultKind::Answer(provider) => format!("Whisple · {}", provider.name()),
             ResultKind::Typed(provider) => format!("Written by Whisple · {}", provider.name()),

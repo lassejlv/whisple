@@ -19,7 +19,7 @@ use gpui_kit::{
     WindowOptions,
 };
 
-use pages::audio::{language_choices, microphone_choices, Choice};
+use pages::audio::{language_choices, microphone_choices, output_language_choices, Choice};
 use widgets::traffic_light;
 
 use crate::app::Whisp;
@@ -96,6 +96,7 @@ pub(crate) struct SettingsWindow {
     page: Page,
     microphone_select: Entity<SelectState<SearchableVec<Choice>>>,
     language_select: Entity<SelectState<SearchableVec<Choice>>>,
+    output_select: Entity<SelectState<SearchableVec<Choice>>>,
     cloud_config: Option<Provider>,
     key_input: Option<Entity<InputState>>,
     key_visible: bool,
@@ -207,6 +208,16 @@ pub(crate) fn open(
     }
 }
 
+/// The output language's row in its picker: "Same as spoken" is first, then
+/// the languages without "Detect automatically".
+fn output_language_position(id: &str) -> usize {
+    Preferences::languages()
+        .iter()
+        .filter(|language| language.id != "auto")
+        .position(|language| language.id == id)
+        .map_or(0, |index| index + 1)
+}
+
 impl SettingsWindow {
     fn new(
         window: &mut Window,
@@ -215,9 +226,13 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&hud, |_, _, cx| cx.notify()).detach();
-        let (input_device, language) = {
+        let (input_device, language, output_language) = {
             let hud = hud.read(cx);
-            (hud.input_device.clone(), hud.language.clone())
+            (
+                hud.input_device.clone(),
+                hud.language.clone(),
+                hud.output_language.clone(),
+            )
         };
         // Load devices when Audio is opened, so License and other pages do not
         // touch the microphone subsystem during startup.
@@ -251,6 +266,23 @@ impl SettingsWindow {
             )
             .searchable(true)
         });
+        let output_index = output_language_position(&output_language);
+        let output_select = cx.new(|cx| {
+            SelectState::new(
+                output_language_choices(),
+                Some(IndexPath::default().row(output_index)),
+                window,
+                cx,
+            )
+            .searchable(true)
+        });
+        cx.subscribe_in(&output_select, window, |view, _, event, _, cx| {
+            let SelectEvent::Confirm(Some(language)) = event else {
+                return;
+            };
+            view.choose_output_language(language, cx);
+        })
+        .detach();
         cx.subscribe_in(&microphone_select, window, |view, _, event, _, cx| {
             let SelectEvent::Confirm(Some(name)) = event else {
                 return;
@@ -295,6 +327,7 @@ impl SettingsWindow {
             page: initial_page,
             microphone_select,
             language_select,
+            output_select,
             cloud_config: None,
             key_input: None,
             key_visible: false,
@@ -343,9 +376,15 @@ impl SettingsWindow {
         self.monitor_level = 0.0;
         self.page = page;
         if page == Page::Audio {
-            let language = self.hud.read(cx).language.clone();
+            let (language, output_language) = {
+                let hud = self.hud.read(cx);
+                (hud.language.clone(), hud.output_language.clone())
+            };
             self.language_select.update(cx, |state, cx| {
                 state.set_selected_value(&language, window, cx);
+            });
+            self.output_select.update(cx, |state, cx| {
+                state.set_selected_value(&output_language, window, cx);
             });
             self.load_microphones(window, cx);
         }
