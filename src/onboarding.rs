@@ -233,7 +233,7 @@ impl Onboarding {
             WELCOME => self.step = FEATURES,
             FEATURES => self.step = MICROPHONE,
             MICROPHONE if self.microphone_allowed => self.step = MODEL,
-            MICROPHONE => self.request_microphone(cx),
+            MICROPHONE => self.request_microphone(window, cx),
             MODEL if self.cloud_config.is_some() => self.save_cloud_key(window, cx),
             MODEL => match self.choice {
                 Choice::Cloud(provider) => self.prepare_cloud(provider, window, cx),
@@ -245,18 +245,23 @@ impl Onboarding {
         cx.notify();
     }
 
-    fn request_microphone(&mut self, cx: &mut Context<Self>) {
+    fn request_microphone(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.requesting_microphone {
             return;
         }
         self.requesting_microphone = true;
         self.error = None;
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async { microphone_permission::request() })
                 .await;
-            this.update(cx, |view, cx| {
+            this.update_in(cx, |view, window, cx| {
+                // macOS asks in its own dialog and then returns focus to the
+                // app that was in front before. Whisple has no Dock icon, so
+                // onboarding would stay buried behind that app's windows.
+                window.activate_window();
+                cx.activate(true);
                 view.requesting_microphone = false;
                 match result {
                     Ok(()) => {
