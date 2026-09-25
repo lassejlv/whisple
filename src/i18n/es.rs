@@ -200,6 +200,7 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("Show API key", "Mostrar clave API"),
     ("Show Whisple", "Mostrar Whisple"),
     ("Show in menu bar", "Mostrar en la barra de menús"),
+    ("Show in system tray", "Mostrar en la bandeja del sistema"),
     ("Small English", "Inglés pequeño"),
     ("Source code", "Código fuente"),
     ("Spanish", "Español"),

@@ -30,7 +30,7 @@ semver = "1"
 sha2 = "0.11"
 sys-locale = "0.3"
 tempfile = "3"
-whisper-rs = "0.14"
+whisper-rs = "0.16"
 x11rb = { version = "0.13", features = ["shape"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -43,6 +43,20 @@ keyring = { version = "3.6", default-features = false, features = ["apple-native
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3.6", default-features = false, features = ["linux-native-sync-persistent", "crypto-rust"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3.6", default-features = false, features = ["windows-native"] }
+global-hotkey = "0.8"
+tray-icon = { version = "0.24", default-features = false }
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [profile.dev.package.gpui-pre]
 opt-level = 3

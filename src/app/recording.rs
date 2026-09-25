@@ -51,7 +51,7 @@ impl Whisp {
             Phase::Idle | Phase::Result(_) => match Mic::start(&self.input_device) {
                 Ok(mic) => {
                     self.failed_audio = None;
-                    #[cfg(target_os = "macos")]
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
                     if self.dictation_target.is_none() {
                         dictation::request_access();
                         self.dictation_target = dictation::Target::focused();
@@ -137,9 +137,9 @@ impl Whisp {
         let language = settings::whisper_language(&self.language).map(str::to_string);
         let clean = self.clean_fillers;
         let copy = self.copy_notes;
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let target = self.dictation_target.take();
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let target = ();
         let task_samples = Arc::clone(&samples);
         cx.spawn(async move |this: WeakEntity<Self>, cx| {

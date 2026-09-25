@@ -24,7 +24,11 @@ use crate::transcription::models::{self, ModelSpec};
 use crate::ui::theme;
 
 const WIDTH: f32 = 720.0;
-const HEIGHT: f32 = 540.0;
+/// Height of the transparent macOS title bar, which the window content runs
+/// under so the native traffic lights sit on the onboarding surface. Other
+/// systems draw their title bar above the content instead.
+const TITLEBAR_HEIGHT: f32 = if cfg!(target_os = "macos") { 44.0 } else { 0.0 };
+const HEIGHT: f32 = 496.0 + TITLEBAR_HEIGHT;
 
 const WELCOME: usize = 0;
 const FEATURES: usize = 1;
@@ -124,7 +128,14 @@ pub(crate) fn open(cx: &mut App) {
     cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: None,
+            // The system draws the window controls: macOS traffic lights over
+            // the top of the onboarding surface, and the regular title bar on
+            // Windows and Linux.
+            titlebar: Some(gpui_kit::TitlebarOptions {
+                title: Some("Whisple".into()),
+                appears_transparent: cfg!(target_os = "macos"),
+                traffic_light_position: Some(gpui_kit::point(px(16.0), px(16.0))),
+            }),
             focus: true,
             show: true,
             kind: WindowKind::Normal,
@@ -134,16 +145,23 @@ pub(crate) fn open(cx: &mut App) {
             is_resizable: false,
             is_minimizable: false,
             display_id: None,
-            window_background: WindowBackgroundAppearance::Transparent,
+            window_background: WindowBackgroundAppearance::Opaque,
             icon: None,
             app_id: Some("whisple-onboarding".into()),
             window_min_size: Some(window_size),
-            window_decorations: Some(WindowDecorations::Client),
+            window_decorations: Some(WindowDecorations::Server),
             tabbing_identifier: None,
         },
         |window, cx| {
             let view = cx.new(|cx| Onboarding::new(window, cx));
             window.focus(&view.focus_handle(cx), cx);
+            // Onboarding is the only window until setup finishes, so closing
+            // it with the system close button quits instead of leaving an
+            // invisible process behind.
+            window.on_window_should_close(cx, |_, cx| {
+                cx.quit();
+                true
+            });
             cx.new(|cx| {
                 Root::new(view, window, cx)
                     .bordered(false)
@@ -1244,34 +1262,10 @@ impl Render for Onboarding {
             )
             .flex()
             .flex_col()
-            .rounded(px(16.0))
             .overflow_hidden()
             .bg(theme::HUD)
-            .border_1()
-            .border_color(theme::HAIRLINE)
-            .shadow(vec![theme::top_edge(theme::EDGE)])
             .font_family(theme::UI_FONT)
-            .child(
-                div()
-                    .h(px(44.0))
-                    .w_full()
-                    .px(px(16.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .children(
-                        [0xff5f57ff_u32, 0xfebc2eff, 0x28c840ff]
-                            .into_iter()
-                            .map(|color| {
-                                div().size(px(12.0)).rounded_full().bg(gpui_kit::Rgba {
-                                    r: ((color >> 24) & 0xff) as f32 / 255.0,
-                                    g: ((color >> 16) & 0xff) as f32 / 255.0,
-                                    b: ((color >> 8) & 0xff) as f32 / 255.0,
-                                    a: 1.0,
-                                })
-                            }),
-                    ),
-            )
+            .child(div().h(px(TITLEBAR_HEIGHT)).flex_shrink_0())
             .child(self.content(cx))
             .child(self.footer(cx))
     }

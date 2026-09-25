@@ -266,7 +266,7 @@ impl Whisp {
             self.listen_started = None;
             self.levels.clear();
             self.rest_bars();
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             {
                 self.dictation_target = None;
             }

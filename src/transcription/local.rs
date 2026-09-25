@@ -71,13 +71,13 @@ pub fn transcribe(
         .full(params, &pcm)
         .map_err(|err| format!("Transcription failed: {err}"))?;
 
-    let segments = state
-        .full_n_segments()
-        .map_err(|err| format!("Transcription failed: {err}"))?;
     let mut raw = String::new();
-    for index in 0..segments {
-        let piece = state
-            .full_get_segment_text(index)
+    for index in 0..state.full_n_segments() {
+        let Some(segment) = state.get_segment(index) else {
+            continue;
+        };
+        let piece = segment
+            .to_str()
             .map_err(|err| format!("Transcription failed: {err}"))?;
         if !raw.is_empty() && !piece.starts_with(' ') {
             raw.push(' ');

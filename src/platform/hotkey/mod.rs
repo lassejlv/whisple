@@ -1,9 +1,12 @@
 use gpui_kit::{Keystroke, Modifiers};
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod native;
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub use super::linux::hotkey::{install, set_paused, take_presses};
-#[cfg(target_os = "macos")]
-pub use super::macos::hotkey::{install, set_paused, take_presses};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub use native::{install, set_paused, take_presses};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shortcut {
@@ -12,7 +15,7 @@ pub enum Shortcut {
 }
 
 impl Shortcut {
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     pub const ALL: [Self; 2] = [Self::Show, Self::Record];
 
     pub fn index(self) -> usize {
@@ -36,7 +39,7 @@ impl Presses {
 
     /// Two presses before the app looks cancel out, like a quick double tap
     /// on a toggle.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     pub(crate) fn flip(&mut self, shortcut: Shortcut) {
         match shortcut {
             Shortcut::Show => self.show = !self.show,
@@ -119,13 +122,20 @@ impl Chord {
         parts.join("-")
     }
 
+    /// Keycaps as the system writes them: words on Windows, symbols
+    /// elsewhere.
     pub fn keycaps(&self) -> Vec<String> {
+        let names = if cfg!(target_os = "windows") {
+            ["Ctrl", "Alt", "Shift", "Win"]
+        } else {
+            ["⌃", "⌥", "⇧", "⌘"]
+        };
         let mut caps = Vec::new();
         for (held, symbol) in [
-            (self.ctrl, "⌃"),
-            (self.alt, "⌥"),
-            (self.shift, "⇧"),
-            (self.super_key, "⌘"),
+            (self.ctrl, names[0]),
+            (self.alt, names[1]),
+            (self.shift, names[2]),
+            (self.super_key, names[3]),
         ] {
             if held {
                 caps.push(symbol.to_string());
@@ -143,16 +153,24 @@ pub fn keycaps(source: &str) -> Vec<String> {
 }
 
 pub fn symbols(source: &str) -> String {
-    keycaps(source).concat()
+    let caps = keycaps(source);
+    if cfg!(target_os = "windows") {
+        caps.join("+")
+    } else {
+        caps.concat()
+    }
 }
 
 fn key_label(key: &str) -> String {
     match key {
         "space" => "Space".into(),
         "escape" => "Esc".into(),
+        "return" | "enter" if cfg!(target_os = "windows") => "Enter".into(),
         "return" | "enter" => "Return".into(),
         "tab" => "Tab".into(),
+        "backspace" if cfg!(target_os = "windows") => "Backspace".into(),
         "backspace" => "Delete".into(),
+        "delete" if cfg!(target_os = "windows") => "Del".into(),
         "delete" => "Forward Delete".into(),
         "left" => "Left".into(),
         "right" => "Right".into(),
@@ -183,9 +201,13 @@ mod tests {
         let chord = parse("ctrl-shift-space").unwrap();
         assert!(chord.has_modifier());
         assert_eq!(chord.canonical(), "ctrl-shift-space");
+        #[cfg(not(target_os = "windows"))]
         assert_eq!(chord.keycaps(), ["⌃", "⇧", "Space"]);
+        #[cfg(target_os = "windows")]
+        assert_eq!(chord.keycaps(), ["Ctrl", "Shift", "Space"]);
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn shortcut_reads_as_symbols() {
         assert_eq!(symbols("ctrl-shift-space"), "⌃⇧Space");
@@ -194,6 +216,15 @@ mod tests {
             keycaps("ctrl-alt-shift-super-f5"),
             ["⌃", "⌥", "⇧", "⌘", "F5"]
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn shortcut_reads_as_windows_key_names() {
+        assert_eq!(symbols("ctrl-shift-space"), "Ctrl+Shift+Space");
+        assert_eq!(symbols("super-alt-k"), "Alt+Win+K");
+        assert_eq!(symbols("ctrl-backspace"), "Ctrl+Backspace");
+        assert_eq!(symbols("alt-return"), "Alt+Enter");
     }
 
     #[test]
