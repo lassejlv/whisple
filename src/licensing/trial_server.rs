@@ -33,7 +33,7 @@ struct Reply {
 }
 
 /// `sha256("whisple-trial-v1:" + hardware ID)` in lowercase hex. The raw
-/// hardware ID never leaves the Mac.
+/// hardware ID never leaves the computer.
 pub fn device_id() -> Option<String> {
     hardware_id().map(|id| device_hash(&id))
 }
@@ -56,8 +56,14 @@ fn hardware_id() -> Option<String> {
     platform_uuid(&String::from_utf8_lossy(&output.stdout))
 }
 
+/// Windows uses the installation's MachineGuid.
+#[cfg(target_os = "windows")]
+fn hardware_id() -> Option<String> {
+    crate::platform::windows::machine_guid()
+}
+
 /// Development builds on Linux use the machine ID instead.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn hardware_id() -> Option<String> {
     ["/etc/machine-id", "/var/lib/dbus/machine-id"]
         .iter()
