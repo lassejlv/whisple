@@ -1,6 +1,7 @@
 //! Spanish interface text, keyed by the English original.
 
 pub const STRINGS: &[(&str, &str)] = &[
+    ("Connect to the internet to continue your trial.", "Conéctate a internet para continuar la prueba."),
     ("A key is saved on this device. Paste a new one to replace it. Audio goes to {} only when selected.", "Hay una clave guardada en este dispositivo. Pega una nueva para reemplazarla. El audio solo va a {} cuando está seleccionado."),
     ("A recent verification allows temporary offline use.", "Una verificación reciente permite usarlo sin conexión por un tiempo."),
     ("A voice bar for your whole computer. A few quick steps and you’re talking instead of typing.", "Una barra de voz para todo tu ordenador. Unos pasos rápidos y estarás hablando en lugar de escribir."),

@@ -554,13 +554,16 @@ impl Whisp {
                         }
                         // A trial records the time often, so setting the clock
                         // back between sessions costs the time used, not
-                        // just the time since launch.
-                        let license_interval =
-                            if matches!(view.license_access, Access::Trial { .. }) {
-                                Duration::from_secs(5 * 60)
-                            } else {
-                                Duration::from_secs(6 * 60 * 60)
-                            };
+                        // just the time since launch. A locked trial waiting
+                        // for the server tries again as often.
+                        let license_interval = if matches!(
+                            view.license_access,
+                            Access::Trial { .. } | Access::Unavailable { .. }
+                        ) {
+                            Duration::from_secs(5 * 60)
+                        } else {
+                            Duration::from_secs(6 * 60 * 60)
+                        };
                         if view.last_license_check.elapsed() >= license_interval {
                             view.refresh_license(cx);
                         }

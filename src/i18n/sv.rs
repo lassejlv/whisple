@@ -1,6 +1,7 @@
 //! Swedish interface text, keyed by the English original.
 
 pub const STRINGS: &[(&str, &str)] = &[
+    ("Connect to the internet to continue your trial.", "Anslut till internet för att fortsätta provperioden."),
     ("A key is saved on this device. Paste a new one to replace it. Audio goes to {} only when selected.", "En nyckel är sparad på den här enheten. Klistra in en ny för att ersätta den. Ljud skickas bara till {} när modellen är vald."),
     ("A recent verification allows temporary offline use.", "En nyligen gjord kontroll tillåter tillfällig användning offline."),
     ("A voice bar for your whole computer. A few quick steps and you’re talking instead of typing.", "Ett röstfält för hela datorn. Några snabba steg, sedan pratar du i stället för att skriva."),

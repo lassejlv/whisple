@@ -1,6 +1,7 @@
 //! Danish interface text, keyed by the English original.
 
 pub const STRINGS: &[(&str, &str)] = &[
+    ("Connect to the internet to continue your trial.", "Opret forbindelse til internettet for at fortsætte prøveperioden."),
     ("A key is saved on this device. Paste a new one to replace it. Audio goes to {} only when selected.", "Der er gemt en nøgle på denne enhed. Indsæt en ny for at erstatte den. Lyd sendes kun til {}, når modellen er valgt."),
     ("A recent verification allows temporary offline use.", "En nylig bekræftelse giver midlertidig offline-brug."),
     ("A voice bar for your whole computer. A few quick steps and you’re talking instead of typing.", "En stemmebjælke til hele din computer. Et par hurtige trin, og så taler du i stedet for at skrive."),

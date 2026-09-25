@@ -12,7 +12,8 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::i18n::tf;
+use crate::i18n::{t, tf};
+use crate::trial_server::{self, ServerTrial};
 
 pub const CHECKOUT_URL: &str =
     "https://buy.polar.sh/polar_cl_jvWJVAZBAHpctw43ZsWUNlIfBCYx0f6jizX8x4Hoqud";
@@ -133,7 +134,15 @@ pub fn trial_left(remaining: Duration, compact: bool) -> String {
 struct SavedTrial {
     started_at: i64,
     last_seen: i64,
+    /// The trial server's signed answer for this Mac, once it gave one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    token: Option<String>,
 }
+
+/// How long a trial runs before the trial server has confirmed it. Blocking
+/// the server and deleting the local copies then gains an hour, not three
+/// days.
+const UNCONFIRMED_TRIAL: i64 = 60 * 60;
 
 fn trial_state(record: &SavedTrial, checked_at: i64) -> Access {
     let expires_at = record.started_at.saturating_add(TRIAL_LENGTH);
@@ -195,12 +204,53 @@ fn merge_trials(
         return SavedTrial {
             started_at: checked_at,
             last_seen: checked_at,
+            token: None,
         };
     };
     known.fold(first.clone(), |merged, record| SavedTrial {
         started_at: merged.started_at.min(record.started_at),
         last_seen: merged.last_seen.max(record.last_seen),
+        token: merged.token.or_else(|| record.token.clone()),
     })
+}
+
+/// The server's word on this Mac's trial: a saved token that still verifies,
+/// or a fresh one from the server.
+fn confirmed_trial(device: &str, saved: [Option<&str>; 2]) -> Option<(String, ServerTrial)> {
+    saved
+        .into_iter()
+        .flatten()
+        .find_map(|token| {
+            trial_server::verify(token, device).map(|trial| (token.to_string(), trial))
+        })
+        .or_else(|| {
+            let token = trial_server::fetch(device).ok()?;
+            let trial = trial_server::verify(&token, device)?;
+            Some((token, trial))
+        })
+}
+
+/// Moves the local start back to what the server remembers. A shorter trial
+/// set on the server counts as an earlier start.
+fn apply_server_trial(record: &mut SavedTrial, server: ServerTrial) {
+    record.started_at = record
+        .started_at
+        .min(server.started_at)
+        .min(server.expires_at.saturating_sub(TRIAL_LENGTH));
+}
+
+/// The trial's state, locked after an hour until the server has confirmed it.
+fn trial_access(record: &SavedTrial, confirmed: bool, checked_at: i64) -> Access {
+    let access = trial_state(record, checked_at);
+    let unconfirmed_for = checked_at.max(record.last_seen) - record.started_at;
+    if !confirmed && matches!(access, Access::Trial { .. }) && unconfirmed_for >= UNCONFIRMED_TRIAL
+    {
+        return Access::Unavailable {
+            display_key: String::new(),
+            reason: t("Connect to the internet to continue your trial.").into(),
+        };
+    }
+    access
 }
 
 /// A second copy of the trial beside the settings, so removing the Keychain
@@ -245,7 +295,17 @@ pub fn start_trial() -> Result<Access, String> {
     };
     let file = read_trial_file();
     let mut record = merge_trials(keychain.clone(), file.clone(), checked_at);
-    let access = trial_state(&record, checked_at);
+    let saved_tokens = [
+        keychain.as_ref().and_then(|saved| saved.token.as_deref()),
+        file.as_ref().and_then(|saved| saved.token.as_deref()),
+    ];
+    let server =
+        trial_server::device_id().and_then(|device| confirmed_trial(&device, saved_tokens));
+    record.token = server.as_ref().map(|(token, _)| token.clone());
+    if let Some((_, trial)) = server {
+        apply_server_trial(&mut record, trial);
+    }
+    let access = trial_access(&record, server.is_some(), checked_at);
     // Persist the highest observed time, including expiration. A restart or a
     // small clock adjustment cannot create a fresh 72-hour window.
     record.last_seen = checked_at.max(record.last_seen);
@@ -723,14 +783,105 @@ mod tests {
     }
 
     #[test]
+    fn an_unconfirmed_trial_locks_after_an_hour_until_the_server_answers() {
+        let record = SavedTrial {
+            started_at: 1_000,
+            last_seen: 1_000,
+            token: None,
+        };
+        assert!(matches!(
+            trial_access(&record, false, 1_000 + UNCONFIRMED_TRIAL - 1),
+            Access::Trial { .. }
+        ));
+        assert!(matches!(
+            trial_access(&record, false, 1_000 + UNCONFIRMED_TRIAL),
+            Access::Unavailable { .. }
+        ));
+        // Confirmed, the whole trial runs.
+        assert!(matches!(
+            trial_access(&record, true, 1_000 + TRIAL_LENGTH - 1),
+            Access::Trial { .. }
+        ));
+        // An ended trial reads as ended, not as waiting for the server.
+        assert_eq!(
+            trial_access(&record, false, 1_000 + TRIAL_LENGTH),
+            Access::TrialExpired
+        );
+    }
+
+    #[test]
+    fn the_server_start_wins_when_it_is_earlier() {
+        let mut record = SavedTrial {
+            started_at: 9_000,
+            last_seen: 9_000,
+            token: None,
+        };
+        // Local copies deleted: the server remembers the first start.
+        apply_server_trial(
+            &mut record,
+            ServerTrial {
+                started_at: 1_000,
+                expires_at: 1_000 + TRIAL_LENGTH,
+            },
+        );
+        assert_eq!(record.started_at, 1_000);
+        // A later server start never moves the local start forward.
+        apply_server_trial(
+            &mut record,
+            ServerTrial {
+                started_at: 5_000,
+                expires_at: 5_000 + TRIAL_LENGTH,
+            },
+        );
+        assert_eq!(record.started_at, 1_000);
+        // A shorter trial on the server ends it sooner.
+        let mut short = SavedTrial {
+            started_at: 100_000,
+            last_seen: 100_000,
+            token: None,
+        };
+        apply_server_trial(
+            &mut short,
+            ServerTrial {
+                started_at: 100_000,
+                expires_at: 100_000 + 3_600,
+            },
+        );
+        assert_eq!(trial_state(&short, 100_000 + 3_600), Access::TrialExpired);
+    }
+
+    #[test]
+    fn a_saved_token_travels_with_the_merged_trial() {
+        let with_token = SavedTrial {
+            started_at: 1_000,
+            last_seen: 2_000,
+            token: Some("payload.signature".into()),
+        };
+        let without = SavedTrial {
+            started_at: 1_500,
+            last_seen: 3_000,
+            token: None,
+        };
+        let merged = merge_trials(Some(without), Some(with_token), 4_000);
+        assert_eq!(merged.token.as_deref(), Some("payload.signature"));
+        assert_eq!(merged.started_at, 1_000);
+        assert_eq!(merged.last_seen, 3_000);
+        // Records saved before tokens existed still load.
+        let old: SavedTrial = serde_json::from_str(r#"{"started_at":1,"last_seen":2}"#).unwrap();
+        assert_eq!(old.token, None);
+    }
+
+    #[test]
     fn a_trial_survives_losing_one_of_its_two_copies() {
         let started = SavedTrial {
             started_at: 1_000,
             last_seen: 5_000,
+            token: None,
         };
         let fresh = SavedTrial {
             started_at: 9_000,
             last_seen: 9_000,
+            token: None,
         };
         // Keychain item deleted: the file copy keeps the original start.
         assert_eq!(merge_trials(None, Some(started.clone()), 9_000), started);
@@ -742,6 +893,7 @@ mod tests {
             SavedTrial {
                 started_at: 1_000,
                 last_seen: 9_000,
+                token: None,
             }
         );
         // Only with neither copy does a trial begin now.
@@ -773,6 +925,7 @@ mod tests {
         let mut trial = SavedTrial {
             started_at: 1_000,
             last_seen: 1_000,
+            token: None,
         };
         assert!(matches!(trial_state(&trial, 1_000), Access::Trial { .. }));
         trial.last_seen = 1_000 + TRIAL_LENGTH - 1;
@@ -793,6 +946,7 @@ mod tests {
         let mut trial = SavedTrial {
             started_at: 1_000,
             last_seen: 2_000,
+            token: None,
         };
         assert!(matches!(
             trial_state(&trial, 2_000 - CLOCK_TOLERANCE),
