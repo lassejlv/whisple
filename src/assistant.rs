@@ -277,7 +277,7 @@ fn endpoint(provider: Provider) -> &'static str {
 /// Chat models that read screenshots.
 fn model(provider: Provider) -> &'static str {
     match provider {
-        Provider::OpenAi => "gpt-5.6",
+        Provider::OpenAi => "gpt-5.6-luna",
         Provider::Groq => "qwen/qwen3.6-27b",
         Provider::Xai => "grok-4.7",
         Provider::Vercel => cloud::gateway_model().chat(),

@@ -2,7 +2,7 @@
 //! AI Gateway account.
 
 use std::io::Cursor;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
 
 use base64::Engine;
@@ -96,7 +96,7 @@ impl Provider {
         match self {
             Self::OpenAi => "GPT Transcribe · clear, accurate",
             Self::Groq => "Whisper v3 Turbo · fast, low cost",
-            Self::Xai => "Grok Transcribe 2 · accurate, low cost",
+            Self::Xai => "Grok STT 2 · accurate, low cost",
             Self::Vercel => "AI Gateway · OpenAI or Grok, one key",
         }
     }
@@ -142,24 +142,56 @@ impl GatewayModel {
     }
 
     pub fn name(self) -> &'static str {
-        match self {
-            Self::Grok => "Grok STT",
-            Self::OpenAi => "GPT-4o Transcribe",
+        match (self, self.fell_back()) {
+            (Self::Grok, false) => "Grok STT 2",
+            (Self::Grok, true) => "Grok STT",
+            (Self::OpenAi, false) => "GPT Transcribe",
+            (Self::OpenAi, true) => "GPT-4o Transcribe",
         }
     }
 
+    /// The gateway id Whisple transcribes with: the newest model, or the one
+    /// the gateway lists when it did not know the newest.
     pub fn transcription(self) -> &'static str {
+        if self.fell_back() {
+            self.listed()
+        } else {
+            self.newest()
+        }
+    }
+
+    fn newest(self) -> &'static str {
+        match self {
+            Self::Grok => "spacexai/grok-voice-transcribe-2.0",
+            Self::OpenAi => "openai/gpt-transcribe",
+        }
+    }
+
+    /// The model id the gateway publishes. `spacexai/grok-stt` names no
+    /// version.
+    fn listed(self) -> &'static str {
         match self {
             Self::Grok => "spacexai/grok-stt",
             Self::OpenAi => "openai/gpt-4o-transcribe",
         }
     }
 
+    fn index(self) -> usize {
+        match self {
+            Self::Grok => 0,
+            Self::OpenAi => 1,
+        }
+    }
+
+    fn fell_back(self) -> bool {
+        FELL_BACK[self.index()].load(Ordering::Relaxed)
+    }
+
     /// The chat model the assistant and translation use through the gateway.
     pub fn chat(self) -> &'static str {
         match self {
             Self::Grok => "spacexai/grok-4.7",
-            Self::OpenAi => "openai/gpt-5.5",
+            Self::OpenAi => "openai/gpt-5.6-luna",
         }
     }
 
@@ -177,6 +209,10 @@ impl GatewayModel {
 }
 
 static GATEWAY_MODEL: AtomicU8 = AtomicU8::new(0);
+
+/// Set once the gateway answers that it does not know a model's newest id,
+/// so later recordings go straight to the listed one until Whisple restarts.
+static FELL_BACK: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
 pub fn gateway_model() -> GatewayModel {
     GatewayModel::ALL
@@ -286,16 +322,36 @@ fn transcribe_with_key(
         .map_err(|err| {
             TranscriptionError::Other(format!("Could not start cloud transcription: {err}"))
         })?;
-    let request = client.post(endpoint).bearer_auth(key);
-    let request = if provider == Provider::Vercel {
+    let response = if provider == Provider::Vercel {
         let model = gateway_model();
-        request
-            .header("ai-gateway-protocol-version", "0.0.1")
-            .header("ai-gateway-auth-method", "api-key")
-            .header("ai-transcription-model-specification-version", "4")
-            .header("ai-model-id", model.transcription())
-            .json(&gateway_body(model, &wav, language))
+        let body = gateway_body(model, &wav, language);
+        let send = |id: &str| {
+            client
+                .post(endpoint)
+                .bearer_auth(key)
+                .header("ai-gateway-protocol-version", "0.0.1")
+                .header("ai-gateway-auth-method", "api-key")
+                .header("ai-transcription-model-specification-version", "4")
+                .header("ai-model-id", id)
+                .json(&body)
+                .send()
+        };
+        match send(model.transcription()) {
+            // The newest id is not on the gateway yet: use the listed one.
+            Ok(first) if !model.fell_back() && matches!(first.status().as_u16(), 400 | 404) => {
+                let status = first.status().as_u16();
+                let detail = first.text().unwrap_or_default();
+                if status == 404 || detail.contains("model_not_found") {
+                    FELL_BACK[model.index()].store(true, Ordering::Relaxed);
+                    send(model.listed())
+                } else {
+                    return Err(response_error(provider, status));
+                }
+            }
+            response => response,
+        }
     } else {
+        let request = client.post(endpoint).bearer_auth(key);
         let file = multipart::Part::bytes(wav)
             .file_name("recording.wav")
             .mime_str("audio/wav")
@@ -312,9 +368,9 @@ fn transcribe_with_key(
             );
         }
         // xAI reads the fields in order and needs the file after the others.
-        request.multipart(form.part("file", file))
+        request.multipart(form.part("file", file)).send()
     };
-    let response = request.send().map_err(|err| {
+    let response = response.map_err(|err| {
         TranscriptionError::Offline(format!("Could not reach {}: {err}", provider.name()))
     })?;
     let status = response.status();
@@ -479,52 +535,77 @@ mod tests {
     }
 
     /// Tests run in parallel and share the gateway model, so none change it
-    /// from the default, Grok.
+    /// from the default, Grok, and only this one lets it fall back.
     #[test]
-    fn the_gateway_request_names_the_model_in_a_header() {
-        assert_eq!(Provider::Vercel.model(), "spacexai/grok-stt");
+    fn the_gateway_asks_for_grok_stt_2_then_the_listed_model() {
+        assert_eq!(
+            Provider::Vercel.model(),
+            "spacexai/grok-voice-transcribe-2.0"
+        );
+        assert_eq!(GatewayModel::Grok.name(), "Grok STT 2");
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!(
             "http://{}/v4/ai/transcription-model",
             listener.local_addr().unwrap()
         );
         let server = thread::spawn(move || {
-            let (mut socket, _) = listener.accept().unwrap();
-            socket
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let mut request = Vec::new();
-            let mut chunk = [0u8; 8192];
-            let body_start = loop {
-                let count = socket.read(&mut chunk).unwrap();
-                assert!(count > 0, "request ended early");
-                request.extend_from_slice(&chunk[..count]);
-                if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
-                    let header = String::from_utf8_lossy(&request[..end]).to_lowercase();
-                    let size: usize = header
-                        .lines()
-                        .find_map(|line| line.strip_prefix("content-length: "))
+            let mut models = Vec::new();
+            for attempt in 0..2 {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 8192];
+                let body_start = loop {
+                    let count = socket.read(&mut chunk).unwrap();
+                    assert!(count > 0, "request ended early");
+                    request.extend_from_slice(&chunk[..count]);
+                    if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let header = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                        let size: usize = header
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length: "))
+                            .unwrap()
+                            .trim()
+                            .parse()
+                            .unwrap();
+                        if request.len() >= end + 4 + size {
+                            break end + 4;
+                        }
+                    }
+                };
+                let head = String::from_utf8_lossy(&request[..body_start]).to_lowercase();
+                assert!(head.contains("authorization: bearer test-key"));
+                assert!(head.contains("ai-transcription-model-specification-version: 4"));
+                models.push(
+                    head.lines()
+                        .find_map(|line| line.strip_prefix("ai-model-id: "))
                         .unwrap()
                         .trim()
-                        .parse()
-                        .unwrap();
-                    if request.len() >= end + 4 + size {
-                        break end + 4;
-                    }
-                }
-            };
-            let head = String::from_utf8_lossy(&request[..body_start]).to_lowercase();
-            assert!(head.contains("authorization: bearer test-key"));
-            assert!(head.contains("ai-model-id: spacexai/grok-stt"));
-            assert!(head.contains("ai-transcription-model-specification-version: 4"));
-            let body: Value = serde_json::from_slice(&request[body_start..]).unwrap();
-            assert_eq!(body["mediaType"], "audio/wav");
-            let wav = base64::engine::general_purpose::STANDARD
-                .decode(body["audio"].as_str().unwrap())
-                .unwrap();
-            assert_eq!(&wav[..4], b"RIFF");
-            let response = r#"{"text":"Hallo Welt.","segments":[],"language":"de"}"#;
-            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+                        .to_string(),
+                );
+                let body: Value = serde_json::from_slice(&request[body_start..]).unwrap();
+                assert_eq!(body["mediaType"], "audio/wav");
+                assert_eq!(body["providerOptions"]["xai"]["language"], "de");
+                let wav = base64::engine::general_purpose::STANDARD
+                    .decode(body["audio"].as_str().unwrap())
+                    .unwrap();
+                assert_eq!(&wav[..4], b"RIFF");
+                let (status, response) = if attempt == 0 {
+                    (
+                        "404 Not Found",
+                        r#"{"error":{"message":"Model not found","type":"model_not_found"}}"#,
+                    )
+                } else {
+                    (
+                        "200 OK",
+                        r#"{"text":"Hallo Welt.","segments":[],"language":"de"}"#,
+                    )
+                };
+                write!(socket, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+            }
+            models
         });
         let result = transcribe_with_key(
             Provider::Vercel,
@@ -537,7 +618,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result, "Hallo Welt.");
-        server.join().unwrap();
+        assert_eq!(
+            server.join().unwrap(),
+            ["spacexai/grok-voice-transcribe-2.0", "spacexai/grok-stt"]
+        );
+        // Later recordings and the model's label use the listed model.
+        assert_eq!(Provider::Vercel.model(), "spacexai/grok-stt");
+        assert_eq!(GatewayModel::Grok.name(), "Grok STT");
     }
 
     #[test]

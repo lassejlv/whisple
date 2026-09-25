@@ -249,7 +249,7 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("What Whisple can do", "Det här kan Whisple"),
     ("What’s new", "Nyheter"),
     ("Whisper v3 Turbo · fast, low cost", "Whisper v3 Turbo · snabb och billig"),
-    ("Grok Transcribe 2 · accurate, low cost", "Grok Transcribe 2 · exakt och billig"),
+    ("Grok STT 2 · accurate, low cost", "Grok STT 2 · exakt och billig"),
     ("AI Gateway · OpenAI or Grok, one key", "AI Gateway · OpenAI eller Grok, en nyckel"),
     ("Whisple Settings", "Whisple-inställningar"),
     ("Whisple could not answer", "Whisple kunde inte svara"),
