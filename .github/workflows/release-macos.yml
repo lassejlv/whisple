@@ -6,9 +6,14 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing GitHub release tag to rebuild and attach
+        description: Release tag, or source ref when publish is disabled
         required: true
         type: string
+      publish:
+        description: Attach assets to an existing GitHub release
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -21,6 +26,7 @@ jobs:
   macos:
     name: macOS ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -32,19 +38,31 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      PUBLISH_RELEASE: ${{ github.event_name == 'release' || inputs.publish }}
+      APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
     steps:
-      - name: Check out release tag
+      - name: Check out source
         uses: actions/checkout@v4
         with:
           ref: ${{ env.RELEASE_TAG }}
 
       - name: Validate release version
+        if: env.PUBLISH_RELEASE == 'true'
         shell: bash
         run: |
           set -euo pipefail
           version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
           test "$RELEASE_TAG" = "v$version"
           gh release view "$RELEASE_TAG" --json tagName --jq '.tagName' >/dev/null
+
+      - name: Set up signing and validate Apple credentials
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARY_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: ./scripts/setup-macos-signing.sh
 
       - name: Set up Python for DMG layout
         uses: actions/setup-python@v5
@@ -73,10 +91,37 @@ jobs:
       - name: Build app
         run: ./scripts/package-macos.sh --with-licensing
 
+      - name: Notarize and staple app
+        run: ./scripts/notarize-macos.sh target/Whisple.app
+
       - name: Build DMG and updater archive
         run: ./scripts/build-macos-dmgs.sh --arch "${{ matrix.arch }}" --use-packaged-app
 
+      - name: Sign, notarize, and staple DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+          prefix="Whisple-$version-macos-${{ matrix.arch }}"
+          ./scripts/notarize-macos.sh "target/dist/$prefix.dmg"
+          # Stapling changes the DMG bytes. Hash only the final distributables.
+          cd target/dist
+          shasum -a 256 "$prefix.dmg" "$prefix.zip" > "$prefix.sha256"
+          shasum -a 256 --check "$prefix.sha256"
+
+      - name: Save verified binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: Whisple-macos-${{ matrix.arch }}
+          path: |
+            target/dist/*.dmg
+            target/dist/*.zip
+            target/dist/*.sha256
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Attach assets to release
+        if: env.PUBLISH_RELEASE == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -84,3 +129,14 @@ jobs:
           prefix="target/dist/Whisple-$version-macos-${{ matrix.arch }}"
           gh release upload "$RELEASE_TAG" \
             "$prefix.dmg" "$prefix.zip" "$prefix.sha256" --clobber
+
+      - name: Remove signing credentials
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${WHISPLE_SIGNING_KEYCHAIN:-}" ]]; then
+            security delete-keychain "$WHISPLE_SIGNING_KEYCHAIN"
+          fi
+          if [[ -n "${WHISPLE_SIGNING_DIR:-}" ]]; then
+            rm -rf "$WHISPLE_SIGNING_DIR"
+          fi

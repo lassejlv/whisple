@@ -48,7 +48,7 @@ command -v iconutil >/dev/null || { echo "iconutil is required." >&2; exit 1; }
 command -v sips >/dev/null || { echo "sips is required." >&2; exit 1; }
 
 cd "$project_dir"
-build_args=(build)
+build_args=(build --locked)
 if [[ "$profile" == "release" ]]; then build_args+=(--release); fi
 if [[ -n "$target_triple" ]]; then build_args+=(--target "$target_triple"); fi
 if [[ "$with_licensing" == true ]]; then build_args+=(--features licensing); fi
@@ -106,6 +106,9 @@ signing_identity="${WHISPLE_CODESIGN_IDENTITY:--}"
 sign_args=(--force --sign "$signing_identity" --entitlements assets/whisple.entitlements)
 if [[ "$signing_identity" != "-" ]]; then
     sign_args+=(--options runtime --timestamp)
+fi
+if [[ -n "${WHISPLE_SIGNING_KEYCHAIN:-}" ]]; then
+    sign_args+=(--keychain "$WHISPLE_SIGNING_KEYCHAIN")
 fi
 codesign "${sign_args[@]}" "$bundle"
 codesign --verify --deep --strict "$bundle"

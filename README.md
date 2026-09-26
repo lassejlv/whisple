@@ -27,7 +27,7 @@ GitHub releases include Apple silicon and Intel DMGs for macOS, and an installer
 
 The prebuilt app has a three-day free trial, then a one-time **$19** lifetime license. Building from source is unrestricted and has no trial or license checks.
 
-Releases are ad hoc signed and not notarized. macOS may ask you to allow the app the first time you open it. Windows builds are not code signed, so SmartScreen may warn on first launch; choose **More info › Run anyway**.
+The macOS release workflow signs with Developer ID and notarizes the app and DMG with Apple. Older builds and local development packages may still be ad hoc signed. Windows builds are not code signed, so SmartScreen may warn on first launch; choose **More info › Run anyway**.
 
 ## Build from source
 

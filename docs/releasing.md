@@ -15,11 +15,31 @@ binaries retain the paid trial and license flow on both platforms.
    - For each macOS architecture: a DMG, ZIP, and `.sha256`.
    - For Windows: `-setup.exe`, `.msi`, `.zip`, and `.sha256`.
 
-To rebuild an existing release, run either workflow manually with its tag. The upload step replaces assets with the same names. A stable version following `0.2.0-rc.1` should use version and tag `0.2.0`; the updater compares semantic versions and offers that stable build to prerelease users.
+To rebuild an existing release, run either workflow manually with its tag. For macOS, also enable **publish**. The upload step replaces assets with the same names. Tags must contain the release scripts used by the workflow. A stable version following `0.2.0-rc.1` should use version and tag `0.2.0`; the updater compares semantic versions and offers that stable build to prerelease users.
 
 ## macOS
 
-The workflow uses ad hoc code signing and does not notarize the app or DMG. It needs no Apple credentials. macOS may require users to explicitly allow the downloaded app to open. To distribute with normal Gatekeeper trust later, add Developer ID signing and Apple notarization to the workflow. The updater checks the public release asset digest, bundle signature, app identity, and architecture before installing.
+The release workflow requires Developer ID Application signing and Apple notarization for both architectures. It signs the app with hardened runtime and a secure timestamp, notarizes and staples the app before creating the updater ZIP and DMG, then signs, notarizes, and staples the DMG. Gatekeeper must accept both artifacts before they are uploaded. Checksums are generated after stapling. The updater checks the public release asset digest, bundle signature, app identity, architecture, and the signing team when the installed app has one.
+
+### GitHub configuration
+
+Set the repository Actions variable `APPLE_TEAM_ID` to the team that owns both the Developer ID certificate and App Store Connect Team API key. Configure these repository Actions secrets:
+
+| Secret | Value |
+| --- | --- |
+| `APPLE_CERTIFICATE_P12_BASE64` | Base64 of the Developer ID Application certificate and private key exported as `.p12` |
+| `APPLE_CERTIFICATE_PASSWORD` | Password protecting that `.p12` |
+| `APPLE_NOTARY_KEY_P8_BASE64` | Base64 of the App Store Connect Team API private key (`.p8`) |
+| `APPLE_NOTARY_KEY_ID` | Key ID from App Store Connect |
+| `APPLE_NOTARY_ISSUER_ID` | Issuer ID from App Store Connect |
+
+Use a Team API key with Developer access. `setup-macos-signing.sh` validates the certificate's team and authenticates with Apple, imports credentials into a temporary keychain, and removes the decoded source files. The workflow deletes the temporary keychain after success or failure. Credentials and recovery copies must remain outside the repository; never add them to workflow artifacts.
+
+### Verify signing without publishing a release
+
+Run **Build macOS release assets** manually with `tag: main` (or a commit/ref containing the signing scripts) and **publish disabled**. Both architectures run the licensed Rust tests, build, sign, notarize, and pass Gatekeeper assessment. Download the DMG, updater ZIP, and checksums from the run's artifacts, retained for 14 days. This does not add a release to the updater feed.
+
+Publishing a GitHub release triggers the same verified flow and attaches the assets automatically. Missing credentials or rejected notarization fail the job; release CI never falls back to ad hoc signing. Local packaging still uses ad hoc signing unless `WHISPLE_CODESIGN_IDENTITY` is provided.
 
 The app icon and Finder DMG layout come from the [Release page in Paper](https://app.paper.design/file/01M391FYN8XXTW9JHFATBK4Q06/p-8-0). The DMG background includes light patches behind the item names because Finder renders those names in black over custom backgrounds. The builder combines the 1× and 2× artwork into one Retina-aware TIFF.
 

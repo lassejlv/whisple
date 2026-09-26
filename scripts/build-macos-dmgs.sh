@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build Apple silicon and Intel DMGs in target/dist/ (or one with --arch).
 # Requires Rust, Xcode command-line tools, and dmgbuild 1.6.7.
-# Bundles use ad hoc signing by default; the current workflow does not notarize.
+# Local bundles use ad hoc signing by default; release CI signs and notarizes.
 set -euo pipefail
 
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
