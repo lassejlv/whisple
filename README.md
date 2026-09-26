@@ -23,11 +23,11 @@ The interface is in English, Danish, German, Norwegian, Swedish, Spanish, and Fr
 
 ## Download
 
-macOS is the released platform. GitHub releases include Apple silicon and Intel DMGs.
+GitHub releases include Apple silicon and Intel DMGs for macOS, and an installer (`-setup.exe`) and MSI for 64-bit Windows 10 and 11. Both platforms update themselves from new releases.
 
 The prebuilt app has a three-day free trial, then a one-time **$19** lifetime license. Building from source is unrestricted and has no trial or license checks.
 
-Releases are ad hoc signed and not notarized. macOS may ask you to allow the app the first time you open it.
+Releases are ad hoc signed and not notarized. macOS may ask you to allow the app the first time you open it. Windows builds are not code signed, so SmartScreen may warn on first launch; choose **More info › Run anyway**.
 
 ## Build from source
 
@@ -47,13 +47,13 @@ Package a local macOS `.app` (requires `sips` and `iconutil`):
 ./scripts/package-macos.sh --with-licensing
 ```
 
-Windows and Linux can be built with `cargo run` as well. Windows has global shortcuts, the tray icon, and typing into the focused app; Linux has X11 hotkeys and autostart. Auto-updates and installers are macOS-only today.
+Windows and Linux can be built with `cargo run` as well. Windows has global shortcuts, the tray icon, and typing into the focused app, and `scripts/windows/package-windows.ps1` builds its installers. Linux has X11 hotkeys and autostart, without installers or auto-updates.
 
 ## Develop
 
 ```sh
 cargo test --locked                      # default, license-free tests
-cargo test --locked --features licensing # same checks the macOS release workflow runs
+cargo test --locked --features licensing # same checks the release workflows run
 cargo fmt --check
 cargo clippy --all-targets
 ```
@@ -70,7 +70,7 @@ Whisple is a single Rust desktop binary:
 | [`src/ui/`](src/ui/) | Voice bar, onboarding, Settings |
 | [`src/platform/`](src/platform/) | Hotkeys and OS integrations |
 
-Contributor conventions live in [`AGENTS.md`](AGENTS.md). macOS release steps are in [`docs/releasing.md`](docs/releasing.md); the opt-in Polar trial is documented in [`docs/licensing.md`](docs/licensing.md).
+Contributor conventions live in [`AGENTS.md`](AGENTS.md). Release steps for macOS and Windows are in [`docs/releasing.md`](docs/releasing.md); the opt-in Polar trial is documented in [`docs/licensing.md`](docs/licensing.md).
 
 ## License
 

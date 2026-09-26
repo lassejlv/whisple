@@ -28,7 +28,7 @@ use crate::transcription::local as stt;
 use crate::transcription::models::{self, ModelSpec};
 use crate::ui::motion::{Ease, Spring};
 use crate::ui::settings::SettingsTarget;
-#[cfg(target_os = "macos")]
+#[cfg(updates)]
 use crate::updater::{self, PreparedUpdate, UpdatePrompt};
 
 mod actions;
@@ -154,14 +154,14 @@ impl Whisp {
             screen: Snapshot::default(),
             input_device: prefs.input_device,
             open_on_startup: prefs.open_on_startup,
-            #[cfg(target_os = "macos")]
+            #[cfg(updates)]
             update: None,
-            #[cfg(target_os = "macos")]
+            #[cfg(updates)]
             update_prompt: (cfg!(feature = "licensing") && updater::just_updated())
                 .then_some(UpdatePrompt::JustUpdated),
-            #[cfg(target_os = "macos")]
+            #[cfg(updates)]
             update_checking: false,
-            #[cfg(target_os = "macos")]
+            #[cfg(updates)]
             last_update_check: Instant::now(),
             recording_hotkey: None,
             listen_started: None,
@@ -182,7 +182,7 @@ impl Whisp {
         view.refresh_cloud_keys(cx);
         #[cfg(feature = "licensing")]
         view.refresh_license(cx);
-        #[cfg(target_os = "macos")]
+        #[cfg(updates)]
         view.check_for_updates(cx);
         view
     }
@@ -384,19 +384,19 @@ impl Whisp {
                                 tray::Command::Settings => {
                                     view.open_settings_window(cx);
                                 }
-                                #[cfg(target_os = "macos")]
+                                #[cfg(updates)]
                                 tray::Command::Update => {
                                     view.show_or_check_for_updates(cx);
                                     if view.update.is_some() {
                                         view.set_visible(true, window, cx);
                                     }
                                 }
-                                #[cfg(not(target_os = "macos"))]
+                                #[cfg(not(updates))]
                                 tray::Command::Update => {}
                                 tray::Command::Quit => cx.quit(),
                             }
                         }
-                        #[cfg(target_os = "macos")]
+                        #[cfg(updates)]
                         if view.last_update_check.elapsed() >= Duration::from_secs(6 * 60 * 60) {
                             view.check_for_updates(cx);
                         }
@@ -491,11 +491,11 @@ impl Whisp {
     }
 
     pub(crate) fn update_line_visible(&self) -> bool {
-        #[cfg(target_os = "macos")]
+        #[cfg(updates)]
         {
             self.error.is_none() && self.update_prompt.is_some() && !self.visibility_locked()
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(updates))]
         {
             false
         }

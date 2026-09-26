@@ -36,8 +36,8 @@ struct Candidate<'a> {
     asset: &'a ReleaseAsset,
 }
 
-/// What the bar's update line says. Separate from the prepared bundle, so
-/// dismissing the line keeps the update ready in the menu bar and About.
+/// What the bar's update line says. Separate from the prepared app, so
+/// dismissing the line keeps the update ready in the tray menu and About.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UpdatePrompt {
     Ready,
@@ -78,10 +78,14 @@ pub(crate) fn just_updated() -> bool {
 }
 
 pub(crate) fn is_packaged() -> bool {
-    current_app_bundle().is_some()
+    current_install().is_some()
 }
 
-fn current_app_bundle() -> Option<PathBuf> {
+/// The installed app this process runs from: the `Whisple.app` bundle on
+/// macOS, or `whisple.exe` in the per-user folder both Windows installers use.
+/// Development builds and apps run from a disk image are never updated.
+#[cfg(target_os = "macos")]
+fn current_install() -> Option<PathBuf> {
     let executable = std::env::current_exe().ok()?.canonicalize().ok()?;
     let macos = executable.parent()?;
     if macos.file_name()? != "MacOS" || executable.file_name()? != "whisple" {
@@ -101,8 +105,35 @@ fn current_app_bundle() -> Option<PathBuf> {
     Some(app.to_path_buf())
 }
 
+#[cfg(target_os = "windows")]
+fn current_install() -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?.canonicalize().ok()?;
+    let expected = windows_install_dir()?.canonicalize().ok()?;
+    let folder = executable.parent()?;
+    let same_folder = folder
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&expected.to_string_lossy());
+    let named = executable
+        .file_name()?
+        .to_string_lossy()
+        .eq_ignore_ascii_case("whisple.exe");
+    (same_folder && named).then_some(executable)
+}
+
+/// `%LOCALAPPDATA%\Programs\Whisple`, where the installers put Whisple so it
+/// can replace itself without administrator rights.
+#[cfg(target_os = "windows")]
+fn windows_install_dir() -> Option<PathBuf> {
+    Some(dirs::data_local_dir()?.join("Programs").join("Whisple"))
+}
+
 fn asset_name(version: &Version, arch: &str) -> String {
-    format!("Whisple-{version}-macos-{arch}.zip")
+    let os = if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "macos"
+    };
+    format!("Whisple-{version}-{os}-{arch}.zip")
 }
 
 fn current_arch() -> &'static str {
@@ -157,12 +188,13 @@ fn valid_digest(digest: Option<&str>) -> Option<&str> {
 pub(crate) fn check_and_prepare(
     prepared_version: Option<Version>,
 ) -> Result<Option<PreparedUpdate>, String> {
-    let Some(current_app) = current_app_bundle() else {
+    let Some(current) = current_install() else {
         return Ok(None);
     };
-    let mut current = Version::parse(env!("CARGO_PKG_VERSION")).map_err(|err| err.to_string())?;
+    let mut current_version =
+        Version::parse(env!("CARGO_PKG_VERSION")).map_err(|err| err.to_string())?;
     if let Some(prepared_version) = prepared_version {
-        current = current.max(prepared_version);
+        current_version = current_version.max(prepared_version);
     }
     let client = Client::builder()
         .user_agent(format!("Whisple/{}", env!("CARGO_PKG_VERSION")))
@@ -179,7 +211,7 @@ pub(crate) fn check_and_prepare(
         .map_err(|err| format!("Could not check GitHub releases: {err}"))?;
     let releases: Vec<Release> = serde_json::from_str(&body)
         .map_err(|err| format!("Could not read GitHub releases: {err}"))?;
-    let Some(candidate) = select_latest(&releases, &current, current_arch()) else {
+    let Some(candidate) = select_latest(&releases, &current_version, current_arch()) else {
         return Ok(None);
     };
     let cache_dir = dirs::cache_dir()
@@ -192,17 +224,8 @@ pub(crate) fn check_and_prepare(
         .map_err(|err| err.to_string())?;
     let archive = temp.path().join("Whisple.zip");
     download_and_verify(&client, candidate.asset, &archive)?;
-    let status = Command::new("/usr/bin/ditto")
-        .args(["-x", "-k"])
-        .arg(&archive)
-        .arg(temp.path())
-        .status()
-        .map_err(|err| format!("Could not unpack the update: {err}"))?;
-    if !status.success() {
-        return Err("Could not unpack the update archive.".into());
-    }
-    let updated_app = temp.path().join("Whisple.app");
-    validate_app(&updated_app, &current_app, &candidate.version)?;
+    unpack(&archive, temp.path())?;
+    validate(&staged(temp.path()), &current, &candidate.version)?;
     fs::remove_file(archive).map_err(|err| err.to_string())?;
     Ok(Some(PreparedUpdate {
         version: candidate.version,
@@ -252,6 +275,47 @@ fn download_and_verify(
     Ok(())
 }
 
+/// Where the unpacked update sits inside its temporary folder.
+fn staged(temp: &Path) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        temp.join("whisple.exe")
+    } else {
+        temp.join("Whisple.app")
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn unpack(archive: &Path, into: &Path) -> Result<(), String> {
+    let status = Command::new("/usr/bin/ditto")
+        .args(["-x", "-k"])
+        .arg(archive)
+        .arg(into)
+        .status()
+        .map_err(|err| format!("Could not unpack the update: {err}"))?;
+    if !status.success() {
+        return Err("Could not unpack the update archive.".into());
+    }
+    Ok(())
+}
+
+/// Windows 10 and later include bsdtar, which reads ZIP archives.
+#[cfg(target_os = "windows")]
+fn unpack(archive: &Path, into: &Path) -> Result<(), String> {
+    let tar = std::env::var_os("SystemRoot")
+        .map(|root| PathBuf::from(root).join("System32").join("tar.exe"))
+        .ok_or("Could not find the Windows folder.")?;
+    let mut command = Command::new(tar);
+    command.arg("-xf").arg(archive).arg("-C").arg(into);
+    let status = hidden(&mut command)
+        .status()
+        .map_err(|err| format!("Could not unpack the update: {err}"))?;
+    if !status.success() {
+        return Err("Could not unpack the update archive.".into());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
 fn command_output(program: &str, args: &[&str], path: &Path) -> Result<String, String> {
     let output = Command::new(program)
         .args(args)
@@ -264,6 +328,7 @@ fn command_output(program: &str, args: &[&str], path: &Path) -> Result<String, S
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+#[cfg(target_os = "macos")]
 fn plist_value(path: &Path, key: &str) -> Result<String, String> {
     command_output(
         "/usr/libexec/PlistBuddy",
@@ -272,6 +337,7 @@ fn plist_value(path: &Path, key: &str) -> Result<String, String> {
     )
 }
 
+#[cfg(target_os = "macos")]
 fn team_id(app: &Path) -> Option<String> {
     let output = Command::new("/usr/bin/codesign")
         .args(["-dv", "--verbose=4"])
@@ -285,7 +351,8 @@ fn team_id(app: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
-fn validate_app(app: &Path, current_app: &Path, version: &Version) -> Result<(), String> {
+#[cfg(target_os = "macos")]
+fn validate(app: &Path, current_app: &Path, version: &Version) -> Result<(), String> {
     if !app.is_dir() {
         return Err("The update archive has no Whisple.app.".into());
     }
@@ -320,23 +387,66 @@ fn validate_app(app: &Path, current_app: &Path, version: &Version) -> Result<(),
     Ok(())
 }
 
+/// Windows releases are unsigned, so the GitHub digest checked during the
+/// download is what ties the file to the release. This confirms the file is
+/// Whisple at that version, built for this processor.
+#[cfg(target_os = "windows")]
+fn validate(exe: &Path, _current: &Path, version: &Version) -> Result<(), String> {
+    if !exe.is_file() {
+        return Err("The update archive has no whisple.exe.".into());
+    }
+    let product = crate::platform::windows::version_string(exe, "ProductName");
+    let semantic = crate::platform::windows::version_string(exe, "WhispleSemanticVersion");
+    if product.as_deref() != Some("Whisple") || semantic != Some(version.to_string()) {
+        return Err("The updated app identity or version does not match the release.".into());
+    }
+    let machine = pe_machine(exe).ok_or("The update is not a Windows program.")?;
+    let expected = if current_arch() == "arm64" {
+        0xAA64
+    } else {
+        0x8664
+    };
+    if machine != expected {
+        return Err("The update is not built for this PC's processor.".into());
+    }
+    Ok(())
+}
+
+/// The processor a Windows executable targets, from its PE header.
+#[cfg(target_os = "windows")]
+fn pe_machine(exe: &Path) -> Option<u16> {
+    let mut header = [0u8; 1024];
+    let mut file = File::open(exe).ok()?;
+    file.read_exact(&mut header).ok()?;
+    if &header[..2] != b"MZ" {
+        return None;
+    }
+    let offset = u32::from_le_bytes(header[0x3C..0x40].try_into().ok()?) as usize;
+    let signature = header.get(offset..offset + 4)?;
+    if signature != b"PE\0\0" {
+        return None;
+    }
+    let machine = header.get(offset + 4..offset + 6)?;
+    Some(u16::from_le_bytes([machine[0], machine[1]]))
+}
+
+/// Keeps helper programs from flashing a console window.
+#[cfg(target_os = "windows")]
+fn hidden(command: &mut Command) -> &mut Command {
+    use std::os::windows::process::CommandExt as _;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW)
+}
+
 impl PreparedUpdate {
     pub(crate) fn install(&mut self) -> Result<(), String> {
-        let current_app =
-            current_app_bundle().ok_or("Whisple must run from an app bundle to update.")?;
-        let helper = self.temp.path().join("apply-update.sh");
-        fs::write(&helper, include_str!("../scripts/apply-update.sh"))
-            .map_err(|err| err.to_string())?;
+        let current = current_install().ok_or("Whisple must be installed to update.")?;
         let log =
             File::create(self.temp.path().join("update.log")).map_err(|err| err.to_string())?;
         let marker = update_marker();
         write_update_marker(&marker, &self.version)?;
-        if let Err(err) = Command::new("/bin/bash")
-            .arg(&helper)
-            .arg(&current_app)
-            .arg(self.temp.path().join("Whisple.app"))
-            .arg(std::process::id().to_string())
-            .arg(self.temp.path())
+        if let Err(err) = self
+            .installer(&current)?
             .stdin(Stdio::null())
             .stdout(Stdio::from(log.try_clone().map_err(|err| err.to_string())?))
             .stderr(Stdio::from(log))
@@ -347,6 +457,46 @@ impl PreparedUpdate {
         }
         self.temp.disable_cleanup(true);
         Ok(())
+    }
+
+    /// The helper that waits for Whisple to quit, swaps in the update and
+    /// starts it again.
+    #[cfg(target_os = "macos")]
+    fn installer(&self, current_app: &Path) -> Result<Command, String> {
+        let helper = self.temp.path().join("apply-update.sh");
+        fs::write(&helper, include_str!("../scripts/apply-update.sh"))
+            .map_err(|err| err.to_string())?;
+        let mut command = Command::new("/bin/bash");
+        command
+            .arg(&helper)
+            .arg(current_app)
+            .arg(staged(self.temp.path()))
+            .arg(std::process::id().to_string())
+            .arg(self.temp.path());
+        Ok(command)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn installer(&self, current_exe: &Path) -> Result<Command, String> {
+        let helper = self.temp.path().join("apply-update.ps1");
+        fs::write(&helper, include_str!("../scripts/windows/apply-update.ps1"))
+            .map_err(|err| err.to_string())?;
+        let mut command = Command::new("powershell.exe");
+        hidden(&mut command)
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+            ])
+            .arg("-File")
+            .arg(&helper)
+            .arg(current_exe)
+            .arg(staged(self.temp.path()))
+            .arg(std::process::id().to_string())
+            .arg(self.temp.path())
+            .arg(self.version.to_string());
+        Ok(command)
     }
 }
 
@@ -405,11 +555,34 @@ mod tests {
     }
 
     #[test]
+    fn asset_names_match_the_release_workflows() {
+        let version = Version::parse("0.3.0-rc.1").unwrap();
+        let expected = if cfg!(target_os = "windows") {
+            "Whisple-0.3.0-rc.1-windows-x86_64.zip"
+        } else {
+            "Whisple-0.3.0-rc.1-macos-x86_64.zip"
+        };
+        assert_eq!(asset_name(&version, "x86_64"), expected);
+    }
+
+    #[test]
     fn first_update_creates_status_directory_before_writing_marker() {
         let root = tempfile::tempdir().unwrap();
         let marker = root.path().join("whisple/installed-version");
         let version = Version::parse("0.2.0").unwrap();
         write_update_marker(&marker, &version).unwrap();
         assert_eq!(fs::read_to_string(marker).unwrap(), "0.2.0");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn this_build_reports_its_processor() {
+        let exe = std::env::current_exe().unwrap();
+        let expected = if cfg!(target_arch = "aarch64") {
+            0xAA64
+        } else {
+            0x8664
+        };
+        assert_eq!(pe_machine(&exe), Some(expected));
     }
 }

@@ -57,12 +57,26 @@ pub fn snapshot() -> Option<Snapshot> {
     (!boot_id.is_empty()).then_some(Snapshot { boot_id, seconds })
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// Windows counts boots in the registry, and its tick count keeps running
+/// while the PC sleeps.
+#[cfg(target_os = "windows")]
+pub fn snapshot() -> Option<Snapshot> {
+    let (boot, seconds) = crate::platform::windows::boot_clock()?;
+    Some(Snapshot {
+        boot_id: format!("windows-boot-{boot}"),
+        seconds,
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 pub fn snapshot() -> Option<Snapshot> {
     None
 }
 
-#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 mod tests {
     use super::*;
 

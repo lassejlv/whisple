@@ -2,7 +2,7 @@
 //! the Windows notification area icon share one menu.
 
 use crate::platform::tray::Command;
-#[cfg(target_os = "macos")]
+#[cfg(updates)]
 use crate::platform::tray::UpdateStatus;
 #[cfg(target_os = "macos")]
 use cocoa::appkit::{NSApplication, NSApplicationActivationPolicy};
@@ -12,7 +12,7 @@ use gpui_kit::App;
 use gpui_kit::Global;
 
 use crate::i18n::t;
-#[cfg(target_os = "macos")]
+#[cfg(updates)]
 use crate::i18n::tf;
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
@@ -24,16 +24,16 @@ struct MenuBar {
     show: MenuItem,
     hide: MenuItem,
     settings: MenuItem,
-    /// Updates are only offered on macOS, where the updater runs.
-    #[cfg(target_os = "macos")]
+    /// Updates are offered where the updater runs.
+    #[cfg(updates)]
     update: MenuItem,
     quit: MenuItem,
     /// The last update state, so the item can be relabelled.
-    #[cfg(target_os = "macos")]
+    #[cfg(updates)]
     update_label: UpdateLabel,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(updates)]
 #[derive(Clone)]
 enum UpdateLabel {
     Check,
@@ -43,7 +43,7 @@ enum UpdateLabel {
     Error,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(updates)]
 impl UpdateLabel {
     fn text(&self) -> String {
         match self {
@@ -64,12 +64,12 @@ pub fn install(cx: &mut App) -> Result<(), String> {
     let show = MenuItem::with_id("show", t("Show Whisple"), true, None);
     let hide = MenuItem::with_id("hide", t("Hide Whisple"), false, None);
     let settings = MenuItem::with_id("settings", t("Settings…"), true, None);
-    #[cfg(target_os = "macos")]
+    #[cfg(updates)]
     let update = MenuItem::with_id("update", UpdateLabel::Check.text(), true, None);
     let quit = MenuItem::with_id("quit", t("Quit Whisple"), true, None);
     menu.append_items(&[&show, &hide, &settings])
         .map_err(|err| err.to_string())?;
-    #[cfg(target_os = "macos")]
+    #[cfg(updates)]
     menu.append(&update).map_err(|err| err.to_string())?;
     menu.append_items(&[&PredefinedMenuItem::separator(), &quit])
         .map_err(|err| err.to_string())?;
@@ -95,10 +95,10 @@ pub fn install(cx: &mut App) -> Result<(), String> {
         show,
         hide,
         settings,
-        #[cfg(target_os = "macos")]
+        #[cfg(updates)]
         update,
         quit,
-        #[cfg(target_os = "macos")]
+        #[cfg(updates)]
         update_label: UpdateLabel::Check,
     });
     Ok(())
@@ -139,13 +139,13 @@ pub fn relabel(cx: &App) {
         menu.show.set_text(t("Show Whisple"));
         menu.hide.set_text(t("Hide Whisple"));
         menu.settings.set_text(t("Settings…"));
-        #[cfg(target_os = "macos")]
+        #[cfg(updates)]
         menu.update.set_text(menu.update_label.text());
         menu.quit.set_text(t("Quit Whisple"));
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(updates)]
 pub fn set_update(status: UpdateStatus<'_>, cx: &mut App) {
     if cx.try_global::<MenuBar>().is_some() {
         let label = match status {

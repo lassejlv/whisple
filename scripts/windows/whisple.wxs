@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MSI installer for Whisple, built with WiX v5 by scripts/windows/package-windows.ps1:
+
+    wix build -arch x64 -d Version=0.2.1 -d NumericVersion=0.2.1 -d SourceExe=... -d IconFile=... whisple.wxs
+
+  Whisple installs per user into %LOCALAPPDATA%\Programs\Whisple without
+  administrator rights, the folder the updater expects. Components in the user
+  profile use a registry value as their key path, as Windows Installer requires.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="Whisple"
+    Manufacturer="Whisple"
+    Version="$(var.NumericVersion)"
+    UpgradeCode="{9C4B8F0E-2D6A-4F3B-8E1C-7A5D0B9E6F42}"
+    Scope="perUser"
+    Language="1033"
+    Compressed="yes">
+    <SummaryInformation Description="Whisple $(var.Version)" Manufacturer="Whisple" />
+
+    <!-- Prereleases share their numeric version with the final release. -->
+    <MajorUpgrade
+      AllowSameVersionUpgrades="yes"
+      DowngradeErrorMessage="A newer version of Whisple is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="WhispleIcon" SourceFile="$(var.IconFile)" />
+    <Property Id="ARPPRODUCTICON" Value="WhispleIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://whisple.app" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/lassejlv/whisple/issues" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="UserProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="Whisple" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <Feature Id="Main" Title="Whisple">
+      <Component Id="App" Directory="INSTALLFOLDER" Guid="{DD98A44B-C57C-4CE2-9C2F-CB4120BD52B3}">
+        <File Id="WhispleExe" Source="$(var.SourceExe)" Name="whisple.exe" />
+        <RegistryValue Root="HKCU" Key="Software\Whisple\Installer" Name="App" Type="integer" Value="1" KeyPath="yes" />
+        <!-- The updater keeps the previous executable here until an update finishes. -->
+        <RemoveFile Id="RemovePreviousExe" Name="whisple.exe.previous" On="uninstall" />
+        <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+        <RemoveFolder Id="RemoveUserProgramsFolder" Directory="UserProgramsFolder" On="uninstall" />
+      </Component>
+      <Component Id="StartMenuShortcut" Directory="ProgramMenuFolder" Guid="{C4BF1468-C541-4401-9D15-7DBF2F8FB514}">
+        <Shortcut
+          Id="WhispleShortcut"
+          Name="Whisple"
+          Target="[INSTALLFOLDER]whisple.exe"
+          WorkingDirectory="INSTALLFOLDER"
+          Icon="WhispleIcon" />
+        <RegistryValue Root="HKCU" Key="Software\Whisple\Installer" Name="Shortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </Feature>
+  </Package>
+</Wix>

@@ -9,9 +9,6 @@ use std::time::{Duration, Instant};
 
 use windows::core::w;
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
-use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
-};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
     GetClipboardSequenceNumber, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
@@ -20,8 +17,8 @@ use windows::Win32::System::Memory::{
     GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
 };
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationElement, UIA_ComboBoxControlTypeId,
-    UIA_DocumentControlTypeId, UIA_EditControlTypeId,
+    IUIAutomation, IUIAutomationElement, UIA_ComboBoxControlTypeId, UIA_DocumentControlTypeId,
+    UIA_EditControlTypeId,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
@@ -52,7 +49,7 @@ impl Target {
         if pid == std::process::id() {
             return None;
         }
-        let automation = automation()?;
+        let automation = super::automation()?;
         let element = unsafe { automation.GetFocusedElement() }.ok()?;
         if unsafe { element.CurrentProcessId() }.ok()? as u32 != pid {
             return None;
@@ -278,15 +275,6 @@ unsafe fn set(format: u32, bytes: &[u8]) -> Result<(), String> {
         return Err(format!("Could not use the clipboard: {err}"));
     }
     Ok(())
-}
-
-fn automation() -> Option<IUIAutomation> {
-    unsafe {
-        // GPUI has already set up COM on the main thread. This only covers
-        // a thread that has not, and a mismatch is harmless here.
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()
-    }
 }
 
 fn process_of(window: HWND) -> Option<u32> {

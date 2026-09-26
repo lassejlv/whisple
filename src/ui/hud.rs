@@ -19,7 +19,7 @@ use crate::transcription::cloud::{self, GatewayModel, Provider};
 use crate::ui::motion;
 use crate::ui::settings::SettingsTarget;
 use crate::ui::theme;
-#[cfg(target_os = "macos")]
+#[cfg(updates)]
 use crate::updater::UpdatePrompt;
 
 impl Render for Whisp {
@@ -79,7 +79,7 @@ impl Render for Whisp {
 #[derive(Clone, Copy)]
 enum NoticeAction {
     Settings(SettingsTarget),
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     Privacy,
     Models,
     Record,
@@ -103,9 +103,9 @@ impl Whisp {
                 t("Choose mic"),
                 NoticeAction::Settings(SettingsTarget::Audio),
             )),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             Recovery::MicrophonePermission => Some((t("Open Privacy"), NoticeAction::Privacy)),
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             Recovery::MicrophonePermission => None,
             Recovery::Model => Some((t("Choose model"), NoticeAction::Models)),
             Recovery::NoSpeech => Some((t("Try again"), NoticeAction::Record)),
@@ -132,6 +132,14 @@ impl Whisp {
                 kind.title().to_string(),
                 Some(t("Allow Whisple under Privacy & Security › Microphone.").to_string()),
             ),
+            #[cfg(target_os = "windows")]
+            Some(kind @ Recovery::MicrophonePermission) => (
+                kind.title().to_string(),
+                Some(
+                    t("Let desktop apps use the microphone under Privacy & security › Microphone.")
+                        .to_string(),
+                ),
+            ),
             Some(kind) => (kind.title().to_string(), Some(message)),
             None => (message, None),
         };
@@ -151,7 +159,7 @@ impl Whisp {
     }
 
     fn update_notice(&self, cx: &mut Context<Self>) -> AnyElement {
-        #[cfg(target_os = "macos")]
+        #[cfg(updates)]
         if self.update_prompt == Some(UpdatePrompt::JustUpdated) {
             return notice_line(
                 tf("Updated to Whisple {}", &[&env!("CARGO_PKG_VERSION")]),
@@ -190,6 +198,11 @@ impl Whisp {
                 cx.open_url(
                     "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
                 );
+                self.dismiss_notice(cx);
+            }
+            #[cfg(target_os = "windows")]
+            NoticeAction::Privacy => {
+                cx.open_url("ms-settings:privacy-microphone");
                 self.dismiss_notice(cx);
             }
             NoticeAction::Models => {

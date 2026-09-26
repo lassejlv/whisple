@@ -1,0 +1,76 @@
+name: Build Windows release assets
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing GitHub release tag to rebuild and attach
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-windows-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: Windows x86_64
+    runs-on: windows-2022
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Validate release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+          test "$RELEASE_TAG" = "v$version"
+          gh release view "$RELEASE_TAG" --json tagName --jq '.tagName' >/dev/null
+
+      - name: Prepare Windows build tools
+        shell: pwsh
+        run: |
+          # bindgen needs libclang for the whisper.cpp bindings. The runner
+          # image ships LLVM; point bindgen at it.
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
+          # Build whisper.cpp for a fixed x86-64 baseline (AVX2, FMA and F16C,
+          # every x86 CPU since about 2013) instead of the runner's own CPU,
+          # which may have instructions users' PCs lack.
+          $toolchain = Join-Path $env:RUNNER_TEMP 'ggml-portable.cmake'
+          @(
+            'set(GGML_NATIVE OFF CACHE BOOL "Portable Windows build" FORCE)'
+            'set(GGML_AVX ON CACHE BOOL "" FORCE)'
+            'set(GGML_AVX2 ON CACHE BOOL "" FORCE)'
+            'set(GGML_FMA ON CACHE BOOL "" FORCE)'
+            'set(GGML_F16C ON CACHE BOOL "" FORCE)'
+          ) | Out-File -FilePath $toolchain -Encoding ascii
+          "CMAKE_TOOLCHAIN_FILE=$toolchain" | Out-File -FilePath $env:GITHUB_ENV -Append
+          choco install innosetup --no-progress -y
+          dotnet tool install --global wix --version 5.0.2
+
+      - name: Run Rust tests
+        run: cargo test --locked --features licensing
+
+      - name: Build installers and updater archive
+        shell: pwsh
+        run: ./scripts/windows/package-windows.ps1 -WithLicensing
+
+      - name: Attach assets to release
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+          prefix="target/dist/Whisple-$version-windows-x86_64"
+          gh release upload "$RELEASE_TAG" \
+            "$prefix-setup.exe" "$prefix.msi" "$prefix.zip" "$prefix.sha256" --clobber

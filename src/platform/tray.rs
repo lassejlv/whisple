@@ -13,7 +13,7 @@ pub enum Command {
     Quit,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(updates)]
 #[derive(Clone, Copy)]
 pub enum UpdateStatus<'a> {
     Checking,
@@ -55,7 +55,7 @@ pub fn set_icon_visible(visible: bool, cx: &App) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(updates)]
 pub fn set_update(status: UpdateStatus<'_>, cx: &mut App) {
     super::system_tray::set_update(status, cx);
 }
