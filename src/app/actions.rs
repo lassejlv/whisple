@@ -339,14 +339,14 @@ impl Whisp {
     pub(crate) fn check_for_updates_now(&mut self, cx: &mut Context<Self>) {
         #[cfg(not(feature = "licensing"))]
         cx.open_url("https://github.com/lassejlv/whisple/releases");
-        #[cfg(all(target_os = "macos", feature = "licensing"))]
+        #[cfg(all(updates, feature = "licensing"))]
         self.check_for_updates(cx);
-        #[cfg(all(not(target_os = "macos"), feature = "licensing"))]
+        #[cfg(all(not(updates), feature = "licensing"))]
         let _ = cx;
     }
 
     pub(crate) fn update_summary(&self) -> String {
-        #[cfg(target_os = "macos")]
+        #[cfg(updates)]
         {
             if self.update_checking {
                 return t("Checking for updates…").into();
@@ -359,20 +359,20 @@ impl Whisp {
     }
 
     pub(crate) fn ready_update(&self) -> Option<String> {
-        #[cfg(target_os = "macos")]
+        #[cfg(updates)]
         {
             self.update
                 .as_ref()
                 .map(|update| update.version.to_string())
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(updates))]
         {
             None
         }
     }
 
     pub(crate) fn dismiss_update(&mut self, cx: &mut Context<Self>) {
-        #[cfg(target_os = "macos")]
+        #[cfg(updates)]
         {
             self.update_prompt = None;
         }
@@ -382,7 +382,7 @@ impl Whisp {
 
     /// Installs and restarts. Never while a recording is running.
     pub(crate) fn install_update(&mut self, cx: &mut Context<Self>) {
-        #[cfg(target_os = "macos")]
+        #[cfg(updates)]
         if !self.visibility_locked() {
             if let Some(update) = self.update.as_mut() {
                 match update.install() {
@@ -674,7 +674,7 @@ impl Whisp {
         .detach();
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(updates)]
     pub(super) fn check_for_updates(&mut self, cx: &mut Context<Self>) {
         if !cfg!(feature = "licensing") {
             return;
@@ -725,7 +725,7 @@ impl Whisp {
         .detach();
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(updates)]
     pub(super) fn show_or_check_for_updates(&mut self, cx: &mut Context<Self>) {
         if !cfg!(feature = "licensing") {
             cx.open_url("https://github.com/lassejlv/whisple/releases");

@@ -7,10 +7,11 @@ Whisple is a single Rust desktop binary. `src/main.rs` starts the GPUI app. `src
 ## Build, Test, and Development Commands
 
 - `cargo run` builds and launches the development app.
-- `cargo test --locked` runs the default, license-free unit tests using the committed lockfile. Run `cargo test --locked --features licensing` for the licensed build; the macOS release workflow uses this mode.
+- `cargo test --locked` runs the default, license-free unit tests using the committed lockfile. Run `cargo test --locked --features licensing` for the licensed build; the macOS and Windows release workflows use this mode.
 - `cargo fmt --check` checks Rust formatting. Run `cargo fmt` before committing formatting changes.
 - `cargo clippy --all-targets` checks common Rust issues.
 - `./scripts/package-macos.sh --debug` builds a local debug `.app`; omit `--debug` for a release bundle. Packaging requires macOS tools such as `sips` and `iconutil`.
+- `scripts/windows/package-windows.ps1` builds the Windows installers, MSI, and update archive. It needs Inno Setup 6 and the WiX v5 .NET tool.
 
 ## Coding Style & Naming Conventions
 

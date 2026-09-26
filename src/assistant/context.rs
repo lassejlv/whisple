@@ -145,15 +145,12 @@ fn encode_png(rgb: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
 /// Automation, and a GDI capture of the primary display.
 #[cfg(target_os = "windows")]
 mod win {
-    use windows::core::{w, HSTRING, PCWSTR, PWSTR};
+    use windows::core::PWSTR;
     use windows::Win32::Foundation::{CloseHandle, HWND};
     use windows::Win32::Graphics::Gdi::{
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
         GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CAPTUREBLT,
         DIB_RGB_COLORS, SRCCOPY,
-    };
-    use windows::Win32::Storage::FileSystem::{
-        GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
     };
     use windows::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
@@ -215,50 +212,8 @@ mod win {
         if stem.eq_ignore_ascii_case("ApplicationFrameHost") {
             return None;
         }
-        description(&path).or(Some(stem))
-    }
-
-    fn description(path: &str) -> Option<String> {
-        let path = HSTRING::from(path);
-        let size = unsafe { GetFileVersionInfoSizeW(&path, None) };
-        if size == 0 {
-            return None;
-        }
-        let mut data = vec![0u8; size as usize];
-        unsafe { GetFileVersionInfoW(&path, None, size, data.as_mut_ptr().cast()) }.ok()?;
-        let translation = query(&data, w!(r"\VarFileInfo\Translation"), false)?;
-        if translation.len() < 4 {
-            return None;
-        }
-        let language = u16::from_le_bytes([translation[0], translation[1]]);
-        let code_page = u16::from_le_bytes([translation[2], translation[3]]);
-        let key = HSTRING::from(format!(
-            r"\StringFileInfo\{language:04x}{code_page:04x}\FileDescription"
-        ));
-        let value = query(&data, PCWSTR(key.as_ptr()), true)?;
-        let units: Vec<u16> = value
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|&pair| u16::from_le_bytes(pair))
-            .take_while(|&unit| unit != 0)
-            .collect();
-        Some(String::from_utf16_lossy(&units))
-    }
-
-    /// A value from a version resource. Strings report their length in
-    /// UTF-16 units and binary values in bytes.
-    fn query(data: &[u8], key: PCWSTR, text: bool) -> Option<Vec<u8>> {
-        let mut value = std::ptr::null_mut();
-        let mut len = 0u32;
-        let found = unsafe { VerQueryValueW(data.as_ptr().cast(), key, &mut value, &mut len) };
-        if !found.as_bool() || value.is_null() || len == 0 {
-            return None;
-        }
-        let start = (value as usize).checked_sub(data.as_ptr() as usize)?;
-        let bytes = if text { len as usize * 2 } else { len as usize };
-        let end = (start + bytes).min(data.len());
-        data.get(start..end).map(<[u8]>::to_vec)
+        crate::platform::windows::version_string(std::path::Path::new(&path), "FileDescription")
+            .or(Some(stem))
     }
 
     fn selection(pid: u32) -> Option<String> {

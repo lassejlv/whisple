@@ -8278,6 +8278,7 @@ dependencies = [
  "cocoa 0.26.0",
  "cpal",
  "dirs 6.0.0",
+ "embed-resource",
  "global-hotkey",
  "gpui-kit",
  "hound",

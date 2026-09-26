@@ -148,13 +148,13 @@ pub(crate) struct Whisp {
     pub(super) screen: Snapshot,
     pub input_device: String,
     pub open_on_startup: bool,
-    #[cfg(target_os = "macos")]
+    #[cfg(updates)]
     pub(super) update: Option<PreparedUpdate>,
-    #[cfg(target_os = "macos")]
+    #[cfg(updates)]
     pub(crate) update_prompt: Option<UpdatePrompt>,
-    #[cfg(target_os = "macos")]
+    #[cfg(updates)]
     pub(super) update_checking: bool,
-    #[cfg(target_os = "macos")]
+    #[cfg(updates)]
     pub(super) last_update_check: Instant,
     pub recording_hotkey: Option<Shortcut>,
     pub listen_started: Option<Instant>,

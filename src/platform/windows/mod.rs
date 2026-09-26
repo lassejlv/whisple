@@ -1,7 +1,12 @@
 pub(crate) mod dictation;
 pub(crate) mod placement;
 
+use std::path::Path;
+
 use windows::core::{w, HSTRING, PCWSTR};
+use windows::Win32::Storage::FileSystem::{
+    GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
+};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
@@ -106,6 +111,51 @@ fn registry_string(root: HKEY, key: PCWSTR, value: PCWSTR) -> Option<String> {
         .position(|&unit| unit == 0)
         .unwrap_or(buffer.len());
     Some(String::from_utf16_lossy(&buffer[..len]))
+}
+
+/// A string from an executable's version resource, such as its
+/// `FileDescription`, in the first language the resource lists.
+pub(crate) fn version_string(path: &Path, key: &str) -> Option<String> {
+    let path = HSTRING::from(path);
+    let size = unsafe { GetFileVersionInfoSizeW(&path, None) };
+    if size == 0 {
+        return None;
+    }
+    let mut data = vec![0u8; size as usize];
+    unsafe { GetFileVersionInfoW(&path, None, size, data.as_mut_ptr().cast()) }.ok()?;
+    let translation = version_value(&data, w!(r"\VarFileInfo\Translation"), false)?;
+    let [language_lo, language_hi, code_page_lo, code_page_hi, ..] = translation[..] else {
+        return None;
+    };
+    let language = u16::from_le_bytes([language_lo, language_hi]);
+    let code_page = u16::from_le_bytes([code_page_lo, code_page_hi]);
+    let query = HSTRING::from(format!(
+        r"\StringFileInfo\{language:04x}{code_page:04x}\{key}"
+    ));
+    let value = version_value(&data, PCWSTR(query.as_ptr()), true)?;
+    let units: Vec<u16> = value
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&pair| u16::from_le_bytes(pair))
+        .take_while(|&unit| unit != 0)
+        .collect();
+    Some(String::from_utf16_lossy(&units))
+}
+
+/// A value from a version resource. Strings report their length in UTF-16
+/// units and binary values in bytes.
+fn version_value(data: &[u8], key: PCWSTR, text: bool) -> Option<Vec<u8>> {
+    let mut value = std::ptr::null_mut();
+    let mut len = 0u32;
+    let found = unsafe { VerQueryValueW(data.as_ptr().cast(), key, &mut value, &mut len) };
+    if !found.as_bool() || value.is_null() || len == 0 {
+        return None;
+    }
+    let start = (value as usize).checked_sub(data.as_ptr() as usize)?;
+    let bytes = if text { len as usize * 2 } else { len as usize };
+    let end = (start + bytes).min(data.len());
+    data.get(start..end).map(<[u8]>::to_vec)
 }
 
 /// Sets up COM on the calling thread. GPUI's main thread already has it, and

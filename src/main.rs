@@ -9,7 +9,7 @@ mod settings;
 mod startup;
 mod transcription;
 mod ui;
-#[cfg(target_os = "macos")]
+#[cfg(updates)]
 mod updater;
 
 use platform::tray;

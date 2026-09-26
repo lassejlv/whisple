@@ -19,7 +19,7 @@ use crate::transcription::cloud::{self, GatewayModel, Provider};
 use crate::ui::motion;
 use crate::ui::settings::SettingsTarget;
 use crate::ui::theme;
-#[cfg(target_os = "macos")]
+#[cfg(updates)]
 use crate::updater::UpdatePrompt;
 
 impl Render for Whisp {
@@ -159,7 +159,7 @@ impl Whisp {
     }
 
     fn update_notice(&self, cx: &mut Context<Self>) -> AnyElement {
-        #[cfg(target_os = "macos")]
+        #[cfg(updates)]
         if self.update_prompt == Some(UpdatePrompt::JustUpdated) {
             return notice_line(
                 tf("Updated to Whisple {}", &[&env!("CARGO_PKG_VERSION")]),
