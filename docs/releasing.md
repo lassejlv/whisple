@@ -1,21 +1,31 @@
 # Releases and updates
 
-Whisple publishes macOS builds for Apple silicon and Intel, and Windows builds for x86_64. Every build checks the public GitHub releases feed on startup and every six hours. It follows the newest published release with a complete update archive for its platform and architecture, including prereleases. Once an update is downloaded and verified, the tray menu offers **Install Whisple v…**. Installing waits for the app to exit, replaces it, and relaunches it.
+Whisple publishes macOS builds for Apple silicon and Intel, and Windows builds for x86_64. Packaged builds check GitHub's **latest stable release** on startup and every six hours. Drafts and prereleases are never offered as updates. Once the platform's ZIP is downloaded and verified, the tray menu offers **Install Whisple v…**. Installing waits for the app to exit, replaces it, and relaunches it.
 
-Cargo builds and local packages omit licensing by default. The release workflows
-pass `--features licensing` for tests and build with licensing, so published
-binaries retain the paid trial and license flow on both platforms.
+Cargo builds and local packages omit licensing by default. Release jobs test and build with `--features licensing`, retaining the paid trial and license flow on both platforms.
 
 ## Publish a release
 
-1. Set the `Cargo.toml` version and update `Cargo.lock`. Use a semantic prerelease version such as `0.2.0-rc.1` for prereleases.
-2. Merge the source and workflows into the default branch, then push the tag `v<version>` at that commit.
-3. Publish a GitHub release for that tag. **Build macOS release assets** and **Build Windows release assets** both run on `published`, for regular releases and prereleases.
-4. Wait for all jobs to finish and confirm the release has these assets:
-   - For each macOS architecture: a DMG, ZIP, and `.sha256`.
-   - For Windows: `-setup.exe`, `.msi`, `.zip`, and `.sha256`.
+1. Set a stable `X.Y.Z` version in `Cargo.toml` and update `Cargo.lock`. Use the GitHub **prerelease checkbox** to stage the build; do not add `-rc` to the version for this promotion flow.
+2. Push the source and these workflows to the default branch, then push `v<version>` at that commit.
+3. Create and **publish a prerelease** for that tag. Saving a draft alone does not trigger builds.
+4. **Publish release** runs automatically:
+   - It validates the tag against Cargo, pins the source commit, and keeps the release marked prerelease.
+   - Both signed/notarized macOS builds and the Windows build run in parallel, with licensed tests.
+   - Windows verifies both installers, and all three builds unpack their actual ZIP through `src/updater.rs` and validate the payload.
+   - After every build succeeds, the final job verifies all ten files and checksums, attaches them to the same release, and checks GitHub's uploaded sizes and SHA-256 digests.
+   - Only then does it clear prerelease and explicitly mark the release **Latest**. A newer existing latest version cannot be replaced by an older build.
 
-To rebuild an existing release, run either workflow manually with its tag and enable **publish**. The upload step replaces assets with the same names. Tags must contain the release scripts used by the workflow. A stable version following `0.2.0-rc.1` should use version and tag `0.2.0`; the updater compares semantic versions and offers that stable build to prerelease users.
+If a build, test, upload, or digest check fails, the release stays a prerelease. Fix the failure and rerun **Publish release** with the existing tag and **publish enabled**. Release tags must include these scripts. Publishing a regular release is also handled by moving it back to prerelease at the start, but create it as a prerelease to avoid exposing it before the workflow starts.
+
+The complete release contains:
+
+- Each macOS architecture: `.dmg`, `.zip`, `.sha256` (six files total).
+- Windows x86_64: `-setup.exe`, `.msi`, `.zip`, `.sha256` (four files).
+
+To verify everything without publishing, run **Publish release** manually with `tag: main` (or a full commit SHA) and **publish disabled**. It runs the same builds, updater/archive checks, and final completeness gate; the three artifact bundles remain available for 14 days. Individual platform workflows remain available for build verification only; release uploads and promotion are centralized in **Publish release**.
+
+The updater uses `/repos/lassejlv/whisple/releases/latest`, accepts only a newer stable semantic version, and requires the exact platform/architecture archive URL, an uploaded nonempty asset, and a valid GitHub SHA-256 digest. It verifies download size and hash before unpacking. A repository with no stable release returns no update normally. Existing older app versions that accepted prereleases retain that behavior until they install a build containing this updater change.
 
 ## macOS
 
@@ -37,9 +47,9 @@ Use a Team API key with Developer access. `setup-macos-signing.sh` validates the
 
 ### Verify signing without publishing a release
 
-Run **Build macOS release assets** manually with `tag: main` (or a commit/ref containing the signing scripts) and **publish disabled**. Both architectures run the licensed Rust tests, build, sign, notarize, and pass Gatekeeper assessment. Download the DMG, updater ZIP, and checksums from the run's artifacts, retained for 14 days. This does not add a release to the updater feed.
+Run **Build macOS release assets** manually with `tag: main` (or a commit/ref containing the signing scripts) to verify without publishing. Both architectures run the licensed Rust tests, build, sign, notarize, and pass Gatekeeper assessment. Download the DMG, updater ZIP, and checksums from the run's artifacts, retained for 14 days. This does not add a release to the updater feed.
 
-Publishing a GitHub release triggers the same verified flow and attaches the assets automatically. Missing credentials or rejected notarization fail the job; release CI never falls back to ad hoc signing. Local packaging still uses ad hoc signing unless `WHISPLE_CODESIGN_IDENTITY` is provided.
+The combined **Publish release** workflow calls this same verified flow and attaches assets after all platforms pass. Missing credentials or rejected notarization fail the job; release CI never falls back to ad hoc signing. Local packaging still uses ad hoc signing unless `WHISPLE_CODESIGN_IDENTITY` is provided.
 
 The app icon and Finder DMG layout come from the [Release page in Paper](https://app.paper.design/file/01M391FYN8XXTW9JHFATBK4Q06/p-8-0). The DMG background includes light patches behind the item names because Finder renders those names in black over custom backgrounds. The builder combines the 1× and 2× artwork into one Retina-aware TIFF.
 
@@ -53,7 +63,7 @@ PATH="$PWD/target/release-tools/bin:$PATH" ./scripts/build-macos-dmgs.sh --with-
 
 ## Windows
 
-Run **Build Windows release assets** manually with `tag: main` (or a full commit SHA) and **publish disabled** to verify a build without adding a release to the updater feed. The workflow runs licensed Rust tests, builds both installers and the updater ZIP, checks hashes, version and architecture, then silently installs and uninstalls each installer on the clean Windows runner. Each installed executable must match the updater payload, and its Start menu shortcut must be created and removed. Verified assets are retained for 14 days; installer failure logs are retained for 7 days.
+Run **Build Windows release assets** manually with `tag: main` (or a full commit SHA) to verify a build without adding a release to the updater feed. The workflow runs licensed Rust tests, builds both installers and the updater ZIP, checks hashes, version and architecture, then silently installs and uninstalls each installer on the clean Windows runner. Each installed executable must match the updater payload, and its Start menu shortcut must be created and removed. Verified assets are retained for 14 days; installer failure logs are retained for 7 days.
 
 Windows gets two installers with the same result, so users can pick either:
 

@@ -1,0 +1,84 @@
+name: Publish release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag, or source ref for verification
+        required: true
+        default: main
+        type: string
+      publish:
+        description: Attach all assets and promote the existing release to latest
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+# Serialize publication, including rebuilds of the same release.
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+  PUBLISH_RELEASE: ${{ github.event_name == 'release' || inputs.publish }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.prepare.outputs.source }}
+      version: ${{ steps.prepare.outputs.version }}
+      release_id: ${{ steps.prepare.outputs.release_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - name: Test release promotion gates
+        run: python3 -m unittest discover -s scripts -p 'test_release.py' -v
+      - name: Validate version and keep release in prerelease
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release.py prepare
+
+  macos:
+    needs: prepare
+    uses: ./.github/workflows/release-macos.yml
+    with:
+      tag: ${{ needs.prepare.outputs.source }}
+    secrets: inherit
+
+  windows:
+    needs: prepare
+    uses: ./.github/workflows/release-windows.yml
+    with:
+      tag: ${{ needs.prepare.outputs.source }}
+
+  finalize:
+    needs: [prepare, macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Whisple-*
+          path: target/release-assets
+          merge-multiple: true
+      - name: Verify all assets, attach them, and promote to latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+        run: python3 scripts/release.py finalize target/release-assets

@@ -1,25 +1,25 @@
 name: Build Windows release assets
 
 on:
-  release:
-    types: [published]
+  workflow_call:
+    inputs:
+      tag:
+        description: Exact source commit to build
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag, or source ref when publish is disabled
+        description: Source ref to verify without publishing
         required: true
+        default: main
         type: string
-      publish:
-        description: Attach assets to an existing GitHub release
-        required: true
-        default: false
-        type: boolean
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: release-windows-${{ github.event.release.tag_name || inputs.tag }}
+  group: build-windows-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:
@@ -28,23 +28,12 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 120
     env:
-      GH_TOKEN: ${{ github.token }}
-      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
-      PUBLISH_RELEASE: ${{ github.event_name == 'release' || inputs.publish }}
+      RELEASE_TAG: ${{ inputs.tag }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
         with:
           ref: ${{ env.RELEASE_TAG }}
-
-      - name: Validate release version
-        if: env.PUBLISH_RELEASE == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
-          test "$RELEASE_TAG" = "v$version"
-          gh release view "$RELEASE_TAG" --json tagName --jq '.tagName' >/dev/null
 
       - name: Prepare Windows build tools
         shell: pwsh
@@ -72,6 +61,10 @@ jobs:
       - name: Run Rust tests
         run: cargo test --locked --features licensing
 
+      - name: Test updater replacement and rollback
+        shell: pwsh
+        run: ./scripts/windows/test-apply-update.ps1
+
       - name: Build installers and updater archive
         shell: pwsh
         run: ./scripts/windows/package-windows.ps1 -WithLicensing
@@ -79,6 +72,14 @@ jobs:
       - name: Verify archives and test both installers
         shell: pwsh
         run: ./scripts/windows/verify-release.ps1 -TestInstallers
+
+      - name: Validate real archive with the app updater
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $env:WHISPLE_TEST_UPDATE_ARCHIVE = "$PWD\target\dist\Whisple-$version-windows-x86_64.zip"
+          $env:WHISPLE_TEST_CURRENT_INSTALL = "$PWD\target\release\whisple.exe"
+          cargo test --locked --features licensing updater::tests::release_archive_passes_updater_validation -- --ignored --exact
 
       - name: Save verified binaries
         uses: actions/upload-artifact@v4
@@ -100,13 +101,3 @@ jobs:
           path: target/windows-smoke-logs/
           if-no-files-found: ignore
           retention-days: 7
-
-      - name: Attach assets to release
-        if: env.PUBLISH_RELEASE == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
-          prefix="target/dist/Whisple-$version-windows-x86_64"
-          gh release upload "$RELEASE_TAG" \
-            "$prefix-setup.exe" "$prefix.msi" "$prefix.zip" "$prefix.sha256" --clobber

@@ -19,21 +19,31 @@ while (Get-Process -Id $OldPid -ErrorAction SilentlyContinue) {
 }
 
 $backup = "$Target.previous"
+$replacement = "$Target.update-$PID"
+$backedUp = $false
 try {
+    # Finish copying beside the installed executable before moving the old
+    # version. Renaming on the same volume avoids a partially copied target.
+    Copy-Item -LiteralPath $Staged -Destination $replacement
     if (Test-Path -LiteralPath $backup) {
         Remove-Item -LiteralPath $backup -Force
     }
     Move-Item -LiteralPath $Target -Destination $backup
-    Copy-Item -LiteralPath $Staged -Destination $Target
+    $backedUp = $true
+    Move-Item -LiteralPath $replacement -Destination $Target
+    Start-Process -FilePath $Target
 } catch {
     Write-Error $_ -ErrorAction Continue
-    if (-not (Test-Path -LiteralPath $Target) -and (Test-Path -LiteralPath $backup)) {
+    if ($backedUp) {
+        Remove-Item -LiteralPath $Target -Force -ErrorAction SilentlyContinue
         Move-Item -LiteralPath $backup -Destination $Target
     }
     if (Test-Path -LiteralPath $Target) {
         Start-Process -FilePath $Target
     }
     exit 1
+} finally {
+    Remove-Item -LiteralPath $replacement -Force -ErrorAction SilentlyContinue
 }
 
 # Keep Settings › Apps showing the running version for the Inno Setup install.
@@ -43,6 +53,5 @@ if (Test-Path -LiteralPath $uninstall) {
     Set-ItemProperty -LiteralPath $uninstall -Name DisplayVersion -Value $Version -ErrorAction SilentlyContinue
 }
 
-Start-Process -FilePath $Target
 Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $WorkDir -Recurse -Force -ErrorAction SilentlyContinue

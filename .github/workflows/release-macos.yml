@@ -1,25 +1,25 @@
 name: Build macOS release assets
 
 on:
-  release:
-    types: [published]
+  workflow_call:
+    inputs:
+      tag:
+        description: Exact source commit to build
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag, or source ref when publish is disabled
+        description: Source ref to verify without publishing
         required: true
+        default: main
         type: string
-      publish:
-        description: Attach assets to an existing GitHub release
-        required: true
-        default: false
-        type: boolean
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: release-macos-${{ github.event.release.tag_name || inputs.tag }}
+  group: build-macos-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:
@@ -36,24 +36,13 @@ jobs:
           - arch: x86_64
             runner: macos-15-intel
     env:
-      GH_TOKEN: ${{ github.token }}
-      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
-      PUBLISH_RELEASE: ${{ github.event_name == 'release' || inputs.publish }}
+      RELEASE_TAG: ${{ inputs.tag }}
       APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
         with:
           ref: ${{ env.RELEASE_TAG }}
-
-      - name: Validate release version
-        if: env.PUBLISH_RELEASE == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
-          test "$RELEASE_TAG" = "v$version"
-          gh release view "$RELEASE_TAG" --json tagName --jq '.tagName' >/dev/null
 
       - name: Set up signing and validate Apple credentials
         env:
@@ -109,6 +98,14 @@ jobs:
           shasum -a 256 "$prefix.dmg" "$prefix.zip" > "$prefix.sha256"
           shasum -a 256 --check "$prefix.sha256"
 
+      - name: Validate real archive with the app updater
+        shell: bash
+        run: |
+          version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+          export WHISPLE_TEST_UPDATE_ARCHIVE="$PWD/target/dist/Whisple-$version-macos-${{ matrix.arch }}.zip"
+          export WHISPLE_TEST_CURRENT_INSTALL="$PWD/target/Whisple.app"
+          cargo test --locked --features licensing updater::tests::release_archive_passes_updater_validation -- --ignored --exact
+
       - name: Save verified binaries
         uses: actions/upload-artifact@v4
         with:
@@ -119,16 +116,6 @@ jobs:
             target/dist/*.sha256
           if-no-files-found: error
           retention-days: 14
-
-      - name: Attach assets to release
-        if: env.PUBLISH_RELEASE == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
-          prefix="target/dist/Whisple-$version-macos-${{ matrix.arch }}"
-          gh release upload "$RELEASE_TAG" \
-            "$prefix.dmg" "$prefix.zip" "$prefix.sha256" --clobber
 
       - name: Remove signing credentials
         if: always() && env.WHISPLE_SIGNING_DIR != ''

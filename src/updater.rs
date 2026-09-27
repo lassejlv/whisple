@@ -10,7 +10,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-const RELEASES_API: &str = "https://api.github.com/repos/lassejlv/whisple/releases?per_page=20";
+const RELEASES_API: &str = "https://api.github.com/repos/lassejlv/whisple/releases/latest";
 const DOWNLOAD_PREFIX: &str = "https://github.com/lassejlv/whisple/releases/download/";
 const MAX_UPDATE_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -18,6 +18,7 @@ const MAX_UPDATE_BYTES: u64 = 512 * 1024 * 1024;
 struct Release {
     tag_name: String,
     draft: bool,
+    prerelease: bool,
     published_at: Option<String>,
     assets: Vec<ReleaseAsset>,
 }
@@ -144,40 +145,48 @@ fn current_arch() -> &'static str {
     }
 }
 
-fn select_latest<'a>(
-    releases: &'a [Release],
-    current: &Version,
-    arch: &str,
-) -> Option<Candidate<'a>> {
-    // Publication time, not GitHub's 'latest' endpoint, includes prereleases.
-    let mut sorted: Vec<_> = releases
-        .iter()
-        .filter(|release| !release.draft && release.published_at.is_some())
-        .collect();
-    sorted.sort_by(|a, b| b.published_at.cmp(&a.published_at));
-    for release in sorted {
-        let Some(version) = release
-            .tag_name
-            .strip_prefix('v')
-            .and_then(|tag| Version::parse(tag).ok())
-        else {
-            continue;
-        };
-        let expected_name = asset_name(&version, arch);
-        let Some(asset) = release.assets.iter().find(|asset| {
-            asset.name == expected_name
-                && asset.state == "uploaded"
-                && asset.size > 0
-                && asset.size <= MAX_UPDATE_BYTES
-                && asset.browser_download_url.starts_with(DOWNLOAD_PREFIX)
-                && valid_digest(asset.digest.as_deref()).is_some()
-        }) else {
-            // A just-published release is incomplete until CI attaches its assets.
-            continue;
-        };
-        return (version > *current).then_some(Candidate { version, asset });
+fn select_latest<'a>(release: &'a Release, current: &Version, arch: &str) -> Option<Candidate<'a>> {
+    // CI promotes to latest only after every platform has passed and all
+    // assets are attached. A prerelease is staging, never an update channel.
+    if release.draft || release.prerelease || release.published_at.is_none() {
+        return None;
     }
-    None
+    let version = Version::parse(release.tag_name.strip_prefix('v')?).ok()?;
+    if !version.pre.is_empty() || version <= *current {
+        return None;
+    }
+    let expected_name = asset_name(&version, arch);
+    let expected_url = format!("{DOWNLOAD_PREFIX}{}/{expected_name}", release.tag_name);
+    let asset = release.assets.iter().find(|asset| {
+        asset.name == expected_name
+            && asset.state == "uploaded"
+            && asset.size > 0
+            && asset.size <= MAX_UPDATE_BYTES
+            && asset.browser_download_url == expected_url
+            && valid_digest(asset.digest.as_deref()).is_some()
+    })?;
+    Some(Candidate { version, asset })
+}
+
+fn fetch_latest(client: &Client, url: &str) -> Result<Option<Release>, String> {
+    let response = client
+        .get(url)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .timeout(Duration::from_secs(30))
+        .send()
+        .map_err(|err| format!("Could not check GitHub releases: {err}"))?;
+    // A new repository, or one with only prereleases, has no latest yet.
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let body = response
+        .error_for_status()
+        .and_then(|response| response.text())
+        .map_err(|err| format!("Could not check GitHub releases: {err}"))?;
+    serde_json::from_str(&body)
+        .map(Some)
+        .map_err(|err| format!("Could not read GitHub releases: {err}"))
 }
 
 fn valid_digest(digest: Option<&str>) -> Option<&str> {
@@ -202,16 +211,10 @@ pub(crate) fn check_and_prepare(
         .timeout(Duration::from_secs(10 * 60))
         .build()
         .map_err(|err| err.to_string())?;
-    let body = client
-        .get(RELEASES_API)
-        .timeout(Duration::from_secs(30))
-        .send()
-        .and_then(|response| response.error_for_status())
-        .and_then(|response| response.text())
-        .map_err(|err| format!("Could not check GitHub releases: {err}"))?;
-    let releases: Vec<Release> = serde_json::from_str(&body)
-        .map_err(|err| format!("Could not read GitHub releases: {err}"))?;
-    let Some(candidate) = select_latest(&releases, &current_version, current_arch()) else {
+    let Some(release) = fetch_latest(&client, RELEASES_API)? else {
+        return Ok(None);
+    };
+    let Some(candidate) = select_latest(&release, &current_version, current_arch()) else {
         return Ok(None);
     };
     let cache_dir = dirs::cache_dir()
@@ -444,14 +447,13 @@ impl PreparedUpdate {
         let log =
             File::create(self.temp.path().join("update.log")).map_err(|err| err.to_string())?;
         let marker = update_marker();
-        write_update_marker(&marker, &self.version)?;
-        if let Err(err) = self
-            .installer(&current)?
+        let mut installer = self.installer(&current)?;
+        installer
             .stdin(Stdio::null())
             .stdout(Stdio::from(log.try_clone().map_err(|err| err.to_string())?))
-            .stderr(Stdio::from(log))
-            .spawn()
-        {
+            .stderr(Stdio::from(log));
+        write_update_marker(&marker, &self.version)?;
+        if let Err(err) = installer.spawn() {
             let _ = fs::remove_file(marker);
             return Err(format!("Could not start the update installer: {err}"));
         }
@@ -509,6 +511,7 @@ mod tests {
         Release {
             tag_name: tag.into(),
             draft: false,
+            prerelease: false,
             published_at: Some(published.into()),
             assets: if complete {
                 vec![ReleaseAsset {
@@ -516,7 +519,10 @@ mod tests {
                     state: "uploaded".into(),
                     size: 1024,
                     digest: Some(format!("sha256:{}", "a".repeat(64))),
-                    browser_download_url: format!("{DOWNLOAD_PREFIX}{tag}/update.zip"),
+                    browser_download_url: format!(
+                        "{DOWNLOAD_PREFIX}{tag}/{}",
+                        asset_name(&version, arch)
+                    ),
                 }]
             } else {
                 vec![]
@@ -525,33 +531,147 @@ mod tests {
     }
 
     #[test]
-    fn follows_latest_complete_release_including_prereleases() {
-        let releases = [
-            release("v1.2.0-rc.2", "2026-09-24T10:00:00Z", "arm64", false),
-            release("v1.2.0-rc.1", "2026-09-23T10:00:00Z", "arm64", true),
-            release("v1.1.0", "2026-09-22T10:00:00Z", "arm64", true),
-        ];
-        let candidate =
-            select_latest(&releases, &Version::parse("1.1.0").unwrap(), "arm64").unwrap();
-        assert_eq!(candidate.version.to_string(), "1.2.0-rc.1");
-        let stable = [
-            release("v1.2.0", "2026-09-25T10:00:00Z", "arm64", true),
-            releases[1].clone(),
-        ];
+    fn only_offers_a_promoted_stable_release() {
+        let mut latest = release("v1.2.0", "2026-09-27T10:00:00Z", "arm64", true);
+        let current = Version::parse("1.1.0").unwrap();
+        latest.prerelease = true;
+        assert!(select_latest(&latest, &current, "arm64").is_none());
+        latest.prerelease = false;
         assert_eq!(
-            select_latest(&stable, &Version::parse("1.2.0-rc.1").unwrap(), "arm64")
+            select_latest(&latest, &current, "arm64")
                 .unwrap()
                 .version
                 .to_string(),
             "1.2.0"
         );
+        latest.draft = true;
+        assert!(select_latest(&latest, &current, "arm64").is_none());
+        latest.draft = false;
+        latest.published_at = None;
+        assert!(select_latest(&latest, &current, "arm64").is_none());
+        let rc = release("v1.2.0-rc.1", "2026-09-27T10:00:00Z", "arm64", true);
+        assert!(select_latest(&rc, &current, "arm64").is_none());
+        latest.published_at = Some("2026-09-27T10:00:00Z".into());
+        assert!(select_latest(&latest, &Version::parse("1.2.0-rc.1").unwrap(), "arm64").is_some());
     }
 
     #[test]
-    fn rejects_wrong_arch_and_downgrades() {
-        let releases = [release("v1.0.1", "2026-09-24T10:00:00Z", "x86_64", true)];
-        assert!(select_latest(&releases, &Version::parse("1.0.0").unwrap(), "arm64").is_none());
-        assert!(select_latest(&releases, &Version::parse("1.0.2").unwrap(), "x86_64").is_none());
+    fn rejects_wrong_arch_same_version_and_downgrades() {
+        let latest = release("v1.0.1", "2026-09-24T10:00:00Z", "x86_64", true);
+        assert!(select_latest(&latest, &Version::parse("1.0.0").unwrap(), "arm64").is_none());
+        assert!(select_latest(&latest, &Version::parse("1.0.1").unwrap(), "x86_64").is_none());
+        assert!(select_latest(&latest, &Version::parse("1.0.2").unwrap(), "x86_64").is_none());
+    }
+
+    #[test]
+    fn rejects_incomplete_assets_bad_digests_and_wrong_release_urls() {
+        let good = release("v1.0.1", "2026-09-24T10:00:00Z", "x86_64", true);
+        let current = Version::parse("1.0.0").unwrap();
+        for change in 0..7 {
+            let mut latest = good.clone();
+            match change {
+                0 => latest.assets.clear(),
+                1 => latest.assets[0].size = 0,
+                2 => latest.assets[0].size = MAX_UPDATE_BYTES + 1,
+                3 => latest.assets[0].state = "starter".into(),
+                4 => latest.assets[0].digest = None,
+                5 => latest.assets[0].digest = Some(format!("sha256:{}", "z".repeat(64))),
+                _ => {
+                    latest.assets[0].browser_download_url = latest.assets[0]
+                        .browser_download_url
+                        .replace("v1.0.1/", "v9.9.9/")
+                }
+            }
+            assert!(
+                select_latest(&latest, &current, "x86_64").is_none(),
+                "case {change}"
+            );
+        }
+    }
+
+    fn serve(status: &str, body: &[u8]) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let body = body.to_vec();
+        let thread = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut buffer = [0; 4096];
+            socket.read(&mut buffer).unwrap();
+            socket.write_all(response.as_bytes()).unwrap();
+            socket.write_all(&body).unwrap();
+        });
+        (url, thread)
+    }
+
+    #[test]
+    fn no_latest_is_normal_but_server_failures_are_errors() {
+        let client = Client::builder().no_proxy().build().unwrap();
+        for (status, missing) in [("404 Not Found", true), ("503 Service Unavailable", false)] {
+            let (url, thread) = serve(status, b"{}");
+            let result = fetch_latest(&client, &url);
+            if missing {
+                assert!(result.unwrap().is_none());
+            } else {
+                assert!(result.is_err());
+            }
+            thread.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn download_checks_size_and_digest_before_unpacking() {
+        let body = b"verified archive bytes";
+        let hex: String = Sha256::digest(body)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let digest = format!("sha256:{hex}");
+        let client = Client::builder().no_proxy().build().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        for (size, checksum, succeeds) in [
+            (body.len() as u64, digest.clone(), true),
+            (body.len() as u64 + 1, digest.clone(), false),
+            (body.len() as u64 - 1, digest, false),
+            (
+                body.len() as u64,
+                format!("sha256:{}", "0".repeat(64)),
+                false,
+            ),
+        ] {
+            let (url, thread) = serve("200 OK", body);
+            let asset = ReleaseAsset {
+                name: "update.zip".into(),
+                state: "uploaded".into(),
+                size,
+                digest: Some(checksum),
+                browser_download_url: url,
+            };
+            let result = download_and_verify(&client, &asset, &temp.path().join("update.zip"));
+            assert_eq!(result.is_ok(), succeeds, "{result:?}");
+            thread.join().unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the packaged release archive; run explicitly after packaging in CI"]
+    fn release_archive_passes_updater_validation() {
+        let archive =
+            PathBuf::from(std::env::var_os("WHISPLE_TEST_UPDATE_ARCHIVE").expect("archive path"));
+        let current = PathBuf::from(
+            std::env::var_os("WHISPLE_TEST_CURRENT_INSTALL").expect("current app path"),
+        );
+        let temp = tempfile::tempdir().unwrap();
+        unpack(&archive, temp.path()).unwrap();
+        validate(
+            &staged(temp.path()),
+            &current,
+            &Version::parse(env!("CARGO_PKG_VERSION")).unwrap(),
+        )
+        .unwrap();
     }
 
     #[test]
