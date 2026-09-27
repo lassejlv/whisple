@@ -33,7 +33,7 @@ Set the repository Actions variable `APPLE_TEAM_ID` to the team that owns both t
 | `APPLE_NOTARY_KEY_ID` | Key ID from App Store Connect |
 | `APPLE_NOTARY_ISSUER_ID` | Issuer ID from App Store Connect |
 
-Use a Team API key with Developer access. `setup-macos-signing.sh` validates the certificate's team and authenticates with Apple, imports credentials into a temporary keychain, and removes the decoded source files. The workflow deletes the temporary keychain after success or failure. Credentials and recovery copies must remain outside the repository; never add them to workflow artifacts.
+Use a Team API key with Developer access. `setup-macos-signing.sh` validates the certificate's team, performs a signing preflight, authenticates with Apple, imports credentials into a temporary keychain, and removes the decoded source files. Cleanup restores the original keychain search list and deletes the temporary keychain after success or failure. Credentials and recovery copies must remain outside the repository; never add them to workflow artifacts.
 
 ### Verify signing without publishing a release
 

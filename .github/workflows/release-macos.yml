@@ -131,12 +131,5 @@ jobs:
             "$prefix.dmg" "$prefix.zip" "$prefix.sha256" --clobber
 
       - name: Remove signing credentials
-        if: always()
-        shell: bash
-        run: |
-          if [[ -n "${WHISPLE_SIGNING_KEYCHAIN:-}" ]]; then
-            security delete-keychain "$WHISPLE_SIGNING_KEYCHAIN"
-          fi
-          if [[ -n "${WHISPLE_SIGNING_DIR:-}" ]]; then
-            rm -rf "$WHISPLE_SIGNING_DIR"
-          fi
+        if: always() && env.WHISPLE_SIGNING_DIR != ''
+        run: ./scripts/cleanup-macos-signing.sh
