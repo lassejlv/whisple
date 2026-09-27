@@ -46,13 +46,18 @@ try {
         if ($reader.ReadUInt32() -ne 0x4550 -or $reader.ReadUInt16() -ne 0x8664) {
             throw 'The updater payload is not a Windows x86_64 executable.'
         }
+        # PE signature (4), COFF header (20), then Subsystem at optional-header offset 68.
+        $reader.BaseStream.Position = $peOffset + 4 + 20 + 68
+        if ($reader.ReadUInt16() -ne 2) {
+            throw 'Whisple must use the Windows GUI subsystem so launching it does not open a console.'
+        }
     } finally { $reader.Dispose() }
     $payloadHash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
     $source = Join-Path $root 'target\release\whisple.exe'
     if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -ne $payloadHash) {
         throw 'The updater ZIP differs from the compiled binary.'
     }
-    Write-Output 'All checksums, updater layout, version, architecture, and binary contents verified.'
+    Write-Output 'All checksums, updater layout, version, architecture, GUI subsystem, and binary contents verified.'
 
     if ($TestInstallers) {
         if ($env:OS -ne 'Windows_NT') { throw 'Installer tests require Windows.' }

@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 mod app;
 mod assistant;
 mod audio;
@@ -106,7 +108,10 @@ fn main() {
             if settings::needs_onboarding() {
                 onboarding::open(cx);
             } else {
-                open_hud(cx, !menu_bar || dev_ui_test());
+                open_hud(
+                    cx,
+                    cfg!(target_os = "windows") || !menu_bar || dev_ui_test(),
+                );
             }
         });
 }
