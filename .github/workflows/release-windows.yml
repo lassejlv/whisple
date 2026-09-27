@@ -6,9 +6,14 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing GitHub release tag to rebuild and attach
+        description: Release tag, or source ref when publish is disabled
         required: true
         type: string
+      publish:
+        description: Attach assets to an existing GitHub release
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -21,16 +26,19 @@ jobs:
   windows:
     name: Windows x86_64
     runs-on: windows-2022
+    timeout-minutes: 120
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      PUBLISH_RELEASE: ${{ github.event_name == 'release' || inputs.publish }}
     steps:
-      - name: Check out release tag
+      - name: Check out source
         uses: actions/checkout@v4
         with:
           ref: ${{ env.RELEASE_TAG }}
 
       - name: Validate release version
+        if: env.PUBLISH_RELEASE == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -57,7 +65,9 @@ jobs:
           ) | Out-File -FilePath $toolchain -Encoding ascii
           "CMAKE_TOOLCHAIN_FILE=$toolchain" | Out-File -FilePath $env:GITHUB_ENV -Append
           choco install innosetup --no-progress -y
+          if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed.' }
           dotnet tool install --global wix --version 5.0.2
+          if ($LASTEXITCODE -ne 0) { throw 'WiX installation failed.' }
 
       - name: Run Rust tests
         run: cargo test --locked --features licensing
@@ -66,7 +76,33 @@ jobs:
         shell: pwsh
         run: ./scripts/windows/package-windows.ps1 -WithLicensing
 
+      - name: Verify archives and test both installers
+        shell: pwsh
+        run: ./scripts/windows/verify-release.ps1 -TestInstallers
+
+      - name: Save verified binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: Whisple-windows-x86_64
+          path: |
+            target/dist/*-setup.exe
+            target/dist/*.msi
+            target/dist/*.zip
+            target/dist/*.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Save installer diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Whisple-windows-installer-logs
+          path: target/windows-smoke-logs/
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Attach assets to release
+        if: env.PUBLISH_RELEASE == 'true'
         shell: bash
         run: |
           set -euo pipefail

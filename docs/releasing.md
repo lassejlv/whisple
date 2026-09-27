@@ -15,7 +15,7 @@ binaries retain the paid trial and license flow on both platforms.
    - For each macOS architecture: a DMG, ZIP, and `.sha256`.
    - For Windows: `-setup.exe`, `.msi`, `.zip`, and `.sha256`.
 
-To rebuild an existing release, run either workflow manually with its tag. For macOS, also enable **publish**. The upload step replaces assets with the same names. Tags must contain the release scripts used by the workflow. A stable version following `0.2.0-rc.1` should use version and tag `0.2.0`; the updater compares semantic versions and offers that stable build to prerelease users.
+To rebuild an existing release, run either workflow manually with its tag and enable **publish**. The upload step replaces assets with the same names. Tags must contain the release scripts used by the workflow. A stable version following `0.2.0-rc.1` should use version and tag `0.2.0`; the updater compares semantic versions and offers that stable build to prerelease users.
 
 ## macOS
 
@@ -52,6 +52,8 @@ PATH="$PWD/target/release-tools/bin:$PATH" ./scripts/build-macos-dmgs.sh --with-
 ```
 
 ## Windows
+
+Run **Build Windows release assets** manually with `tag: main` (or a full commit SHA) and **publish disabled** to verify a build without adding a release to the updater feed. The workflow runs licensed Rust tests, builds both installers and the updater ZIP, checks hashes, version and architecture, then silently installs and uninstalls each installer on the clean Windows runner. Each installed executable must match the updater payload, and its Start menu shortcut must be created and removed. Verified assets are retained for 14 days; installer failure logs are retained for 7 days.
 
 Windows gets two installers with the same result, so users can pick either:
 
