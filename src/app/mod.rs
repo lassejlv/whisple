@@ -92,7 +92,7 @@ impl Whisp {
                 )
             })
             .unwrap_or((0.0, 0.0, 1920.0, 1200.0));
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         cx.observe_window_activation(window, |view, window, cx| {
             #[cfg(debug_assertions)]
             if crate::dev_ui_test() {
@@ -103,7 +103,7 @@ impl Whisp {
             }
             if window.is_window_active() {
                 view.was_window_active = true;
-            } else if view.was_window_active && !view.visibility_locked() {
+            } else if view.was_window_active {
                 view.set_visible(false, window, cx);
             }
         })
@@ -168,8 +168,8 @@ impl Whisp {
             recorded: Duration::ZERO,
             last_text: String::new(),
             bar_visible: visible,
-            #[cfg(target_os = "macos")]
-            was_window_active: false,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            was_window_active: visible && window.is_window_active(),
             suppress_actions_until: None,
             last_tick: Instant::now(),
             screen_x,
@@ -370,6 +370,12 @@ impl Whisp {
             let alive = window_handle
                 .update(cx, |_, window, cx| {
                     this.update(cx, |view, cx| {
+                        #[cfg(target_os = "macos")]
+                        if crate::platform::macos::placement::take_outside_click()
+                            && view.bar_visible
+                        {
+                            view.set_visible(false, window, cx);
+                        }
                         let presses = hotkey::take_presses();
                         if presses.show {
                             view.set_visible(!view.bar_visible, window, cx);
@@ -447,25 +453,22 @@ impl Whisp {
         window: &mut gpui_kit::Window,
         cx: &mut Context<Self>,
     ) {
-        if !visible && self.visibility_locked() {
-            return;
-        }
         let was_visible = self.bar_visible;
         self.bar_visible = visible;
         if !visible {
             self.pending_uninstall = None;
             self.menu_open = false;
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
-            self.was_window_active = false;
+            self.was_window_active = visible && window.is_window_active();
         }
         tray::set_visible(visible, cx);
         place::set_mapped(visible);
         if visible {
             // Capture the editor and screen before the HUD takes keyboard
             // focus.
-            if !was_visible {
+            if !was_visible && !self.visibility_locked() {
                 #[cfg(any(target_os = "macos", target_os = "windows"))]
                 {
                     self.dictation_target = dictation::Target::focused();

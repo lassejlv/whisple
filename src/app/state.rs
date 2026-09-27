@@ -163,7 +163,7 @@ pub(crate) struct Whisp {
     /// it after a new recording has already replaced the phase.
     pub last_text: String,
     pub bar_visible: bool,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(super) was_window_active: bool,
     pub(super) suppress_actions_until: Option<Instant>,
     pub(super) last_tick: Instant,

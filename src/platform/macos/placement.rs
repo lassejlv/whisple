@@ -1,3 +1,7 @@
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use block::ConcreteBlock;
 use cocoa::appkit::{
     NSApplication, NSColor, NSView, NSViewLayerContentsPlacement, NSWindow, NSWindowStyleMask,
 };
@@ -10,7 +14,68 @@ const MARGIN: f64 = 18.0;
 /// animation, which eases the frame and leaves the panel clipped.
 const ANIMATION_NONE: isize = 2;
 
+static OUTSIDE_CLICK: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    static CLICK_MONITORS: RefCell<Option<ClickMonitors>> = const { RefCell::new(None) };
+}
+
+struct ClickMonitors {
+    global: id,
+    local: id,
+}
+
+impl ClickMonitors {
+    fn new() -> Self {
+        // Left, right and other mouse-down events. Mouse monitoring needs no
+        // keyboard-monitoring or Accessibility permission.
+        let mask = (1u64 << 1) | (1u64 << 3) | (1u64 << 25);
+        unsafe {
+            let global = ConcreteBlock::new(|_: id| {
+                OUTSIDE_CLICK.store(true, Ordering::Relaxed);
+            })
+            .copy();
+            let local = ConcreteBlock::new(|event: id| {
+                let clicked: id = msg_send![event, window];
+                if clicked != hud_window() {
+                    OUTSIDE_CLICK.store(true, Ordering::Relaxed);
+                }
+                event
+            })
+            .copy();
+            Self {
+                global: msg_send![class!(NSEvent), addGlobalMonitorForEventsMatchingMask: mask handler: &*global],
+                local: msg_send![class!(NSEvent), addLocalMonitorForEventsMatchingMask: mask handler: &*local],
+            }
+        }
+    }
+}
+
+impl Drop for ClickMonitors {
+    fn drop(&mut self) {
+        unsafe {
+            for monitor in [self.global, self.local] {
+                if monitor != nil {
+                    let _: () = msg_send![class!(NSEvent), removeMonitor: monitor];
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn take_outside_click() -> bool {
+    OUTSIDE_CLICK.swap(false, Ordering::Relaxed)
+}
+
 pub fn set_mapped(mapped: bool) {
+    OUTSIDE_CLICK.store(false, Ordering::Relaxed);
+    CLICK_MONITORS.with(|monitors| {
+        let mut monitors = monitors.borrow_mut();
+        if mapped {
+            monitors.get_or_insert_with(ClickMonitors::new);
+        } else {
+            *monitors = None;
+        }
+    });
     unsafe {
         let window = hud_window();
         if window.is_null() {
@@ -30,6 +95,9 @@ pub fn anchor(width: f32, height: f32) {
         if window.is_null() || window.isVisible() == NO {
             return;
         }
+        CLICK_MONITORS.with(|monitors| {
+            monitors.borrow_mut().get_or_insert_with(ClickMonitors::new);
+        });
         let view = metal_view(window);
         // GPUI creates a titled window even without a titlebar, with a
         // faint background to support AppKit's shadow. That native frame
