@@ -53,7 +53,9 @@ impl Whisp {
                     self.failed_audio = None;
                     #[cfg(any(target_os = "macos", target_os = "windows"))]
                     if self.dictation_target.is_none() {
-                        dictation::request_access();
+                        // Typing is optional. Never request Accessibility access
+                        // while starting a recording; it interrupts the user and
+                        // repeats whenever macOS reports this app as untrusted.
                         self.dictation_target = dictation::Target::focused();
                     }
                     self.levels.clear();
@@ -124,6 +126,7 @@ impl Whisp {
             return;
         }
         self.transcription_id = self.transcription_id.wrapping_add(1);
+        self.insertion_task = None;
         let transcription_id = self.transcription_id;
         let provider = local_override
             .is_none()
@@ -164,6 +167,15 @@ impl Whisp {
                 })
                 .await;
             this.update(cx, |view, cx| {
+                if provider.is_none() {
+                    let timer = cx.background_executor().timer(stt::IDLE_TIMEOUT);
+                    view.model_idle_task = Some(cx.background_executor().spawn(async move {
+                        // One cancellable timer per HUD; renewed after each local inference.
+                        // Timer waiting never occupies a worker thread.
+                        timer.await;
+                        stt::unload_idle();
+                    }));
+                }
                 if view.transcription_id != transcription_id {
                     return;
                 }
@@ -224,18 +236,41 @@ impl Whisp {
         copy: bool,
         cx: &mut Context<Self>,
     ) {
-        let insert_error = match type_into(target, &text) {
-            Typing::Failed(err) => Some(err),
-            Typing::Inserted | Typing::NoTarget => None,
-        };
-        if copy {
-            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-            self.copied = true;
-        } else {
-            self.copied = false;
-        }
-        self.show_result(text, ResultKind::Dictation);
-        self.error = insert_error;
+        self.finish_insertion(text, ResultKind::Dictation, target, copy, None, cx);
+    }
+
+    fn finish_insertion(
+        &mut self,
+        text: String,
+        kind: ResultKind,
+        target: TypingTarget,
+        copy: bool,
+        warning: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let generation = self.transcription_id;
+        self.phase = Phase::Transcribing;
+        let executor = cx.background_executor().clone();
+        self.insertion_task = Some(cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let typing = type_into(target, &text, &executor).await;
+            this.update(cx, |view, cx| {
+                if view.transcription_id != generation {
+                    return;
+                }
+                let copied = copy || !matches!(typing, Typing::Inserted);
+                if copied {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                }
+                view.copied = copied;
+                view.show_result(text, kind);
+                view.error = match typing {
+                    Typing::Failed(err) => Some(err),
+                    _ => warning,
+                };
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     pub(super) fn show_result(&mut self, text: String, kind: ResultKind) {
@@ -293,13 +328,8 @@ impl Whisp {
                         translated,
                         warning,
                     }) => {
-                        view.finish_dictation(text, target, copy, cx);
-                        if let Some(language) = translated {
-                            view.result_kind = ResultKind::Translated(language);
-                        }
-                        if warning.is_some() {
-                            view.error = warning;
-                        }
+                        let kind = translated.map_or(ResultKind::Dictation, ResultKind::Translated);
+                        view.finish_insertion(text, kind, target, copy, warning, cx);
                     }
                     Ok(Outcome::Opened(message)) => {
                         view.copied = false;
@@ -313,18 +343,14 @@ impl Whisp {
                         view.show_result(text, ResultKind::Answer(provider));
                     }
                     Ok(Outcome::Typed { text, provider }) => {
-                        let typing = type_into(target, &text);
-                        // Text the user asked for must land somewhere: when
-                        // it could not be typed, it waits on the clipboard.
-                        let copied = copy || !matches!(typing, Typing::Inserted);
-                        if copied {
-                            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-                        }
-                        view.copied = copied;
-                        view.show_result(text, ResultKind::Typed(provider));
-                        if let Typing::Failed(err) = typing {
-                            view.error = Some(err);
-                        }
+                        view.finish_insertion(
+                            text,
+                            ResultKind::Typed(provider),
+                            target,
+                            copy,
+                            None,
+                            cx,
+                        );
                     }
                     Err(err) => {
                         view.phase = Phase::Idle;

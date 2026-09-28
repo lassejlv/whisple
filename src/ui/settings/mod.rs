@@ -93,6 +93,9 @@ impl Page {
 }
 
 pub(crate) struct SettingsWindow {
+    wake: std::sync::Arc<event_listener::Event>,
+    _poll_task: gpui_kit::Task<()>,
+    visible: bool,
     focus_handle: FocusHandle,
     hud: Entity<Whisp>,
     page: Page,
@@ -240,7 +243,13 @@ impl SettingsWindow {
         initial_page: Page,
         cx: &mut Context<Self>,
     ) -> Self {
+        let wake = std::sync::Arc::new(event_listener::Event::new());
         cx.observe(&hud, |_, _, cx| cx.notify()).detach();
+        cx.observe_window_visibility(window, |view, visibility, _, _| {
+            view.visible = visibility.is_visible();
+            view.wake.notify(usize::MAX);
+        })
+        .detach();
         let (input_device, language, output_language) = {
             let hud = hud.read(cx);
             (
@@ -344,23 +353,20 @@ impl SettingsWindow {
         cx.subscribe(&license_input, |_, _, _: &InputEvent, cx| cx.notify())
             .detach();
         let handle = window.window_handle();
-        let mut interval = Duration::from_millis(100);
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(interval).await;
-            let alive = handle
-                .update(cx, |_, _, cx| {
-                    this.update(cx, |view: &mut Self, cx| {
-                        interval = view.poll(cx);
-                    })
-                    .is_ok()
-                })
-                .unwrap_or(false);
-            if !alive {
+        let task_wake = wake.clone();
+        let poll_task = cx.spawn(async move |this, cx| loop {
+            let listener = task_wake.listen();
+            let Ok(Ok(interval)) = handle.update(cx, |_, _, cx| {
+                this.update(cx, |view: &mut Self, cx| view.poll(cx))
+            }) else {
                 break;
-            }
-        })
-        .detach();
+            };
+            crate::platform::events::wait(listener, interval, cx.background_executor()).await;
+        });
         Self {
+            wake,
+            _poll_task: poll_task,
+            visible: window.is_visible(),
             focus_handle: cx.focus_handle(),
             hud,
             page: initial_page,
@@ -385,9 +391,12 @@ impl SettingsWindow {
         }
     }
 
-    /// Redraws only what moves on its own: the Audio page's level meter at
-    /// 30 fps, and a model download's progress. Returns the next wait.
-    fn poll(&mut self, cx: &mut Context<Self>) -> Duration {
+    /// Only the visible Audio page needs a timer. Download progress arrives
+    /// through the existing HUD observer; other pages sleep until an event.
+    fn poll(&mut self, cx: &mut Context<Self>) -> Option<Duration> {
+        if !self.visible {
+            return None;
+        }
         match self.page {
             Page::Audio => {
                 let raw = self.monitor.as_ref().map_or(0.0, |mic| mic.level());
@@ -395,13 +404,9 @@ impl SettingsWindow {
                 // rather than flicker.
                 self.monitor_level = raw.max(self.monitor_level * 0.82);
                 cx.notify();
-                Duration::from_millis(33)
+                Some(Duration::from_millis(33))
             }
-            Page::Models if self.hud.read(cx).download.is_some() => {
-                cx.notify();
-                Duration::from_millis(100)
-            }
-            _ => Duration::from_millis(100),
+            _ => None,
         }
     }
 
@@ -421,6 +426,7 @@ impl SettingsWindow {
         self.flipped = None;
         self.monitor_level = 0.0;
         self.page = page;
+        self.wake.notify(usize::MAX);
         if page == Page::Audio {
             let (language, output_language) = {
                 let hud = self.hud.read(cx);

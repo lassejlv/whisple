@@ -1,5 +1,7 @@
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
@@ -9,9 +11,60 @@ use crate::transcription::cleanup::{cleanup, no_speech};
 struct CachedModel {
     id: String,
     context: WhisperContext,
+    generation: u64,
+    last_used: Instant,
 }
 
 static CACHE: Mutex<Option<CachedModel>> = Mutex::new(None);
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// Invalidating is immediate and never waits for inference on the UI thread.
+pub(crate) fn invalidate() {
+    GENERATION.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Call on a worker. Do not evict a model loaded after the invalidation.
+pub(crate) fn unload_invalidated() {
+    if let Ok(mut cache) = CACHE.lock() {
+        if cache
+            .as_ref()
+            .is_some_and(|model| model.generation != GENERATION.load(Ordering::SeqCst))
+        {
+            *cache = None;
+        }
+    }
+}
+
+pub(crate) fn unload_idle() {
+    if let Ok(mut cache) = CACHE.lock() {
+        if cache
+            .as_ref()
+            .is_some_and(|model| model.last_used.elapsed() >= IDLE_TIMEOUT)
+        {
+            *cache = None;
+        }
+    }
+}
+
+fn load_context(model_path: &Path) -> Result<WhisperContext, String> {
+    let path = model_path
+        .to_str()
+        .ok_or("The model path is not valid UTF-8")?;
+    let mut params = WhisperContextParameters::default();
+    params.use_gpu(cfg!(target_os = "macos"));
+    match WhisperContext::new_with_params(path, params) {
+        Ok(context) => Ok(context),
+        Err(err) if cfg!(target_os = "macos") => {
+            eprintln!("GPU speech engine unavailable ({err}); retrying on CPU");
+            let mut params = WhisperContextParameters::default();
+            params.use_gpu(false);
+            WhisperContext::new_with_params(path, params)
+                .map_err(|err| format!("Could not load the model: {err}"))
+        }
+        Err(err) => Err(format!("Could not load the model: {err}")),
+    }
+}
 
 pub fn transcribe(
     model_id: &str,
@@ -30,20 +83,20 @@ pub fn transcribe(
     let mut cache = CACHE
         .lock()
         .map_err(|_| "The speech engine is busy.".to_string())?;
-    let needs_load = cache.as_ref().map(|cached| cached.id.as_str()) != Some(model_id);
+    let generation = GENERATION.load(Ordering::SeqCst);
+    let needs_load = cache
+        .as_ref()
+        .is_none_or(|cached| cached.id != model_id || cached.generation != generation);
     if needs_load {
-        let mut params = WhisperContextParameters::default();
-        params.use_gpu(false);
-        let context = WhisperContext::new_with_params(
-            model_path
-                .to_str()
-                .ok_or("The model path is not valid UTF-8")?,
-            params,
-        )
-        .map_err(|err| format!("Could not load the model: {err}"))?;
+        // Free the previous model before allocating its replacement. A failed
+        // load leaves an empty cache and the next attempt can retry normally.
+        *cache = None;
+        let context = load_context(model_path)?;
         *cache = Some(CachedModel {
             id: model_id.to_string(),
             context,
+            generation,
+            last_used: Instant::now(),
         });
     }
 
@@ -69,9 +122,9 @@ pub fn transcribe(
     params.set_no_context(true);
     params.set_suppress_blank(true);
 
-    state
-        .full(params, &pcm)
-        .map_err(|err| format!("Transcription failed: {err}"))?;
+    let outcome = state.full(params, &pcm);
+    cache.as_mut().expect("loaded model").last_used = Instant::now();
+    outcome.map_err(|err| format!("Transcription failed: {err}"))?;
 
     let mut pieces = Vec::new();
     for index in 0..state.full_n_segments() {

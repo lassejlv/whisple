@@ -44,6 +44,7 @@ impl Whisp {
         visible: bool,
         cx: &mut Context<Self>,
     ) -> Self {
+        place::reset();
         let models = load_models();
         let prefs = settings::load();
         let selected = models::load_selected()
@@ -108,6 +109,12 @@ impl Whisp {
             }
         })
         .detach();
+        cx.observe_window_bounds(window, |view, window, cx| {
+            view.refresh_screen(window, cx);
+            // Defer native placement until outside the bounds callback.
+            crate::platform::events::notify();
+        })
+        .detach();
         let mut view = Self {
             focus_handle: cx.focus_handle(),
             hud_window: window.window_handle(),
@@ -141,13 +148,17 @@ impl Whisp {
             #[cfg(feature = "licensing")]
             last_license_check: Instant::now(),
             transcription_id: 0,
+            insertion_task: None,
+            model_idle_task: None,
+            commands_task: None,
+            download_progress_task: None,
             language: prefs.language,
             output_language: prefs.output_language,
             show_hotkey: prefs.show_hotkey,
             record_hotkey: prefs.record_hotkey,
             copy_notes: prefs.copy_notes,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
-            dictation_target: None,
+            dictation_target: visible.then(dictation::Target::focused).flatten(),
             clean_fillers: prefs.clean_fillers,
             voice_commands: prefs.voice_commands,
             screen_context: prefs.screen_context,
@@ -178,7 +189,7 @@ impl Whisp {
             screen_h,
             placed_height: COLLAPSED_HEIGHT,
         };
-        view.listen_for_commands(window.window_handle(), cx);
+        view.commands_task = Some(view.listen_for_commands(window.window_handle(), cx));
         view.refresh_cloud_keys(cx);
         #[cfg(feature = "licensing")]
         view.refresh_license(cx);
@@ -242,10 +253,7 @@ impl Whisp {
             self.reveal = None;
         }
 
-        if moving
-            || self.download.is_some()
-            || matches!(self.phase, Phase::Listening(_) | Phase::Transcribing)
-        {
+        if moving || matches!(self.phase, Phase::Listening(_) | Phase::Transcribing) {
             window.request_animation_frame();
         }
 
@@ -370,25 +378,32 @@ impl Whisp {
         self.reveal = self.desired_reveal();
     }
 
+    fn refresh_screen(&mut self, window: &gpui_kit::Window, cx: &App) {
+        if let Some(display) = window.display(cx) {
+            let bounds = display.bounds();
+            self.screen_x = bounds.origin.x.as_f32();
+            self.screen_y = bounds.origin.y.as_f32();
+            self.screen_w = bounds.size.width.as_f32();
+            self.screen_h = bounds.size.height.as_f32();
+        }
+    }
+
     fn listen_for_commands(
         &self,
         window_handle: gpui_kit::AnyWindowHandle,
         cx: &mut Context<Self>,
-    ) {
-        let screen_x = self.screen_x;
-        let screen_y = self.screen_y;
-        let screen_w = self.screen_w;
-        let screen_h = self.screen_h;
+    ) -> gpui_kit::Task<()> {
         cx.spawn(async move |this: WeakEntity<Self>, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(80))
-                .await;
+            let listener = crate::platform::events::listen();
+            #[allow(unused_mut)]
+            let mut deadline = None;
             let alive = window_handle
                 .update(cx, |_, window, cx| {
                     this.update(cx, |view, cx| {
                         #[cfg(target_os = "macos")]
                         if crate::platform::macos::placement::take_outside_click()
                             && view.bar_visible
+                            && !crate::dev_ui_test()
                         {
                             view.set_visible(false, window, cx);
                         }
@@ -418,7 +433,7 @@ impl Whisp {
                                 tray::Command::Quit => cx.quit(),
                             }
                         }
-                        #[cfg(updates)]
+                        #[cfg(all(updates, feature = "licensing"))]
                         if view.last_update_check.elapsed() >= Duration::from_secs(6 * 60 * 60) {
                             view.check_for_updates(cx);
                         }
@@ -439,17 +454,34 @@ impl Whisp {
                         if view.last_license_check.elapsed() >= license_interval {
                             view.refresh_license(cx);
                         }
+                        #[cfg(feature = "licensing")]
+                        {
+                            view.expire_trial_if_needed(cx);
+                            deadline = Some(
+                                license_interval.saturating_sub(view.last_license_check.elapsed()),
+                            );
+                            if let Some(remaining) = view.license_access.trial_remaining() {
+                                deadline = deadline.map(|wait| wait.min(remaining));
+                            }
+                        }
+                        #[cfg(all(updates, feature = "licensing"))]
+                        {
+                            let remaining = Duration::from_secs(6 * 60 * 60)
+                                .saturating_sub(view.last_update_check.elapsed());
+                            deadline = Some(deadline.map_or(remaining, |wait| wait.min(remaining)));
+                        }
                         if view.bar_visible {
+                            view.refresh_screen(window, cx);
                             // Re-anchor the native size already chosen by tick;
                             // the animated HUD height would undo its resize and
                             // clip an opening panel.
                             place::dock(
                                 WINDOW_WIDTH,
                                 view.placed_height,
-                                screen_x,
-                                screen_y,
-                                screen_w,
-                                screen_h,
+                                view.screen_x,
+                                view.screen_y,
+                                view.screen_w,
+                                view.screen_h,
                                 window.scale_factor(),
                             );
                         }
@@ -460,8 +492,8 @@ impl Whisp {
             if !alive {
                 break;
             }
+            crate::platform::events::wait(listener, deadline, cx.background_executor()).await;
         })
-        .detach();
     }
 
     pub(crate) fn set_visible(
@@ -481,10 +513,9 @@ impl Whisp {
             self.was_window_active = visible && window.is_window_active();
         }
         tray::set_visible(visible, cx);
-        place::set_mapped(visible);
         if visible {
-            // Capture the editor and screen before the HUD takes keyboard
-            // focus.
+            // Capture before ordering the native panel forward. Reopening a
+            // hidden recording must keep the destination captured at its start.
             if !was_visible && !self.visibility_locked() {
                 #[cfg(any(target_os = "macos", target_os = "windows"))]
                 {
@@ -496,10 +527,27 @@ impl Whisp {
                     Snapshot::default()
                 };
             }
-            window.activate_window();
-            cx.activate(true);
+            place::set_mapped(true);
+            self.refresh_screen(window, cx);
+            place::dock(
+                WINDOW_WIDTH,
+                self.placed_height,
+                self.screen_x,
+                self.screen_y,
+                self.screen_w,
+                self.screen_h,
+                window.scale_factor(),
+            );
+            // macOS uses a non-activating panel so the user's editor remains
+            // active. Activating the app here would steal its input focus.
+            #[cfg(not(target_os = "macos"))]
+            {
+                window.activate_window();
+                cx.activate(true);
+            }
             window.focus(&self.focus_handle, cx);
         } else {
+            place::set_mapped(false);
             self.stop_recording();
             self.failed_audio = None;
         }
@@ -589,11 +637,15 @@ enum Typing {
     Failed(String),
 }
 
-fn type_into(target: TypingTarget, text: &str) -> Typing {
+async fn type_into(
+    target: TypingTarget,
+    text: &str,
+    executor: &gpui_kit::BackgroundExecutor,
+) -> Typing {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         match target {
-            Some(target) => match target.insert(text) {
+            Some(target) => match target.insert(text, executor).await {
                 Ok(()) => Typing::Inserted,
                 Err(err) => Typing::Failed(err),
             },
@@ -603,7 +655,7 @@ fn type_into(target: TypingTarget, text: &str) -> Typing {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let () = target;
-        let _ = text;
+        let _ = (text, executor);
         Typing::NoTarget
     }
 }

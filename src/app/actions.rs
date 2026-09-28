@@ -1,6 +1,14 @@
 use super::*;
 
 impl Whisp {
+    fn release_local_model(&mut self, cx: &mut Context<Self>) {
+        self.model_idle_task = None;
+        stt::invalidate();
+        cx.background_executor()
+            .spawn(async { stt::unload_invalidated() })
+            .detach();
+    }
+
     pub(crate) fn choose_model(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(spec) = models::spec(id) else {
             return;
@@ -9,6 +17,9 @@ impl Whisp {
         self.error = None;
         self.recovery = None;
         if models::is_downloaded(spec) {
+            if self.selected != spec.id {
+                self.release_local_model(cx);
+            }
             self.selected = spec.id.to_string();
             models::save_selected(spec.id);
             self.refresh_models();
@@ -26,6 +37,7 @@ impl Whisp {
             return;
         }
         self.selected = provider.id().to_string();
+        self.release_local_model(cx);
         self.pending_uninstall = None;
         self.menu_open = false;
         // A saved key after a rejected one: offer the kept recording again.
@@ -52,6 +64,7 @@ impl Whisp {
     }
 
     pub(crate) fn cancel_download(&mut self, cx: &mut Context<Self>) {
+        self.download_progress_task = None;
         if let Some(download) = self.download.take() {
             download.cancel.store(true, Ordering::Relaxed);
             cx.notify();
@@ -87,6 +100,7 @@ impl Whisp {
         }
         match models::uninstall(spec) {
             Ok(()) => {
+                self.release_local_model(cx);
                 self.refresh_models();
                 if self.selected == id {
                     let replacement = self
@@ -144,6 +158,7 @@ impl Whisp {
         }
         self.stop_recording();
         self.cancel_download(cx);
+        self.release_local_model(cx);
         self.transcription_id = self.transcription_id.wrapping_add(1);
         let hud = self.hud_window;
         let settings = self.settings_window.take();
@@ -257,8 +272,10 @@ impl Whisp {
 
     #[cfg(feature = "licensing")]
     pub(crate) fn set_license_access(&mut self, access: Access, cx: &mut Context<Self>) {
+        crate::platform::events::notify();
         if !access.allowed() && matches!(self.phase, Phase::Listening(_) | Phase::Transcribing) {
             self.transcription_id = self.transcription_id.wrapping_add(1);
+            self.insertion_task = None;
             self.phase = Phase::Idle;
             self.failed_audio = None;
             self.transcribing_provider = None;
@@ -639,6 +656,40 @@ impl Whisp {
         let received = Arc::new(AtomicU64::new(0));
         let cancel = Arc::new(AtomicBool::new(false));
         let id = spec.id.to_string();
+        let progress = Arc::clone(&received);
+        let progress_cancel = Arc::clone(&cancel);
+        self.download_progress_task = Some(cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let mut previous = 0;
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                if progress_cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                let current = progress.load(Ordering::Relaxed);
+                if this
+                    .update(cx, |view, cx| {
+                        if !view
+                            .download
+                            .as_ref()
+                            .is_some_and(|download| Arc::ptr_eq(&download.received, &progress))
+                        {
+                            return false;
+                        }
+                        if current != previous {
+                            previous = current;
+                            cx.notify();
+                        }
+                        true
+                    })
+                    .ok()
+                    != Some(true)
+                {
+                    break;
+                }
+            }
+        }));
         self.download = Some(Download {
             id: id.clone(),
             received: Arc::clone(&received),
@@ -656,10 +707,14 @@ impl Whisp {
                 let current = view.download.as_ref().map(|download| download.id.clone());
                 if current.as_deref() == Some(spec.id) {
                     view.download = None;
+                    view.download_progress_task = None;
                 }
                 match outcome {
                     Ok(_) => {
                         view.refresh_models();
+                        if view.selected != spec.id {
+                            view.release_local_model(cx);
+                        }
                         view.selected = spec.id.to_string();
                         models::save_selected(spec.id);
                         view.error = None;

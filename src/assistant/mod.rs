@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use base64::Engine as _;
-use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -154,19 +153,16 @@ fn complete_with(
     key: &str,
     body: &Value,
 ) -> Result<String, Error> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(60))
-        .user_agent("Whisple/0.1")
-        .build()
-        .map_err(|err| {
-            Error::new(
-                ErrorKind::Other,
-                format!("Could not start the request: {err}"),
-            )
-        })?;
+    let client = crate::http::client().map_err(|err| {
+        Error::new(
+            ErrorKind::Other,
+            format!("Could not start the request: {err}"),
+        )
+    })?;
     let send = |body: &Value| {
         client
             .post(endpoint)
+            .timeout(Duration::from_secs(60))
             .bearer_auth(key)
             .json(body)
             .send()

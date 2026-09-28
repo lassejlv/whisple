@@ -3,6 +3,7 @@
 mod app;
 mod assistant;
 mod audio;
+mod http;
 mod i18n;
 #[cfg(feature = "licensing")]
 mod licensing;
@@ -140,7 +141,7 @@ pub(crate) fn open_hud(cx: &mut App, visible: bool) {
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: None,
-            focus: visible,
+            focus: visible && (!cfg!(target_os = "macos") || dev_ui_test()),
             show: visible,
             kind: if dev_ui_test() {
                 WindowKind::Normal
@@ -177,7 +178,7 @@ pub(crate) fn open_hud(cx: &mut App, visible: bool) {
         },
     )
     .expect("open the voice window");
-    if visible {
+    if visible && (!cfg!(target_os = "macos") || dev_ui_test()) {
         cx.activate(true);
     }
 }

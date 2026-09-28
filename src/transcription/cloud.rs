@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use base64::Engine;
-use reqwest::blocking::{multipart, Client};
+use reqwest::blocking::multipart;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -343,23 +343,24 @@ fn transcribe_with_key(
     language: Option<&str>,
     clean: bool,
 ) -> Result<String, TranscriptionError> {
-    let wav = encode_wav(samples, rate).map_err(|message| {
-        if message == "That clip was too short to transcribe." {
-            TranscriptionError::NoSpeech(message)
-        } else {
-            TranscriptionError::Other(message)
-        }
-    })?;
-    let language = language.filter(|language| *language != "auto");
-    let client = Client::builder()
-        .timeout(Duration::from_secs(90))
-        .user_agent("Whisple/0.1")
-        .build()
-        .map_err(|err| {
-            TranscriptionError::Other(format!("Could not start cloud transcription: {err}"))
+    let wav = encode_wav(samples, rate)
+        .map(bytes::Bytes::from)
+        .map_err(|message| {
+            if message == "That clip was too short to transcribe." {
+                TranscriptionError::NoSpeech(message)
+            } else {
+                TranscriptionError::Other(message)
+            }
         })?;
+    let language = language.filter(|language| *language != "auto");
+    let client = crate::http::client().map_err(|err| {
+        TranscriptionError::Other(format!("Could not start cloud transcription: {err}"))
+    })?;
     let send = |model: &str| {
-        let request = client.post(endpoint).bearer_auth(key);
+        let request = client
+            .post(endpoint)
+            .timeout(Duration::from_secs(90))
+            .bearer_auth(key);
         if provider == Provider::Vercel {
             request
                 .header("ai-gateway-protocol-version", "0.0.1")
@@ -369,9 +370,10 @@ fn transcribe_with_key(
                 .json(&gateway_body(gateway_model(), &wav, language))
                 .send()
         } else {
-            let file = multipart::Part::bytes(wav.clone())
-                .file_name("recording.wav")
-                .mime_str("audio/wav")?;
+            let file =
+                multipart::Part::reader_with_length(Cursor::new(wav.clone()), wav.len() as u64)
+                    .file_name("recording.wav")
+                    .mime_str("audio/wav")?;
             let mut form = multipart::Form::new().text("model", model.to_string());
             if let Some(language) = language {
                 form = form.text(language_field(model), language.to_string());
@@ -482,7 +484,7 @@ fn encode_wav(samples: &[f32], rate: u32) -> Result<Vec<u8>, String> {
     {
         let mut writer = hound::WavWriter::new(&mut output, spec)
             .map_err(|err| format!("Could not prepare the recording: {err}"))?;
-        for sample in pcm {
+        for &sample in pcm.iter() {
             let value = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
             writer
                 .write_sample(value)

@@ -1,6 +1,9 @@
 //! The status icon behind `crate::platform::tray`: the macOS menu bar item and
 //! the Windows notification area icon share one menu.
 
+use std::collections::VecDeque;
+use std::sync::Mutex;
+
 use crate::platform::tray::Command;
 #[cfg(updates)]
 use crate::platform::tray::UpdateStatus;
@@ -59,7 +62,24 @@ impl UpdateLabel {
 
 impl Global for MenuBar {}
 
+static COMMANDS: Mutex<VecDeque<Command>> = Mutex::new(VecDeque::new());
+
 pub fn install(cx: &mut App) -> Result<(), String> {
+    MenuEvent::set_event_handler(Some(|event: MenuEvent| {
+        let command = match event.id.0.as_str() {
+            "show" => Command::Show,
+            "hide" => Command::Hide,
+            "settings" => Command::Settings,
+            "update" => Command::Update,
+            "quit" => Command::Quit,
+            _ => return,
+        };
+        COMMANDS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push_back(command);
+        crate::platform::events::notify();
+    }));
     let menu = Menu::new();
     let show = MenuItem::with_id("show", t("Show Whisple"), true, None);
     let hide = MenuItem::with_id("hide", t("Hide Whisple"), false, None);
@@ -105,17 +125,10 @@ pub fn install(cx: &mut App) -> Result<(), String> {
 }
 
 pub fn take_command() -> Option<Command> {
-    while let Ok(event) = MenuEvent::receiver().try_recv() {
-        match event.id.0.as_str() {
-            "show" => return Some(Command::Show),
-            "hide" => return Some(Command::Hide),
-            "settings" => return Some(Command::Settings),
-            "update" => return Some(Command::Update),
-            "quit" => return Some(Command::Quit),
-            _ => {}
-        }
-    }
-    None
+    COMMANDS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .pop_front()
 }
 
 pub fn set_visible(visible: bool, cx: &App) {

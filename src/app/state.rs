@@ -133,6 +133,10 @@ pub(crate) struct Whisp {
     #[cfg(feature = "licensing")]
     pub(super) last_license_check: Instant,
     pub(super) transcription_id: u64,
+    pub(super) insertion_task: Option<gpui_kit::Task<()>>,
+    pub(super) commands_task: Option<gpui_kit::Task<()>>,
+    pub(super) download_progress_task: Option<gpui_kit::Task<()>>,
+    pub(super) model_idle_task: Option<gpui_kit::Task<()>>,
     pub language: String,
     /// The language notes come out in. Empty means the spoken language.
     pub output_language: String,

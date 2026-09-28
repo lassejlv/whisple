@@ -305,7 +305,6 @@ mod win {
 mod macos {
     use std::ffi::CStr;
     use std::os::raw::c_char;
-    use std::process::Command;
 
     use cocoa::base::{id, nil};
     use objc::{class, msg_send, sel, sel_impl};
@@ -357,26 +356,7 @@ mod macos {
     }
 
     pub fn capture_png() -> Result<Vec<u8>, String> {
-        let dir = tempfile::tempdir()
-            .map_err(|err| format!("Could not prepare the screenshot: {err}"))?;
-        let path = dir.path().join("screen.png");
-        // -x: no sound, -m: the main display only.
-        let status = Command::new("/usr/sbin/screencapture")
-            .args(["-x", "-m", "-t", "png"])
-            .arg(&path)
-            .status()
-            .map_err(|err| format!("Could not capture the screen: {err}"))?;
-        if !status.success() || !path.exists() {
-            return Err(
-                "Could not capture the screen. Allow Whisple under Privacy & Security › Screen Recording."
-                    .into(),
-            );
-        }
-        let _ = Command::new("/usr/bin/sips")
-            .args(["-Z", &super::MAX_WIDTH.to_string()])
-            .arg(&path)
-            .output();
-        std::fs::read(&path).map_err(|err| format!("Could not read the screenshot: {err}"))
+        crate::platform::macos::screen_capture::capture_png()
     }
 }
 

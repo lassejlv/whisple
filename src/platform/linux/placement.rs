@@ -10,7 +10,33 @@ use x11rb::protocol::xproto::{
 use x11rb::rust_connection::RustConnection;
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static SESSION: std::sync::Mutex<Option<Session>> = std::sync::Mutex::new(None);
+
+type Geometry = (i32, i32, u16, u16, u16);
+struct Session {
+    conn: RustConnection,
+    client: Window,
+    top: Window,
+    geometry: Option<Geometry>,
+}
+
+pub(crate) fn reset() {
+    if let Ok(mut session) = SESSION.lock() {
+        *session = None;
+    }
+}
+
+fn with_session<T>(operation: impl FnOnce(&mut Session) -> Result<T, String>) -> Result<T, String> {
+    let mut cache = SESSION.lock().map_err(|err| err.to_string())?;
+    if cache.is_none() {
+        *cache = Some(locate()?);
+    }
+    let result = operation(cache.as_mut().expect("located window"));
+    if result.is_err() {
+        *cache = None;
+    }
+    result
+}
 
 pub fn dock(
     width: f32,
@@ -21,9 +47,6 @@ pub fn dock(
     screen_h: f32,
     scale: f32,
 ) {
-    let Ok(_guard) = LOCK.lock() else {
-        return;
-    };
     // GPUI lays out in logical pixels, but X11 geometry and the shape mask
     // are in device pixels.
     let (x, y, width, height, radius) = device_geometry(
@@ -68,9 +91,6 @@ fn device_geometry(
 }
 
 pub fn set_mapped(mapped: bool) {
-    let Ok(_guard) = LOCK.lock() else {
-        return;
-    };
     if let Err(err) = map_client(mapped) {
         eprintln!("could not change the voice window: {err}");
     }
@@ -78,47 +98,83 @@ pub fn set_mapped(mapped: bool) {
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn map_client(mapped: bool) -> Result<(), String> {
-    let (conn, _client, top) = locate()?;
-    if mapped {
-        conn.map_window(top).map_err(|err| err.to_string())?;
-    } else {
-        conn.unmap_window(top).map_err(|err| err.to_string())?;
-    }
-    conn.flush().map_err(|err| err.to_string())?;
-    Ok(())
+    with_session(|session| {
+        if mapped {
+            session
+                .conn
+                .map_window(session.top)
+                .map_err(|err| err.to_string())?
+                .check()
+                .map_err(|err| err.to_string())?;
+        } else {
+            session
+                .conn
+                .unmap_window(session.top)
+                .map_err(|err| err.to_string())?
+                .check()
+                .map_err(|err| err.to_string())?;
+        }
+        session.conn.flush().map_err(|err| err.to_string())
+    })
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn place(x: i32, y: i32, width: u16, height: u16, radius: u16) -> Result<(), String> {
-    let (conn, client, top) = locate()?;
-
-    conn.configure_window(
-        top,
-        &ConfigureWindowAux::new()
-            .x(x)
-            .y(y)
-            .width(width as u32)
-            .height(height as u32),
-    )
-    .map_err(|err| err.to_string())?;
-
-    let rectangles = rounded_rects(width, height, radius.min(width / 2).min(height / 2));
-    conn.shape_rectangles(
-        SO::SET,
-        SK::BOUNDING,
-        x11rb::protocol::xproto::ClipOrdering::UNSORTED,
-        client,
-        0,
-        0,
-        &rectangles,
-    )
-    .map_err(|err| err.to_string())?;
-    conn.flush().map_err(|err| err.to_string())?;
-    Ok(())
+    with_session(|session| {
+        let wanted = (x, y, width, height, radius);
+        let conn = &session.conn;
+        if session.geometry == Some(wanted) {
+            // A bounds/work-area event can mean another client moved the window.
+            // Validate it only on events, using the already-open connection.
+            let actual = conn
+                .get_geometry(session.top)
+                .map_err(|err| err.to_string())?
+                .reply()
+                .map_err(|err| err.to_string())?;
+            if (
+                i32::from(actual.x),
+                i32::from(actual.y),
+                actual.width,
+                actual.height,
+            ) == (x, y, width, height)
+            {
+                return Ok(());
+            }
+        }
+        conn.configure_window(
+            session.top,
+            &ConfigureWindowAux::new()
+                .x(x)
+                .y(y)
+                .width(width as u32)
+                .height(height as u32),
+        )
+        .map_err(|err| err.to_string())?
+        .check()
+        .map_err(|err| err.to_string())?;
+        if session.geometry.map(|(_, _, w, h, r)| (w, h, r)) != Some((width, height, radius)) {
+            let rectangles = rounded_rects(width, height, radius.min(width / 2).min(height / 2));
+            conn.shape_rectangles(
+                SO::SET,
+                SK::BOUNDING,
+                x11rb::protocol::xproto::ClipOrdering::UNSORTED,
+                session.client,
+                0,
+                0,
+                &rectangles,
+            )
+            .map_err(|err| err.to_string())?
+            .check()
+            .map_err(|err| err.to_string())?;
+        }
+        conn.flush().map_err(|err| err.to_string())?;
+        session.geometry = Some(wanted);
+        Ok(())
+    })
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-fn locate() -> Result<(RustConnection, Window, Window), String> {
+fn locate() -> Result<Session, String> {
     let (conn, screen) = x11rb::connect(None).map_err(|err| err.to_string())?;
     let root = conn.setup().roots[screen].root;
     let pid_atom = conn
@@ -130,7 +186,12 @@ fn locate() -> Result<(RustConnection, Window, Window), String> {
     let client =
         find_pid(&conn, root, pid_atom, std::process::id(), 0).ok_or("voice window not found")?;
     let top = top_level(&conn, client, root).unwrap_or(client);
-    Ok((conn, client, top))
+    Ok(Session {
+        conn,
+        client,
+        top,
+        geometry: None,
+    })
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]

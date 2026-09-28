@@ -1,4 +1,6 @@
 use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::sync::{Mutex, Once};
 
 use global_hotkey::{hotkey::HotKey, GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
@@ -19,8 +21,24 @@ thread_local! {
     static REGISTRATION: RefCell<Option<Registration>> = const { RefCell::new(None) };
 }
 
+static EVENTS: Mutex<VecDeque<GlobalHotKeyEvent>> = Mutex::new(VecDeque::new());
+static HANDLER: Once = Once::new();
+
+fn clear_events() {
+    EVENTS.lock().unwrap_or_else(|err| err.into_inner()).clear();
+}
+
 pub fn install(slot: Shortcut, chord: Chord) -> Result<(), String> {
     let shortcut = native_shortcut(&chord)?;
+    HANDLER.call_once(|| {
+        GlobalHotKeyEvent::set_event_handler(Some(|event| {
+            EVENTS
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .push_back(event);
+            crate::platform::events::notify();
+        }))
+    });
     REGISTRATION.with_borrow_mut(|state| {
         if state.is_none() {
             *state = Some(Registration {
@@ -57,7 +75,7 @@ pub fn install(slot: Shortcut, chord: Chord) -> Result<(), String> {
         state.shortcuts[index] = Some(shortcut);
         state.registered[index] = !state.paused;
         state.held[index] = false;
-        while GlobalHotKeyEvent::receiver().try_recv().is_ok() {}
+        clear_events();
         Ok(())
     })
 }
@@ -84,7 +102,7 @@ pub fn set_paused(paused: bool) {
         }
         state.paused = paused;
         state.held = [false, false];
-        while GlobalHotKeyEvent::receiver().try_recv().is_ok() {}
+        clear_events();
     });
 }
 
@@ -92,7 +110,11 @@ pub fn take_presses() -> Presses {
     REGISTRATION.with_borrow_mut(|state| {
         let mut presses = Presses::default();
         let Some(state) = state else { return presses };
-        while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+        while let Some(event) = EVENTS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .pop_front()
+        {
             let Some(index) = (0..state.shortcuts.len()).find(|&index| {
                 state.registered[index]
                     && state.shortcuts[index].map(|shortcut| shortcut.id()) == Some(event.id)

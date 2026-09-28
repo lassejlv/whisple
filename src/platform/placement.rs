@@ -27,3 +27,9 @@ pub fn set_mapped(mapped: bool) {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     super::linux::placement::set_mapped(mapped);
 }
+
+/// A replacement HUD has a new native window identifier.
+pub(crate) fn reset() {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    super::linux::placement::reset();
+}

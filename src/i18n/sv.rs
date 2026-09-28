@@ -1,4 +1,10 @@
 pub const STRINGS: &[(&str, &str)] = &[
+    ("Could not preserve the clipboard before typing.", "Kunde inte bevara urklipp före infogning."),
+    ("Could not prepare text for typing.", "Kunde inte förbereda texten för infogning."),
+    ("Could not prepare the clipboard for typing.", "Kunde inte förbereda urklipp för infogning."),
+    ("Type into other apps", "Skriv i andra appar"),
+    ("Allow Accessibility access to insert dictation. Recording works without it.", "Tillåt åtkomst till Hjälpmedel för att infoga diktering. Inspelning fungerar utan."),
+    ("Allow access", "Tillåt åtkomst"),
     ("Connect to the internet to continue your trial.", "Anslut till internet för att fortsätta provperioden."),
     ("Connect to the internet within {} to continue your 3-day free trial.", "Anslut till internet inom {} för att fortsätta din kostnadsfria provperiod på 3 dagar."),
     ("A key is saved on this device. Paste a new one to replace it. Audio goes to {} only when selected.", "En nyckel är sparad på den här enheten. Klistra in en ny för att ersätta den. Ljud skickas bara till {} när modellen är vald."),

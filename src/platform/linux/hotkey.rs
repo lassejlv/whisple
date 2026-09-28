@@ -1,3 +1,6 @@
+use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, Once};
 use std::thread;
@@ -18,6 +21,15 @@ static GRAB: Mutex<Grab> = Mutex::new(Grab {
 });
 static PRESSED: AtomicU8 = AtomicU8::new(0);
 static STARTED: Once = Once::new();
+static WAKE: Mutex<Option<UnixStream>> = Mutex::new(None);
+
+fn wake_registration() {
+    if let Ok(mut wake) = WAKE.lock() {
+        if let Some(stream) = wake.as_mut() {
+            let _ = stream.write(&[1]);
+        }
+    }
+}
 
 const SHIFT: u16 = 1;
 const LOCK: u16 = 2;
@@ -37,6 +49,7 @@ pub fn install(slot: Shortcut, chord: Chord) -> Result<(), String> {
         }
         grab.chords[index] = Some(chord);
     }
+    wake_registration();
     STARTED.call_once(|| {
         thread::Builder::new()
             .name("whisp-hotkey".into())
@@ -50,6 +63,7 @@ pub fn set_paused(paused: bool) {
     if let Ok(mut grab) = GRAB.lock() {
         grab.paused = paused;
     }
+    wake_registration();
 }
 
 pub fn take_presses() -> Presses {
@@ -61,17 +75,34 @@ pub fn take_presses() -> Presses {
 }
 
 fn serve() {
+    let Ok((sender, mut receiver)) = UnixStream::pair() else {
+        return;
+    };
+    if sender.set_nonblocking(true).is_err() || receiver.set_nonblocking(true).is_err() {
+        return;
+    }
+    *WAKE.lock().unwrap_or_else(|err| err.into_inner()) = Some(sender);
     loop {
-        if serve_once().is_err() {
+        if serve_once(&mut receiver).is_err() {
             thread::sleep(Duration::from_millis(500));
         }
     }
 }
 
-fn serve_once() -> Result<(), ()> {
+fn serve_once(wake: &mut UnixStream) -> Result<(), ()> {
     let (conn, screen_index) = x11rb::connect(None).map_err(|_| ())?;
     let screen = &conn.setup().roots[screen_index];
     let root = screen.root;
+    conn.change_window_attributes(
+        root,
+        &x11rb::protocol::xproto::ChangeWindowAttributesAux::new().event_mask(
+            x11rb::protocol::xproto::EventMask::PROPERTY_CHANGE
+                | x11rb::protocol::xproto::EventMask::STRUCTURE_NOTIFY,
+        ),
+    )
+    .map_err(|_| ())?
+    .check()
+    .map_err(|_| ())?;
     let mut held = [false; 2];
     let mut grabbed: Grabbed = [None, None];
 
@@ -101,11 +132,50 @@ fn serve_once() -> Result<(), ()> {
         }
         match conn.poll_for_event() {
             Ok(Some(event)) => {
+                if matches!(
+                    event,
+                    x11rb::protocol::Event::PropertyNotify(_)
+                        | x11rb::protocol::Event::ConfigureNotify(_)
+                ) {
+                    crate::platform::events::notify();
+                }
                 if let Some(index) = accept_key(&conn, event, &grabbed, &mut held, !paused)? {
-                    PRESSED.fetch_or(1 << index, Ordering::Relaxed);
+                    PRESSED.fetch_xor(1 << index, Ordering::Relaxed);
+                    crate::platform::events::notify();
                 }
             }
-            Ok(None) => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                conn.flush().map_err(|_| ())?;
+                let mut fds = [
+                    libc::pollfd {
+                        fd: conn.stream().as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                    libc::pollfd {
+                        fd: wake.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                ];
+                let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+                if ready < 0 {
+                    if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(());
+                }
+                if fds
+                    .iter()
+                    .any(|fd| fd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0)
+                {
+                    return Err(());
+                }
+                if fds[1].revents & libc::POLLIN != 0 {
+                    let mut bytes = [0; 64];
+                    while wake.read(&mut bytes).is_ok_and(|count| count > 0) {}
+                }
+            }
             Err(_) => return Err(()),
         }
     }

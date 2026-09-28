@@ -3,7 +3,6 @@
 
 use std::ffi::c_void;
 use std::ptr;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use cocoa::base::{id, nil, BOOL, YES};
@@ -23,7 +22,8 @@ extern "C" {
     fn AXUIElementSetAttributeValue(element: Element, attribute: Ref, value: Ref) -> i32;
     fn AXUIElementGetPid(element: Element, pid: *mut i32) -> i32;
     fn CGEventCreateKeyboardEvent(source: Ref, keycode: u16, down: u8) -> Ref;
-    fn CGEventKeyboardSetUnicodeString(event: Ref, length: usize, text: *const u16);
+    fn CGEventSetFlags(event: Ref, flags: u64);
+    fn CGPreflightPostEventAccess() -> bool;
     fn CGEventPost(tap: u32, event: Ref);
 }
 
@@ -36,7 +36,6 @@ extern "C" {
         encoding: u32,
         external: u8,
     ) -> Ref;
-    fn CFStringCompare(a: Ref, b: Ref, options: u32) -> isize;
     fn CFEqual(a: Ref, b: Ref) -> u8;
     fn CFRelease(value: Ref);
     fn CFGetTypeID(value: Ref) -> usize;
@@ -48,7 +47,7 @@ extern "C" {
 pub(crate) struct Owned(pub(crate) Ref);
 
 impl Owned {
-    fn string(value: &str) -> Option<Self> {
+    pub(super) fn string(value: &str) -> Option<Self> {
         let reference = unsafe {
             CFStringCreateWithBytes(
                 ptr::null(),
@@ -64,54 +63,35 @@ impl Owned {
 
 impl Drop for Owned {
     fn drop(&mut self) {
-        unsafe { CFRelease(self.0) };
+        if !self.0.is_null() {
+            unsafe { CFRelease(self.0) };
+        }
     }
 }
 
 pub(crate) struct Target {
-    element: Owned,
+    element: Option<Owned>,
     pid: i32,
 }
 
 impl Target {
     pub(crate) fn focused() -> Option<Self> {
-        if unsafe { AXIsProcessTrusted() } == 0 {
-            return None;
-        }
-        let system = Owned(unsafe { AXUIElementCreateSystemWide() });
-        if system.0.is_null() {
-            return None;
-        }
-        let element = attribute(system.0, "AXFocusedUIElement")?;
-        let mut pid = 0;
-        if unsafe { AXUIElementGetPid(element.0, &mut pid) } != 0
-            || pid == std::process::id() as i32
-        {
-            return None;
-        }
-        let role = attribute(element.0, "AXRole")?;
-        if !["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"]
-            .iter()
-            .any(|name| {
-                Owned::string(name)
-                    .is_some_and(|name| unsafe { CFStringCompare(role.0, name.0, 0) } == 0)
-            })
-        {
-            return None;
-        }
+        let pid = frontmost_pid();
+        let focused = is_trusted().then(focused_element).flatten();
+        let (pid, element) = capture_destination(pid, std::process::id() as i32, focused)?;
         Some(Self { element, pid })
     }
 
-    pub(crate) fn insert(self, text: &str) -> Result<(), String> {
+    pub(crate) async fn insert(
+        self,
+        text: &str,
+        executor: &gpui_kit::BackgroundExecutor,
+    ) -> Result<(), String> {
         if text.is_empty() {
             return Ok(());
         }
-        if unsafe { AXIsProcessTrusted() } == 0 {
+        if !unsafe { CGPreflightPostEventAccess() } {
             return Err("Enable Accessibility access to type into other apps.".into());
-        }
-        let mut pid = 0;
-        if unsafe { AXUIElementGetPid(self.element.0, &mut pid) } != 0 || pid != self.pid {
-            return Err("The original text field is no longer available.".into());
         }
         unsafe {
             let app: id = msg_send![class!(NSRunningApplication), runningApplicationWithProcessIdentifier: self.pid];
@@ -131,59 +111,85 @@ impl Target {
             if Instant::now() >= deadline {
                 return Err("Could not focus the original app.".into());
             }
-            thread::sleep(Duration::from_millis(10));
+            executor.timer(Duration::from_millis(10)).await;
         }
-        let focused = Owned::string("AXFocused").expect("static accessibility name");
-        while !self.is_focused() {
-            unsafe { AXUIElementSetAttributeValue(self.element.0, focused.0, kCFBooleanTrue) };
-            if Instant::now() >= deadline {
-                return Err("Could not focus the original text field.".into());
+        if let Some(element) = &self.element {
+            let focused = Owned::string("AXFocused").expect("static accessibility name");
+            while !self.is_focused() {
+                let status =
+                    unsafe { AXUIElementSetAttributeValue(element.0, focused.0, kCFBooleanTrue) };
+                // Web composers may replace their AX node while recording.
+                // If the retained node is gone, use this app's current input.
+                if status != 0 || Instant::now() >= deadline {
+                    break;
+                }
+                executor.timer(Duration::from_millis(10)).await;
             }
-            thread::sleep(Duration::from_millis(10));
         }
 
-        let utf16: Vec<u16> = text.encode_utf16().collect();
-        let mut start = 0;
-        while start < utf16.len() {
-            let mut end = (start + 64).min(utf16.len());
-            // Keep a UTF-16 surrogate pair together at the event boundary.
-            if end < utf16.len() && (0xD800..=0xDBFF).contains(&utf16[end - 1]) {
-                end -= 1;
-            }
-            let chunk = &utf16[start..end];
-            if frontmost_pid() != self.pid || !self.is_focused() {
-                return Err("Typing stopped because the active app changed.".into());
-            }
-            unsafe {
-                let down = Owned(CGEventCreateKeyboardEvent(ptr::null(), 0, 1));
-                let up = Owned(CGEventCreateKeyboardEvent(ptr::null(), 0, 0));
-                if down.0.is_null() || up.0.is_null() {
-                    return Err("Could not create a typing event.".into());
-                }
-                CGEventKeyboardSetUnicodeString(down.0, chunk.len(), chunk.as_ptr());
-                CGEventKeyboardSetUnicodeString(up.0, chunk.len(), chunk.as_ptr());
-                CGEventPost(0, down.0); // kCGHIDEventTap
-                CGEventPost(0, up.0);
-            }
-            start = end;
+        // Paste uses the editor's normal input handling, including rich-text
+        // composers that ignore synthetic Unicode keystrokes.
+        let clipboard = super::clipboard::TemporaryText::new(text)?;
+        if frontmost_pid() != self.pid {
+            return Err("Typing stopped because the active app changed.".into());
         }
-        // Event posting queues the text in the target process. Let it handle
-        // the final keystroke before the caller updates the clipboard.
-        thread::sleep(Duration::from_millis(50));
+        unsafe {
+            let down = Owned(CGEventCreateKeyboardEvent(ptr::null(), 9, 1)); // V
+            let up = Owned(CGEventCreateKeyboardEvent(ptr::null(), 9, 0));
+            if down.0.is_null() || up.0.is_null() {
+                return Err("Could not create a typing event.".into());
+            }
+            CGEventSetFlags(down.0, 1 << 20); // Command
+            CGEventSetFlags(up.0, 1 << 20);
+            CGEventPost(0, down.0);
+            CGEventPost(0, up.0);
+        }
+        // The receiving process reads the pasteboard asynchronously.
+        executor.timer(Duration::from_millis(200)).await;
+        drop(clipboard);
         Ok(())
     }
 
     fn is_focused(&self) -> bool {
-        let system = Owned(unsafe { AXUIElementCreateSystemWide() });
-        if system.0.is_null() {
-            return false;
-        }
-        attribute(system.0, "AXFocusedUIElement")
-            .is_some_and(|focused| unsafe { CFEqual(focused.0, self.element.0) != 0 })
+        self.element.as_ref().is_some_and(|element| {
+            focused_element().is_some_and(|(pid, focused)| {
+                pid == self.pid && unsafe { CFEqual(focused.0, element.0) != 0 }
+            })
+        })
     }
 }
 
-pub(crate) fn request_access() {
+// Missing AX text roles do not mean an app has no editor. Browser composers
+// and custom editors may expose generic roles or no AX node at all.
+fn capture_destination<T>(
+    frontmost: i32,
+    own_pid: i32,
+    focused: Option<(i32, T)>,
+) -> Option<(i32, Option<T>)> {
+    if frontmost <= 0 || frontmost == own_pid {
+        return None;
+    }
+    Some((
+        frontmost,
+        focused
+            .filter(|(pid, _)| *pid == frontmost)
+            .map(|(_, element)| element),
+    ))
+}
+
+fn focused_element() -> Option<(i32, Owned)> {
+    let system = Owned(unsafe { AXUIElementCreateSystemWide() });
+    if system.0.is_null() {
+        return None;
+    }
+    let element = attribute(system.0, "AXFocusedUIElement")?;
+    let mut pid = 0;
+    (unsafe { AXUIElementGetPid(element.0, &mut pid) } == 0).then_some((pid, element))
+}
+
+/// Only call from an explicit permission action, never from recording or
+/// focus capture. macOS may keep reporting an old grant as untrusted.
+pub(crate) fn request_access_from_settings() {
     if unsafe { AXIsProcessTrusted() } != 0 {
         return;
     }
@@ -237,5 +243,37 @@ fn frontmost_pid() -> i32 {
             return 0;
         }
         msg_send![app, processIdentifier]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::capture_destination;
+
+    #[test]
+    fn an_editor_without_an_accessibility_text_node_keeps_its_app() {
+        assert_eq!(capture_destination::<()>(42, 7, None), Some((42, None)));
+    }
+
+    #[test]
+    fn rich_composers_are_not_rejected_by_accessibility_role() {
+        assert_eq!(
+            capture_destination(42, 7, Some((42, "AXGroup"))),
+            Some((42, Some("AXGroup")))
+        );
+    }
+
+    #[test]
+    fn a_stale_accessibility_node_cannot_redirect_the_destination() {
+        assert_eq!(
+            capture_destination(42, 7, Some((21, "old editor"))),
+            Some((42, None))
+        );
+    }
+
+    #[test]
+    fn whisple_and_missing_apps_are_never_dictation_destinations() {
+        assert_eq!(capture_destination(7, 7, Some((42, "editor"))), None);
+        assert_eq!(capture_destination::<()>(0, 7, None), None);
     }
 }

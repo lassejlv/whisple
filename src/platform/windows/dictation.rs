@@ -71,7 +71,11 @@ impl Target {
         })
     }
 
-    pub(crate) fn insert(self, text: &str) -> Result<(), String> {
+    pub(crate) async fn insert(
+        self,
+        text: &str,
+        executor: &gpui_kit::BackgroundExecutor,
+    ) -> Result<(), String> {
         if text.is_empty() {
             return Ok(());
         }
@@ -87,17 +91,23 @@ impl Target {
             if Instant::now() >= deadline {
                 return Err("Could not switch to the original app.".into());
             }
-            thread::sleep(Duration::from_millis(10));
+            executor.timer(Duration::from_millis(10)).await;
         }
         while !self.is_focused() {
             let _ = unsafe { self.element.SetFocus() };
             if Instant::now() >= deadline {
                 return Err("Could not focus the original text field.".into());
             }
-            thread::sleep(Duration::from_millis(10));
+            executor.timer(Duration::from_millis(10)).await;
         }
 
-        let previous = Clipboard::open()?.take_text(text)?;
+        let clipboard = Clipboard::open_async(executor).await?;
+        // Clipboard contention yields to the UI. Focus may have changed while
+        // waiting, so validate the destination again before replacing or pasting.
+        if unsafe { GetForegroundWindow() } != self.window || !self.is_focused() {
+            return Err("Could not focus the original text field.".into());
+        }
+        let previous = clipboard.take_text(text)?;
         let sequence = unsafe { GetClipboardSequenceNumber() };
         let inputs = [
             key(VK_CONTROL, false),
@@ -133,17 +143,15 @@ impl Target {
     }
 }
 
-/// Windows has no permission prompt for typing into other apps.
-pub(crate) fn request_access() {}
-
 /// The clipboard, opened with a hidden window as its owner. Windows refuses
 /// new clipboard data from an ownerless clipboard.
 struct Clipboard {
     owner: HWND,
+    opened: bool,
 }
 
 impl Clipboard {
-    fn open() -> Result<Self, String> {
+    fn new() -> Result<Self, String> {
         let owner = unsafe {
             CreateWindowExW(
                 WINDOW_EX_STYLE(0),
@@ -161,16 +169,39 @@ impl Clipboard {
             )
         }
         .map_err(|err| format!("Could not use the clipboard: {err}"))?;
+        Ok(Self {
+            owner,
+            opened: false,
+        })
+    }
+
+    fn open() -> Result<Self, String> {
+        let mut clipboard = Self::new()?;
         // Another app may hold the clipboard for a moment.
         let deadline = Instant::now() + Duration::from_millis(250);
-        while unsafe { OpenClipboard(Some(owner)) }.is_err() {
+        while unsafe { OpenClipboard(Some(clipboard.owner)) }.is_err() {
             if Instant::now() >= deadline {
-                let _ = unsafe { DestroyWindow(owner) };
                 return Err("Another app is using the clipboard.".into());
             }
             thread::sleep(Duration::from_millis(10));
         }
-        Ok(Self { owner })
+        clipboard.opened = true;
+        Ok(clipboard)
+    }
+
+    async fn open_async(executor: &gpui_kit::BackgroundExecutor) -> Result<Self, String> {
+        // Own the native window across awaits so cancellation releases it too.
+        let mut clipboard = Self::new()?;
+        // Another app may hold the clipboard for a moment.
+        let deadline = Instant::now() + Duration::from_millis(250);
+        while unsafe { OpenClipboard(Some(clipboard.owner)) }.is_err() {
+            if Instant::now() >= deadline {
+                return Err("Another app is using the clipboard.".into());
+            }
+            executor.timer(Duration::from_millis(10)).await;
+        }
+        clipboard.opened = true;
+        Ok(clipboard)
     }
 
     /// Replaces the clipboard with `text`, kept out of clipboard history, and
@@ -243,7 +274,9 @@ impl Clipboard {
 impl Drop for Clipboard {
     fn drop(&mut self) {
         unsafe {
-            let _ = CloseClipboard();
+            if self.opened {
+                let _ = CloseClipboard();
+            }
             let _ = DestroyWindow(self.owner);
         }
     }

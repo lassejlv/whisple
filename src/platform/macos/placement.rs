@@ -32,12 +32,14 @@ impl ClickMonitors {
         unsafe {
             let global = ConcreteBlock::new(|_: id| {
                 OUTSIDE_CLICK.store(true, Ordering::Relaxed);
+                crate::platform::events::notify();
             })
             .copy();
             let local = ConcreteBlock::new(|event: id| {
                 let clicked: id = msg_send![event, window];
                 if clicked != hud_window() {
                     OUTSIDE_CLICK.store(true, Ordering::Relaxed);
+                    crate::platform::events::notify();
                 }
                 event
             })
@@ -90,6 +92,10 @@ pub fn set_mapped(mapped: bool) {
 }
 
 pub fn anchor(width: f32, height: f32) {
+    static DISPLAY_EVENTS: std::sync::Once = std::sync::Once::new();
+    DISPLAY_EVENTS.call_once(|| unsafe {
+        CGDisplayRegisterReconfigurationCallback(display_changed, std::ptr::null_mut());
+    });
     unsafe {
         let window = hud_window();
         if window.is_null() || window.isVisible() == NO {
@@ -150,6 +156,21 @@ pub fn anchor(width: f32, height: f32) {
         // already drawing this frame. The view's resize callback and
         // `bounds_changed` pick up the new content size.
         let _: () = msg_send![window, setFrame: frame display: NO animate: NO];
+    }
+}
+
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGDisplayRegisterReconfigurationCallback(
+        callback: extern "C" fn(u32, u32, *mut std::ffi::c_void),
+        user_info: *mut std::ffi::c_void,
+    ) -> i32;
+}
+
+extern "C" fn display_changed(_: u32, flags: u32, _: *mut std::ffi::c_void) {
+    // The begin-configuration notification precedes the new display bounds.
+    if flags & 1 == 0 {
+        crate::platform::events::notify();
     }
 }
 

@@ -600,7 +600,7 @@ mod tests {
         let thread = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
             let mut buffer = [0; 4096];
-            socket.read(&mut buffer).unwrap();
+            assert!(socket.read(&mut buffer).unwrap() > 0);
             socket.write_all(response.as_bytes()).unwrap();
             socket.write_all(&body).unwrap();
         });

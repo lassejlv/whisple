@@ -1,4 +1,10 @@
 pub const STRINGS: &[(&str, &str)] = &[
+    ("Could not preserve the clipboard before typing.", "No se pudo conservar el portapapeles antes de insertar el texto."),
+    ("Could not prepare text for typing.", "No se pudo preparar el texto para insertarlo."),
+    ("Could not prepare the clipboard for typing.", "No se pudo preparar el portapapeles para insertar el texto."),
+    ("Type into other apps", "Escribir en otras apps"),
+    ("Allow Accessibility access to insert dictation. Recording works without it.", "Permite el acceso a Accesibilidad para insertar dictados. Puedes grabar sin este permiso."),
+    ("Allow access", "Permitir acceso"),
     ("Connect to the internet to continue your trial.", "Conéctate a internet para continuar la prueba."),
     ("Connect to the internet within {} to continue your 3-day free trial.", "Conéctate a internet en un plazo de {} para continuar tu prueba gratuita de 3 días."),
     ("A key is saved on this device. Paste a new one to replace it. Audio goes to {} only when selected.", "Hay una clave guardada en este dispositivo. Pega una nueva para reemplazarla. El audio solo va a {} cuando está seleccionado."),

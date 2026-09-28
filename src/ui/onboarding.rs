@@ -84,6 +84,7 @@ impl Choice {
 }
 
 pub(crate) struct Onboarding {
+    _commands_task: gpui_kit::Task<()>,
     focus_handle: FocusHandle,
     step: usize,
     choice: Choice,
@@ -202,14 +203,14 @@ impl Onboarding {
                 Choice::Local(models::spec(models::recommended_id()).expect("recommended model"))
             });
         let handle = window.window_handle();
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(100))
-                .await;
+        let commands_task = cx.spawn(async move |this, cx| loop {
+            let listener = crate::platform::events::listen();
+            let mut deadline = None;
             let alive = handle
                 .update(cx, |_, window, cx| {
                     this.update(cx, |view: &mut Self, cx| {
                         if view.download.is_some() {
+                            deadline = Some(Duration::from_millis(100));
                             cx.notify();
                         }
                         if hotkey::take_presses().any() {
@@ -235,9 +236,10 @@ impl Onboarding {
             if !alive {
                 break;
             }
-        })
-        .detach();
+            crate::platform::events::wait(listener, deadline, cx.background_executor()).await;
+        });
         Self {
+            _commands_task: commands_task,
             focus_handle: cx.focus_handle(),
             step: WELCOME,
             choice,
@@ -332,6 +334,7 @@ impl Onboarding {
         }
         let received = Arc::new(AtomicU64::new(0));
         let cancel = Arc::new(AtomicBool::new(false));
+        crate::platform::events::notify();
         self.download = Some(Download {
             received: Arc::clone(&received),
             total: spec.bytes,

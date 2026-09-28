@@ -3,14 +3,13 @@ use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-use super::levels::{downmix, store_level};
+use super::levels::{store_energy, Resampler, WHISPER_RATE};
 
 const MAX_SECONDS: usize = 60;
 
 pub struct Mic {
-    samples: Arc<Mutex<Vec<f32>>>,
+    samples: Arc<Mutex<Recording>>,
     level: Arc<AtomicU32>,
-    rate: u32,
     _stream: cpal::Stream,
 }
 
@@ -33,9 +32,9 @@ impl Mic {
             .map_err(|err| err.to_string())?;
         let rate = supported.sample_rate().0;
         let channels = supported.channels() as usize;
-        let samples = Arc::new(Mutex::new(Vec::<f32>::new()));
+        let samples = Arc::new(Recording::buffer(rate, capture_samples));
         let level = Arc::new(AtomicU32::new(0));
-        let max_samples = rate as usize * MAX_SECONDS;
+        let max_samples = WHISPER_RATE as usize * MAX_SECONDS;
 
         let err_fn = |err| eprintln!("microphone: {err}");
         let stream = match supported.sample_format() {
@@ -67,14 +66,10 @@ impl Mic {
                     .build_input_stream(
                         &supported.into(),
                         move |data: &[i16], _| {
-                            let converted: Vec<f32> = data
-                                .iter()
-                                .map(|sample| *sample as f32 / i16::MAX as f32)
-                                .collect();
                             push(
                                 &samples,
                                 &level,
-                                &converted,
+                                data,
                                 channels,
                                 max_samples,
                                 capture_samples,
@@ -92,14 +87,10 @@ impl Mic {
                     .build_input_stream(
                         &supported.into(),
                         move |data: &[u16], _| {
-                            let converted: Vec<f32> = data
-                                .iter()
-                                .map(|sample| (*sample as f32 / u16::MAX as f32) * 2.0 - 1.0)
-                                .collect();
                             push(
                                 &samples,
                                 &level,
-                                &converted,
+                                data,
                                 channels,
                                 max_samples,
                                 capture_samples,
@@ -117,7 +108,6 @@ impl Mic {
         Ok(Self {
             samples,
             level,
-            rate,
             _stream: stream,
         })
     }
@@ -127,12 +117,23 @@ impl Mic {
     }
 
     pub fn take(self) -> (Vec<f32>, u32) {
-        let samples = self
-            .samples
+        // Stop the callback before taking its buffer; recording never competes
+        // with a reader for the mutex, and no samples arrive after the take.
+        let Self {
+            samples, _stream, ..
+        } = self;
+        drop(_stream);
+        let audio = samples
             .lock()
-            .map(|mut guard| std::mem::take(&mut *guard))
+            .map(|mut recording| {
+                let Recording { samples, resampler } = &mut *recording;
+                if let Some(resampler) = resampler {
+                    resampler.finish(samples, WHISPER_RATE as usize * MAX_SECONDS);
+                }
+                std::mem::take(samples)
+            })
             .unwrap_or_default();
-        (samples, self.rate)
+        (audio, WHISPER_RATE)
     }
 }
 
@@ -179,20 +180,75 @@ fn choose_input(host: &cpal::Host, preferred: &str) -> Result<cpal::Device, Stri
     Err(format!("Microphone \"{preferred}\" is not connected."))
 }
 
-pub(super) fn push(
-    samples: &Mutex<Vec<f32>>,
+pub(super) struct Recording {
+    pub(super) samples: Vec<f32>,
+    resampler: Option<Resampler>,
+}
+
+impl Recording {
+    pub(super) fn buffer(rate: u32, capture: bool) -> Mutex<Self> {
+        let buffer = Mutex::new(Self::new(rate, capture));
+        // Some platforms allocate native mutex storage on first lock. Do that
+        // during setup rather than on the audio callback's first invocation.
+        drop(buffer.lock().unwrap());
+        buffer
+    }
+
+    pub(super) fn new(rate: u32, capture: bool) -> Self {
+        Self {
+            samples: if capture {
+                Vec::with_capacity(WHISPER_RATE as usize * MAX_SECONDS)
+            } else {
+                Vec::new()
+            },
+            resampler: capture.then(|| Resampler::new(rate)),
+        }
+    }
+}
+
+pub(super) trait Sample: Copy {
+    fn normalized(self) -> f32;
+}
+impl Sample for f32 {
+    fn normalized(self) -> f32 {
+        self
+    }
+}
+impl Sample for i16 {
+    fn normalized(self) -> f32 {
+        self as f32 / i16::MAX as f32
+    }
+}
+impl Sample for u16 {
+    fn normalized(self) -> f32 {
+        (self as f32 / u16::MAX as f32) * 2.0 - 1.0
+    }
+}
+
+pub(super) fn push<S: Sample>(
+    recording: &Mutex<Recording>,
     level: &AtomicU32,
-    data: &[f32],
+    data: &[S],
     channels: usize,
     max: usize,
     capture_samples: bool,
 ) {
-    let mono = downmix(data, channels);
-    store_level(level, &mono);
-    if capture_samples {
-        if let Ok(mut guard) = samples.lock() {
-            let room = max.saturating_sub(guard.len());
-            guard.extend(mono.into_iter().take(room));
+    let channels = channels.max(1);
+    let mut recording = capture_samples.then(|| recording.lock().ok()).flatten();
+    let mut energy = 0.0;
+    let mut frames = 0;
+    for frame in data.chunks(channels) {
+        let mono = frame.iter().map(|sample| sample.normalized()).sum::<f32>() / frame.len() as f32;
+        energy += mono * mono;
+        frames += 1;
+        if let Some(recording) = recording.as_deref_mut() {
+            let Recording { samples, resampler } = recording;
+            if samples.len() < max {
+                if let Some(resampler) = resampler {
+                    resampler.push(mono, samples, max);
+                }
+            }
         }
     }
+    store_energy(level, energy, frames);
 }

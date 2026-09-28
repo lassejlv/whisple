@@ -2,6 +2,8 @@ use gpui_kit::{div, prelude::*, px, Context, Div, Styled};
 
 use crate::i18n::t;
 use crate::platform::hotkey::Shortcut;
+#[cfg(target_os = "macos")]
+use crate::platform::macos::dictation;
 use crate::platform::tray;
 use crate::settings::{self};
 use crate::ui::settings::widgets::*;
@@ -73,6 +75,47 @@ impl SettingsWindow {
             )
         };
         let menu_bar = settings::load().show_in_menu_bar;
+        let output_rows = vec![
+            setting_row(
+                "copy-to-clipboard",
+                t("Copy to clipboard when done"),
+                None,
+                self.switch("copy-to-clipboard", copy),
+                false,
+                cx,
+                |view, cx| view.toggle_copy(cx),
+            ),
+            setting_row(
+                "clean-up-notes",
+                t("Clean up notes"),
+                Some(t("Removes “um”, “uh” and repeated words.")),
+                self.switch("clean-up-notes", clean),
+                true,
+                cx,
+                |view, cx| view.toggle_clean(cx),
+            ),
+        ];
+        #[cfg(target_os = "macos")]
+        let output_rows = {
+            let mut rows = output_rows;
+            if !dictation::is_trusted() {
+                rows.push(setting_row(
+                "typing-access",
+                t("Type into other apps"),
+                Some(t(
+                    "Allow Accessibility access to insert dictation. Recording works without it.",
+                )),
+                modal_button("allow-typing-access", t("Allow access"), false).into_any_element(),
+                true,
+                cx,
+                |_, cx| {
+                    dictation::request_access_from_settings();
+                    cx.notify();
+                },
+                ));
+            }
+            rows
+        };
         div()
             .flex()
             .flex_col()
@@ -137,29 +180,7 @@ impl SettingsWindow {
                     ),
                 ],
             ))
-            .child(section(
-                t("Output"),
-                vec![
-                    setting_row(
-                        "copy-to-clipboard",
-                        t("Copy to clipboard when done"),
-                        None,
-                        self.switch("copy-to-clipboard", copy),
-                        false,
-                        cx,
-                        |view, cx| view.toggle_copy(cx),
-                    ),
-                    setting_row(
-                        "clean-up-notes",
-                        t("Clean up notes"),
-                        Some(t("Removes “um”, “uh” and repeated words.")),
-                        self.switch("clean-up-notes", clean),
-                        true,
-                        cx,
-                        |view, cx| view.toggle_clean(cx),
-                    ),
-                ],
-            ))
+            .child(section(t("Output"), output_rows))
             .child(section(
                 t("Assistant"),
                 vec![
