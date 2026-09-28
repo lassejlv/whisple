@@ -1,8 +1,10 @@
 # Whisple launch film
 
-A 30-second, 1920×1080 launch video built with [Remotion](https://www.remotion.dev). Narration, the dictated line, sound effects and music come from ElevenLabs.
+A 30-second, 1920×1080 launch video built with [Remotion](https://www.remotion.dev). Narration, the dictated lines, sound effects and music come from ElevenLabs.
 
-The voice bar in the demo is real footage. Whisple (release build, `GPUI_X11_SCALE_FACTOR=2`) was recorded on a green desktop while an ElevenLabs voice played into a PulseAudio virtual microphone. Turbo transcribed it on-device, and the green was keyed out into `public/footage/*.webm`. The onboarding screenshots in `public/shots/` are captures of the same build.
+All app footage is real. Whisple (release build, `GPUI_X11_SCALE_FACTOR=2`) was recorded while ElevenLabs voices played into a PulseAudio virtual microphone, and the local Turbo model transcribed them on-device. Voice bar takes were shot on a green desktop and keyed into transparent clips and stills in `public/footage/`. The voice command take is a plain screen recording of the bar opening github.com in the browser.
+
+The feature beats (filler cleanup, auto-detected languages, a voice command and the model menu) were filmed on a build with the fixes from [#25](https://github.com/lassejlv/whisple/pull/25), which the filler cleanup and 2× voice bar depend on.
 
 ```sh
 npm install

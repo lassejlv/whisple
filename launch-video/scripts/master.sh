@@ -42,4 +42,4 @@ ffmpeg -loglevel error -y -i "$source" -c:v copy \
 
 echo "Wrote out/whisple-launch-final.mp4"
 python3 scripts/check-frames.py out/whisple-launch-final.mp4 4 ||
-  echo "note: the keycap press peak near frame 203 is expected to be flagged"
+  echo "note: the keycap press peak near frame 173 is expected to be flagged"

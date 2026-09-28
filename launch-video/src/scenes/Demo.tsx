@@ -34,7 +34,8 @@ const HudClip: React.FC<{ src: string; trimBefore: number; trimAfter?: number }>
     muted
     trimBefore={trimBefore}
     trimAfter={trimAfter}
-    style={{ width: HUD_W, height: HUD_H, display: "block" }}
+    // The capture's bottom row shows the desktop taskbar through the window.
+    style={{ width: HUD_W, height: HUD_H, display: "block", clipPath: `inset(0 0 ${HUD_SCALE * 1.2}px 0)` }}
   />
 );
 
@@ -44,7 +45,12 @@ export const Demo: React.FC = () => {
   const enter = interpolate(frame, [DEMO.from, DEMO.from + 30], [0, 1], { ...clamp, easing: out });
 
   // Lean in toward the bar while it listens, then settle back for the message.
-  const lean = interpolate(frame, [190, 300, 372, 420], [0, 1, 1, 0], { ...clamp, easing: inOut });
+  const lean = interpolate(
+    frame,
+    [HUD.press - 8, HUD.press + 102, HUD.panelOpen - 6, HUD.panelOpen + 40],
+    [0, 1, 1, 0],
+    { ...clamp, easing: inOut },
+  );
   const scale = (1.06 - enter * 0.06) * (1 + lean * 0.07);
 
   const hudIn = interpolate(frame, [HUD.appear, HUD.appear + 16], [0, 1], { ...clamp, easing: out });
@@ -55,8 +61,8 @@ export const Demo: React.FC = () => {
     easing: out,
   });
 
-  const keysIn = interpolate(frame, [150, 166], [0, 1], { ...clamp, easing: out });
-  const keysOut = interpolate(frame, [222, 238], [0, 1], { ...clamp, easing: inOut });
+  const keysIn = interpolate(frame, [HUD.press - 48, HUD.press - 32], [0, 1], { ...clamp, easing: out });
+  const keysOut = interpolate(frame, [HUD.press + 24, HUD.press + 40], [0, 1], { ...clamp, easing: inOut });
 
   const windowIn = interpolate(frame, [DEMO.from + 8, DEMO.from + 40], [0, 1], { ...clamp, easing: out });
   const windowDim = interpolate(lean, [0, 1], [1, 0.72]);

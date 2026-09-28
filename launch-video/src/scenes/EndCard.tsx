@@ -33,11 +33,9 @@ export const EndCard: React.FC = () => {
   });
 
   const word = useReveal(at(0.66), 24, 18);
-  // Blurring small text over the wide glow occasionally leaves an unpainted
-  // strip in headless Chrome, so these only fade and rise.
   const tag = useReveal(at(1.24), 22, 14, 0);
-  const foot = useReveal(at(2.1), 24, 10, 0);
-  const fadeOut = interpolate(frame, [END.to - 24, END.to], [1, 0], clamp);
+  const foot = useReveal(at(1.5), 22, 10, 0);
+  const fadeOut = interpolate(frame, [END.to - 16, END.to], [1, 0], clamp);
 
   return (
     <AbsoluteFill style={{ background: "#08080a", opacity: enter * fadeOut }}>
