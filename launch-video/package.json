@@ -1,0 +1,22 @@
+{
+  "name": "whisple-launch-video",
+  "private": true,
+  "version": "1.0.0",
+  "description": "30-second Whisple launch film, rendered with Remotion",
+  "scripts": {
+    "studio": "remotion studio",
+    "render": "remotion render WhispleLaunch out/whisple-launch.mp4",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.529",
+    "@remotion/google-fonts": "4.0.529",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "remotion": "4.0.529"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.2",
+    "typescript": "5.9.3"
+  }
+}
