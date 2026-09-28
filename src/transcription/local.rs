@@ -71,19 +71,19 @@ pub fn transcribe(
         .full(params, &pcm)
         .map_err(|err| format!("Transcription failed: {err}"))?;
 
-    let mut raw = String::new();
+    let mut pieces = Vec::new();
     for index in 0..state.full_n_segments() {
         let Some(segment) = state.get_segment(index) else {
             continue;
         };
-        let piece = segment
-            .to_str()
-            .map_err(|err| format!("Transcription failed: {err}"))?;
-        if !raw.is_empty() && !piece.starts_with(' ') {
-            raw.push(' ');
-        }
-        raw.push_str(piece.trim());
+        pieces.push(
+            segment
+                .to_str()
+                .map_err(|err| format!("Transcription failed: {err}"))?
+                .to_string(),
+        );
     }
+    let raw = join_segments(pieces.iter().map(String::as_str));
 
     let text = if clean {
         cleanup(&raw)
@@ -94,5 +94,67 @@ pub fn transcribe(
         Err("No speech came through.".into())
     } else {
         Ok(text)
+    }
+}
+
+/// Joins Whisper segments with one space, except next to Chinese or Japanese
+/// text, which is written without spaces between words.
+fn join_segments<'a>(pieces: impl IntoIterator<Item = &'a str>) -> String {
+    let mut raw = String::new();
+    for piece in pieces {
+        let piece = piece.trim();
+        let Some(first) = piece.chars().next() else {
+            continue;
+        };
+        if let Some(last) = raw.chars().last() {
+            if !unspaced_script(last) && !unspaced_script(first) {
+                raw.push(' ');
+            }
+        }
+        raw.push_str(piece);
+    }
+    raw
+}
+
+fn unspaced_script(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3000..=0x30FF // CJK punctuation, hiragana, katakana
+            | 0x3400..=0x4DBF // CJK extension A
+            | 0x4E00..=0x9FFF // CJK unified ideographs
+            | 0xF900..=0xFAFF // CJK compatibility ideographs
+            | 0xFF00..=0xFFEF // full-width forms
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::join_segments;
+
+    #[test]
+    fn segments_are_separated_by_one_space() {
+        let pieces = [" Hey, Maya, running ten minutes late.", " Grab us a table."];
+        assert_eq!(
+            join_segments(pieces),
+            "Hey, Maya, running ten minutes late. Grab us a table."
+        );
+        assert_eq!(join_segments(["one", "two"]), "one two");
+    }
+
+    #[test]
+    fn blank_segments_add_no_space() {
+        assert_eq!(
+            join_segments([" First.", "  ", "", " Second."]),
+            "First. Second."
+        );
+    }
+
+    #[test]
+    fn chinese_and_japanese_segments_join_without_spaces() {
+        assert_eq!(join_segments(["我们走吧。", "好的。"]), "我们走吧。好的。");
+        assert_eq!(
+            join_segments(["今日は。", "ありがとう。"]),
+            "今日は。ありがとう。"
+        );
     }
 }
