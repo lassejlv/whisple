@@ -5,7 +5,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use super::levels::{store_energy, Resampler, WHISPER_RATE};
 
-const MAX_SECONDS: usize = 60;
+pub const MAX_RECORDING_DURATION: std::time::Duration = std::time::Duration::from_secs(60);
+const MAX_SECONDS: usize = MAX_RECORDING_DURATION.as_secs() as usize;
 
 pub struct Mic {
     samples: Arc<Mutex<Recording>>,

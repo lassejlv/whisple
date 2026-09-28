@@ -1,7 +1,7 @@
 mod capture;
 mod levels;
 
-pub use capture::{input_names, known_input, Mic};
+pub use capture::{input_names, known_input, Mic, MAX_RECORDING_DURATION};
 pub use levels::to_whisper_pcm;
 
 #[cfg(test)]

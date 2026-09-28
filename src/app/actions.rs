@@ -276,6 +276,7 @@ impl Whisp {
         if !access.allowed() && matches!(self.phase, Phase::Listening(_) | Phase::Transcribing) {
             self.transcription_id = self.transcription_id.wrapping_add(1);
             self.insertion_task = None;
+            self.recording_limit_task = None;
             self.phase = Phase::Idle;
             self.failed_audio = None;
             self.transcribing_provider = None;
@@ -354,6 +355,11 @@ impl Whisp {
     }
 
     pub(crate) fn check_for_updates_now(&mut self, cx: &mut Context<Self>) {
+        #[cfg(updates)]
+        if self.update.is_some() {
+            self.request_update_window(cx);
+            return;
+        }
         #[cfg(not(feature = "licensing"))]
         cx.open_url("https://github.com/lassejlv/whisple/releases");
         #[cfg(all(updates, feature = "licensing"))]
@@ -392,6 +398,7 @@ impl Whisp {
         #[cfg(updates)]
         {
             self.update_prompt = None;
+            self.pending_update_window = false;
         }
         self.snap_chrome();
         cx.notify();
@@ -401,17 +408,80 @@ impl Whisp {
     pub(crate) fn install_update(&mut self, cx: &mut Context<Self>) {
         #[cfg(updates)]
         if !self.visibility_locked() {
+            self.update_error = None;
             if let Some(update) = self.update.as_mut() {
                 match update.install() {
                     Ok(()) => cx.quit(),
                     Err(err) => {
-                        self.error = Some(tf("Could not install the update: {}", &[&err]));
-                        self.snap_chrome();
+                        self.update_error = Some(tf("Could not install the update: {}", &[&err]));
                     }
                 }
             }
         }
         cx.notify();
+    }
+
+    #[cfg(updates)]
+    pub(crate) fn update_details(&self) -> Option<(String, String)> {
+        self.update
+            .as_ref()
+            .map(|update| (update.version.to_string(), update.release_notes.clone()))
+    }
+
+    #[cfg(updates)]
+    pub(crate) fn update_install_ready(&self) -> bool {
+        self.update.is_some() && !self.visibility_locked()
+    }
+
+    #[cfg(updates)]
+    fn request_update_window(&mut self, cx: &mut Context<Self>) {
+        self.pending_update_window = true;
+        self.update_error = None;
+        self.present_update_if_idle(cx);
+        cx.notify();
+    }
+
+    #[cfg(updates)]
+    pub(super) fn offer_update(&mut self, update: PreparedUpdate, cx: &mut Context<Self>) {
+        tray::set_update(
+            tray::UpdateStatus::Available(&update.version.to_string()),
+            cx,
+        );
+        self.update = Some(update);
+        // The separate window owns this announcement. A HUD notice is only
+        // needed as a fallback if that window cannot be opened.
+        self.update_prompt = None;
+        self.pending_update_window = true;
+        self.update_error = None;
+        cx.notify();
+    }
+
+    #[cfg(updates)]
+    pub(super) fn present_update_if_idle(&mut self, cx: &mut Context<Self>) {
+        if !self.pending_update_window || !self.update_install_ready() {
+            return;
+        }
+        self.pending_update_window = false;
+        let hud = cx.entity();
+        cx.defer(move |cx| {
+            if !hud.read(cx).update_install_ready() {
+                hud.update(cx, |view, _| view.pending_update_window = true);
+                return;
+            }
+            // Re-read here so queued requests always reuse the same window.
+            let existing = hud.read(cx).update_window;
+            let outcome = crate::ui::update::open(cx, hud.clone(), existing);
+            hud.update(cx, |view, cx| {
+                match outcome {
+                    Ok(window) => view.update_window = Some(window),
+                    Err(err) => {
+                        eprintln!("could not open update window: {err}");
+                        view.update_prompt = Some(UpdatePrompt::Ready);
+                    }
+                }
+                cx.notify();
+            });
+        });
     }
 
     pub(crate) fn toggle_open_on_startup(&mut self, cx: &mut Context<Self>) {
@@ -699,16 +769,26 @@ impl Whisp {
         cx.notify();
 
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let worker_cancel = Arc::clone(&cancel);
             let outcome = cx
                 .background_executor()
-                .spawn(async move { models::download(spec, &received, &cancel) })
+                .spawn(async move { models::download(spec, &received, &worker_cancel) })
                 .await;
             this.update(cx, |view, cx| {
-                let current = view.download.as_ref().map(|download| download.id.clone());
-                if current.as_deref() == Some(spec.id) {
-                    view.download = None;
-                    view.download_progress_task = None;
+                if !view
+                    .download
+                    .as_ref()
+                    .is_some_and(|download| Arc::ptr_eq(&download.cancel, &cancel))
+                {
+                    // An older attempt must never clear or select its replacement.
+                    if outcome.is_ok() {
+                        view.refresh_models();
+                        cx.notify();
+                    }
+                    return;
                 }
+                view.download = None;
+                view.download_progress_task = None;
                 match outcome {
                     Ok(_) => {
                         view.refresh_models();
@@ -750,8 +830,7 @@ impl Whisp {
                 view.update_checking = false;
                 let failed = match outcome {
                     Ok(Some(update)) => {
-                        view.update = Some(update);
-                        view.update_prompt = Some(UpdatePrompt::Ready);
+                        view.offer_update(update, cx);
                         false
                     }
                     Ok(None) => false,
@@ -782,16 +861,14 @@ impl Whisp {
 
     #[cfg(updates)]
     pub(super) fn show_or_check_for_updates(&mut self, cx: &mut Context<Self>) {
+        if self.update.is_some() {
+            self.request_update_window(cx);
+            return;
+        }
         if !cfg!(feature = "licensing") {
             cx.open_url("https://github.com/lassejlv/whisple/releases");
             return;
         }
-        if self.update.is_none() {
-            self.check_for_updates(cx);
-            return;
-        }
-        self.update_prompt = Some(UpdatePrompt::Ready);
-        self.snap_chrome();
-        cx.notify();
+        self.check_for_updates(cx);
     }
 }

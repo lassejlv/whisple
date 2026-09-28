@@ -26,27 +26,13 @@ impl Whisp {
         self.recovery = None;
         self.copied = false;
         self.stop_recording();
-        if !self.selected_ready() {
+        if !matches!(self.phase, Phase::Listening(_)) && !self.selected_ready() {
             self.show_model_choices(cx);
             return;
         }
 
         match &self.phase {
-            Phase::Listening(_) => {
-                let Phase::Listening(mic) = std::mem::replace(&mut self.phase, Phase::Transcribing)
-                else {
-                    return;
-                };
-                let (samples, rate) = mic.take();
-                self.recorded = self
-                    .listen_started
-                    .take()
-                    .map_or(Duration::ZERO, |started| started.elapsed());
-                self.levels.clear();
-                self.rest_bars();
-                self.transcribe(samples, rate, cx);
-                self.snap_chrome();
-            }
+            Phase::Listening(_) => self.finish_recording(cx),
             Phase::Transcribing => {}
             Phase::Idle | Phase::Result(_) => match self.start_mic() {
                 Ok(mic) => {
@@ -62,6 +48,12 @@ impl Whisp {
                     self.rest_bars();
                     self.phase = Phase::Listening(mic);
                     self.listen_started = Some(Instant::now());
+                    self.recording_limit_task = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(audio::MAX_RECORDING_DURATION)
+                            .await;
+                        this.update(cx, |view, cx| view.finish_recording(cx)).ok();
+                    }));
                     self.menu_open = false;
                     self.snap_chrome();
                 }
@@ -88,6 +80,25 @@ impl Whisp {
         }
         cx.notify();
     }
+    /// The same stop path serves the button and the deadline, even with a hidden HUD.
+    fn finish_recording(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.phase, Phase::Listening(_)) {
+            return;
+        }
+        self.recording_limit_task = None;
+        let Phase::Listening(mic) = std::mem::replace(&mut self.phase, Phase::Transcribing) else {
+            return;
+        };
+        let (samples, rate) = mic.take();
+        self.recorded = Duration::from_secs_f64(samples.len() as f64 / f64::from(rate));
+        self.listen_started = None;
+        self.levels.clear();
+        self.rest_bars();
+        self.transcribe(samples, rate, cx);
+        self.snap_chrome();
+        cx.notify();
+    }
+
     pub(crate) fn note_level(&mut self) {
         let Phase::Listening(mic) = &self.phase else {
             return;
@@ -218,7 +229,7 @@ impl Whisp {
                         });
                         view.failed_audio = ((provider.is_some() || retry)
                             && !matches!(view.recovery, Some(Recovery::NoSpeech)))
-                        .then_some((samples, rate));
+                        .then_some((samples, rate, target));
                         view.error = Some(err);
                     }
                 }
@@ -379,7 +390,7 @@ impl Whisp {
         if !self.require_license(cx) || !matches!(self.phase, Phase::Idle) {
             return;
         }
-        let Some((samples, rate)) = self.failed_audio.take() else {
+        let Some((samples, rate, target)) = self.failed_audio.take() else {
             return;
         };
         let local_override = if local {
@@ -389,7 +400,7 @@ impl Whisp {
                 .find(|model| model.ready && model.spec.id.starts_with("turbo"))
                 .map(|model| model.spec)
             else {
-                self.failed_audio = Some((samples, rate));
+                self.failed_audio = Some((samples, rate, target));
                 return;
             };
             Some(spec)
@@ -399,6 +410,12 @@ impl Whisp {
         self.error = None;
         self.recovery = None;
         self.phase = Phase::Transcribing;
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            self.dictation_target = target;
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let () = target;
         self.transcribe_audio(samples, rate, local_override, true, cx);
         self.snap_chrome();
         cx.notify();

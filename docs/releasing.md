@@ -1,8 +1,16 @@
 # Releases and updates
 
-Whisple publishes macOS builds for Apple silicon and Intel, and Windows builds for x86_64. Packaged builds check GitHub's **latest stable release** on startup and every six hours. Drafts and prereleases are never offered as updates. Once the platform's ZIP is downloaded and verified, the tray menu offers **Install Whisple v…**. Installing waits for the app to exit, replaces it, and relaunches it.
+Whisple publishes macOS builds for Apple silicon and Intel, and Windows builds for x86_64. Packaged builds check GitHub's **latest stable release** on startup and every six hours. Drafts and prereleases are never offered as updates. Once the platform's ZIP is downloaded and verified, a **New update available** window shows the new and installed versions, the release's Markdown notes, **Later**, and **Install and restart**. It appears even when the voice bar is hidden, but waits for recording and transcription to finish. Dismissing it keeps the prepared update available through the tray and Settings → About. Installing waits for the app to exit, replaces it, and relaunches it.
 
 Cargo builds and local packages omit licensing by default. Release jobs test and build with `--features licensing`, retaining the paid trial and license flow on both platforms.
+
+### Preview the update window
+
+In a debug build, set `WHISPLE_DEV_UPDATE_PREVIEW=0.0.3` to simulate a prepared
+update. Use isolated preferences with `WHISPLE_DEV_DATA_DIR` and completed
+onboarding. `WHISPLE_DEV_UPDATE_PREVIEW_DELAY_MS=15000` delays the offer to test
+arrival during recording. Preview updates cannot launch an installer; the install
+action exercises error feedback. These variables have no effect in release builds.
 
 ## Publish a release
 

@@ -111,7 +111,7 @@ pub(crate) struct Whisp {
     pub error: Option<String>,
     pub recovery: Option<Recovery>,
     /// Retained only after a cloud failure; never written to disk.
-    pub(super) failed_audio: Option<(Arc<Vec<f32>>, u32)>,
+    pub(super) failed_audio: Option<(Arc<Vec<f32>>, u32, TypingTarget)>,
     pub transcribing_provider: Option<Provider>,
     pub copied: bool,
     pub result_kind: ResultKind,
@@ -133,6 +133,7 @@ pub(crate) struct Whisp {
     #[cfg(feature = "licensing")]
     pub(super) last_license_check: Instant,
     pub(super) transcription_id: u64,
+    pub(super) recording_limit_task: Option<gpui_kit::Task<()>>,
     pub(super) insertion_task: Option<gpui_kit::Task<()>>,
     pub(super) commands_task: Option<gpui_kit::Task<()>>,
     pub(super) download_progress_task: Option<gpui_kit::Task<()>>,
@@ -154,6 +155,12 @@ pub(crate) struct Whisp {
     pub open_on_startup: bool,
     #[cfg(updates)]
     pub(super) update: Option<PreparedUpdate>,
+    #[cfg(updates)]
+    pub(super) update_window: Option<gpui_kit::AnyWindowHandle>,
+    #[cfg(updates)]
+    pub(super) pending_update_window: bool,
+    #[cfg(updates)]
+    pub(crate) update_error: Option<String>,
     #[cfg(updates)]
     pub(crate) update_prompt: Option<UpdatePrompt>,
     #[cfg(updates)]

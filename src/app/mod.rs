@@ -115,6 +115,9 @@ impl Whisp {
             crate::platform::events::notify();
         })
         .detach();
+        #[cfg(updates)]
+        cx.observe_self(|view, cx| view.present_update_if_idle(cx))
+            .detach();
         let mut view = Self {
             focus_handle: cx.focus_handle(),
             hud_window: window.window_handle(),
@@ -148,6 +151,7 @@ impl Whisp {
             #[cfg(feature = "licensing")]
             last_license_check: Instant::now(),
             transcription_id: 0,
+            recording_limit_task: None,
             insertion_task: None,
             model_idle_task: None,
             commands_task: None,
@@ -167,6 +171,12 @@ impl Whisp {
             open_on_startup: prefs.open_on_startup,
             #[cfg(updates)]
             update: None,
+            #[cfg(updates)]
+            update_window: None,
+            #[cfg(updates)]
+            pending_update_window: false,
+            #[cfg(updates)]
+            update_error: None,
             #[cfg(updates)]
             update_prompt: (cfg!(feature = "licensing") && updater::just_updated())
                 .then_some(UpdatePrompt::JustUpdated),
@@ -195,6 +205,21 @@ impl Whisp {
         view.refresh_license(cx);
         #[cfg(updates)]
         view.check_for_updates(cx);
+        #[cfg(all(updates, debug_assertions))]
+        if let Some(update) = PreparedUpdate::preview() {
+            let delay = std::env::var("WHISPLE_DEV_UPDATE_PREVIEW_DELAY_MS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            cx.spawn(async move |this: WeakEntity<Self>, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(delay))
+                    .await;
+                this.update(cx, |view, cx| view.offer_update(update, cx))
+                    .ok();
+            })
+            .detach();
+        }
         view
     }
 
@@ -424,9 +449,6 @@ impl Whisp {
                                 #[cfg(updates)]
                                 tray::Command::Update => {
                                     view.show_or_check_for_updates(cx);
-                                    if view.update.is_some() {
-                                        view.set_visible(true, window, cx);
-                                    }
                                 }
                                 #[cfg(not(updates))]
                                 tray::Command::Update => {}
@@ -709,8 +731,8 @@ fn apply_window_height(window: &mut gpui_kit::Window, height: f32, cx: &mut App)
     #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     {
         let _ = height;
-        // The frame was already moved in `place::dock`. Pull GPUI's viewport
-        // up to the content size before this frame lays out.
-        window.bounds_changed(cx);
+        // Bounds observers update the HUD entity too. Run them after the
+        // current HUD update releases its borrow, including notice expansion.
+        window.defer(cx, |window, cx| window.bounds_changed(cx));
     }
 }

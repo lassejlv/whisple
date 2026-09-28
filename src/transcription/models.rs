@@ -1,4 +1,4 @@
-use std::fs::{self, File};
+use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -160,7 +160,6 @@ pub fn download(
     let dir = models_dir();
     fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
     let dest = model_path(spec);
-    let partial = dest.with_extension("bin.partial");
     let url = format!("{HF}/{}", spec.file_name);
 
     let client = reqwest::blocking::Client::builder()
@@ -168,17 +167,29 @@ pub fn download(
         .redirect(reqwest::redirect::Policy::limited(8))
         .build()
         .map_err(|err| err.to_string())?;
-    let mut response = client.get(&url).send().map_err(|err| err.to_string())?;
+    let response = client.get(&url).send().map_err(|err| err.to_string())?;
     if !response.status().is_success() {
         return Err(format!("Download failed ({})", response.status()));
     }
 
-    let mut file = File::create(&partial).map_err(|err| err.to_string())?;
+    save_download(response, &dest, received, cancel)
+}
+
+fn save_download(
+    mut response: impl Read,
+    dest: &Path,
+    received: &AtomicU64,
+    cancel: &AtomicBool,
+) -> Result<PathBuf, String> {
+    // A cancelled worker may still be blocked in read while its replacement starts.
+    // Unique sibling files keep its cleanup and writes isolated from that worker.
+    let mut file = tempfile::Builder::new()
+        .prefix(".whisple-download-")
+        .tempfile_in(dest.parent().ok_or("Missing model directory")?)
+        .map_err(|err| err.to_string())?;
     let mut buf = [0u8; 64 * 1024];
     loop {
         if cancel.load(Ordering::Relaxed) {
-            drop(file);
-            let _ = fs::remove_file(&partial);
             return Err("Download cancelled".into());
         }
         let read = response.read(&mut buf).map_err(|err| err.to_string())?;
@@ -189,21 +200,127 @@ pub fn download(
             .map_err(|err| err.to_string())?;
         received.fetch_add(read as u64, Ordering::Relaxed);
     }
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Download cancelled".into());
+    }
     file.flush().map_err(|err| err.to_string())?;
-    drop(file);
-
-    let size = fs::metadata(&partial).map(|meta| meta.len()).unwrap_or(0);
+    let size = file
+        .as_file()
+        .metadata()
+        .map_err(|err| err.to_string())?
+        .len();
     if size < 1_000_000 {
-        let _ = fs::remove_file(&partial);
         return Err("The download was incomplete.".into());
     }
-    fs::rename(&partial, &dest).map_err(|err| err.to_string())?;
-    Ok(dest)
+    file.persist(dest).map_err(|err| err.to_string())?;
+    Ok(dest.to_path_buf())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct PausedRead {
+        data: std::io::Cursor<Vec<u8>>,
+        entered: Option<std::sync::mpsc::Sender<()>>,
+        resume: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl Read for PausedRead {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if let Some(entered) = self.entered.take() {
+                entered.send(()).unwrap();
+                self.resume
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+            }
+            self.data.read(buf)
+        }
+    }
+
+    #[test]
+    fn cancelled_download_cannot_delete_a_restarted_downloads_file() {
+        use std::sync::{mpsc::channel, Arc};
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("model.bin");
+        let old_cancel = Arc::new(AtomicBool::new(false));
+        let (old_entered_tx, old_entered) = channel();
+        let (old_resume, old_resume_rx) = channel();
+        let old_dest = dest.clone();
+        let worker_cancel = old_cancel.clone();
+        let old = std::thread::spawn(move || {
+            save_download(
+                PausedRead {
+                    data: std::io::Cursor::new(vec![1; 1_000_001]),
+                    entered: Some(old_entered_tx),
+                    resume: old_resume_rx,
+                },
+                &old_dest,
+                &AtomicU64::new(0),
+                &worker_cancel,
+            )
+        });
+        old_entered
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        old_cancel.store(true, Ordering::Relaxed);
+        let (new_entered_tx, new_entered) = channel();
+        let (new_resume, new_resume_rx) = channel();
+        let new_dest = dest.clone();
+        let new = std::thread::spawn(move || {
+            save_download(
+                PausedRead {
+                    data: std::io::Cursor::new(vec![2; 1_000_001]),
+                    entered: Some(new_entered_tx),
+                    resume: new_resume_rx,
+                },
+                &new_dest,
+                &AtomicU64::new(0),
+                &AtomicBool::new(false),
+            )
+        });
+        new_entered
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        old_resume.send(()).unwrap();
+        assert_eq!(old.join().unwrap().unwrap_err(), "Download cancelled");
+        new_resume.send(()).unwrap();
+        assert_eq!(new.join().unwrap().unwrap(), dest);
+        assert_eq!(fs::read(&dest).unwrap(), vec![2; 1_000_001]);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn cancellation_at_eof_does_not_publish_the_model() {
+        struct CancelAtEof<'a> {
+            data: std::io::Cursor<Vec<u8>>,
+            cancel: &'a AtomicBool,
+        }
+        impl Read for CancelAtEof<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let count = self.data.read(buf)?;
+                if count == 0 {
+                    self.cancel.store(true, Ordering::Relaxed);
+                }
+                Ok(count)
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("model.bin");
+        let cancel = AtomicBool::new(false);
+        let result = save_download(
+            CancelAtEof {
+                data: std::io::Cursor::new(vec![1; 1_000_001]),
+                cancel: &cancel,
+            },
+            &dest,
+            &AtomicU64::new(0),
+            &cancel,
+        );
+        assert_eq!(result.unwrap_err(), "Download cancelled");
+        assert!(!dest.exists());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
 
     #[test]
     fn uninstall_removes_only_the_catalog_models_files() {

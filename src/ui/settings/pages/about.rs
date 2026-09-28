@@ -35,7 +35,7 @@ impl SettingsWindow {
                     .id("settings-update-action")
                     .role(gpui_kit::Role::Button)
                     .aria_label(if ready {
-                        t("Install and restart")
+                        t("View update…")
                     } else {
                         if cfg!(feature = "licensing") {
                             t("Check for updates")
@@ -53,17 +53,11 @@ impl SettingsWindow {
                     .when(ready, |button| button.font_weight(FontWeight::SEMIBOLD))
                     .text_color(if ready { theme::HUD } else { theme::LABEL })
                     .cursor_pointer()
-                    .on_click(cx.listener(move |view, _, _, cx| {
-                        view.hud.update(cx, |hud, cx| {
-                            if ready {
-                                hud.install_update(cx)
-                            } else {
-                                hud.check_for_updates_now(cx)
-                            }
-                        })
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        view.hud.update(cx, |hud, cx| hud.check_for_updates_now(cx))
                     }))
                     .child(if ready {
-                        t("Install & restart")
+                        t("View update…")
                     } else {
                         if cfg!(feature = "licensing") {
                             t("Check now")

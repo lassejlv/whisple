@@ -176,9 +176,10 @@ impl Whisp {
             tf("Whisple {} is ready", &[&version]),
             Some(t("Installs and restarts in a few seconds.").to_string()),
             theme::LABEL,
-            Some((t("Install"), |this: &mut Whisp, cx: &mut Context<Whisp>| {
-                this.install_update(cx)
-            })),
+            Some((
+                t("View update…"),
+                |this: &mut Whisp, cx: &mut Context<Whisp>| this.check_for_updates_now(cx),
+            )),
             |this, cx| this.dismiss_update(cx),
             cx,
         )

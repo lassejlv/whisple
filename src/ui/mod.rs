@@ -4,3 +4,5 @@ pub(crate) mod motion;
 pub(crate) mod onboarding;
 pub(crate) mod settings;
 pub(crate) mod theme;
+#[cfg(updates)]
+pub(crate) mod update;

@@ -17,6 +17,8 @@ const MAX_UPDATE_BYTES: u64 = 512 * 1024 * 1024;
 #[derive(Clone, Debug, Deserialize)]
 struct Release {
     tag_name: String,
+    #[serde(default)]
+    body: Option<String>,
     draft: bool,
     prerelease: bool,
     published_at: Option<String>,
@@ -47,7 +49,10 @@ pub(crate) enum UpdatePrompt {
 
 pub(crate) struct PreparedUpdate {
     pub version: Version,
+    pub release_notes: String,
     temp: TempDir,
+    #[cfg(debug_assertions)]
+    preview: bool,
 }
 
 fn update_marker() -> PathBuf {
@@ -232,7 +237,10 @@ pub(crate) fn check_and_prepare(
     fs::remove_file(archive).map_err(|err| err.to_string())?;
     Ok(Some(PreparedUpdate {
         version: candidate.version,
+        release_notes: release.body.unwrap_or_default(),
         temp,
+        #[cfg(debug_assertions)]
+        preview: false,
     }))
 }
 
@@ -442,7 +450,23 @@ fn hidden(command: &mut Command) -> &mut Command {
 }
 
 impl PreparedUpdate {
+    /// An isolated UI fixture. It never downloads, installs, or replaces an app.
+    #[cfg(debug_assertions)]
+    pub(crate) fn preview() -> Option<Self> {
+        let version = std::env::var("WHISPLE_DEV_UPDATE_PREVIEW").ok()?;
+        Some(Self {
+            version: Version::parse(&version).ok()?,
+            release_notes: "## Faster everyday dictation\n\n- Faster local transcription on Apple silicon.\n- Lower memory use between recordings.\n- More reliable typing into your favorite apps.\n\n## Improvements\n\nModel downloads now use less CPU, and screen context is captured in memory.\n\nThanks for using Whisple!".into(),
+            temp: tempfile::tempdir().ok()?,
+            preview: true,
+        })
+    }
+
     pub(crate) fn install(&mut self) -> Result<(), String> {
+        #[cfg(debug_assertions)]
+        if self.preview {
+            return Err("Whisple must be installed to update.".into());
+        }
         let current = current_install().ok_or("Whisple must be installed to update.")?;
         let log =
             File::create(self.temp.path().join("update.log")).map_err(|err| err.to_string())?;
@@ -506,10 +530,40 @@ impl PreparedUpdate {
 mod tests {
     use super::*;
 
+    #[test]
+    fn github_release_notes_are_optional_and_preserved() {
+        let mut response = serde_json::json!({
+            "tag_name": "v1.2.0", "draft": false, "prerelease": false,
+            "published_at": "2026-09-28T10:00:00Z", "assets": []
+        });
+        let absent: Release = serde_json::from_value(response.clone()).unwrap();
+        assert!(absent.body.is_none());
+        response["body"] = serde_json::json!("## Improvements\n\n- Faster dictation.");
+        let notes: Release = serde_json::from_value(response).unwrap();
+        assert_eq!(
+            notes.body.as_deref(),
+            Some("## Improvements\n\n- Faster dictation.")
+        );
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn preview_updates_cannot_start_an_installer() {
+        let mut update = PreparedUpdate {
+            version: Version::new(1, 2, 0),
+            release_notes: String::new(),
+            temp: tempfile::tempdir().unwrap(),
+            preview: true,
+        };
+        assert!(update.install().is_err());
+        assert_eq!(fs::read_dir(update.temp.path()).unwrap().count(), 0);
+    }
+
     fn release(tag: &str, published: &str, arch: &str, complete: bool) -> Release {
         let version = Version::parse(tag.strip_prefix('v').unwrap()).unwrap();
         Release {
             tag_name: tag.into(),
+            body: None,
             draft: false,
             prerelease: false,
             published_at: Some(published.into()),
