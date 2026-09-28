@@ -57,8 +57,10 @@ pub fn transcribe(
         .map(|count| count.get().min(4) as i32)
         .unwrap_or(2);
     params.set_n_threads(threads);
+    // No language already means auto-detect. whisper.cpp's detect_language
+    // flag detects and then returns without transcribing anything.
     params.set_language(language);
-    params.set_detect_language(language.is_none());
+    params.set_detect_language(false);
     params.set_translate(false);
     params.set_print_special(false);
     params.set_print_progress(false);
