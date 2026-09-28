@@ -266,13 +266,29 @@ impl Whisp {
                 #[cfg(target_os = "macos")]
                 cx.on_next_frame(window, move |view, window, cx| {
                     view.placed_height = height;
-                    place::dock(WINDOW_WIDTH, height, screen_x, screen_y, screen_w, screen_h);
+                    place::dock(
+                        WINDOW_WIDTH,
+                        height,
+                        screen_x,
+                        screen_y,
+                        screen_w,
+                        screen_h,
+                        window.scale_factor(),
+                    );
                     apply_window_height(window, height, cx);
                 });
                 #[cfg(not(target_os = "macos"))]
                 {
                     self.placed_height = height;
-                    place::dock(WINDOW_WIDTH, height, screen_x, screen_y, screen_w, screen_h);
+                    place::dock(
+                        WINDOW_WIDTH,
+                        height,
+                        screen_x,
+                        screen_y,
+                        screen_w,
+                        screen_h,
+                        window.scale_factor(),
+                    );
                     apply_window_height(window, height, cx);
                 }
             }
@@ -434,6 +450,7 @@ impl Whisp {
                                 screen_y,
                                 screen_w,
                                 screen_h,
+                                window.scale_factor(),
                             );
                         }
                     })

@@ -12,13 +12,26 @@ use x11rb::rust_connection::RustConnection;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-pub fn dock(width: f32, height: f32, screen_x: f32, screen_y: f32, screen_w: f32, screen_h: f32) {
+pub fn dock(
+    width: f32,
+    height: f32,
+    screen_x: f32,
+    screen_y: f32,
+    screen_w: f32,
+    screen_h: f32,
+    scale: f32,
+) {
     let Ok(_guard) = LOCK.lock() else {
         return;
     };
-    let radius = crate::app::WINDOW_RADIUS;
-    let x = screen_x + (screen_w - width) / 2.0;
-    let y = screen_y + screen_h - height - 18.0;
+    // GPUI lays out in logical pixels, but X11 geometry and the shape mask
+    // are in device pixels.
+    let (x, y, width, height, radius) = device_geometry(
+        width,
+        height,
+        (screen_x, screen_y, screen_w, screen_h),
+        scale,
+    );
     if let Err(err) = place(
         x.round() as i32,
         y.round() as i32,
@@ -28,6 +41,30 @@ pub fn dock(width: f32, height: f32, screen_x: f32, screen_y: f32, screen_w: f32
     ) {
         eprintln!("could not place the voice window: {err}");
     }
+}
+
+/// Bottom-centre placement in device pixels: x, y, width, height and the
+/// corner radius.
+fn device_geometry(
+    width: f32,
+    height: f32,
+    (screen_x, screen_y, screen_w, screen_h): (f32, f32, f32, f32),
+    scale: f32,
+) -> (f32, f32, f32, f32, f32) {
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let x = screen_x + (screen_w - width) / 2.0;
+    let y = screen_y + screen_h - height - 18.0;
+    (
+        x * scale,
+        y * scale,
+        width * scale,
+        height * scale,
+        crate::app::WINDOW_RADIUS * scale,
+    )
 }
 
 pub fn set_mapped(mapped: bool) {
@@ -207,7 +244,7 @@ fn circle_inset(radius: u16, row: u16) -> u16 {
 
 #[cfg(all(test, any(target_os = "linux", target_os = "freebsd")))]
 mod tests {
-    use super::is_voice_class;
+    use super::{device_geometry, is_voice_class};
 
     #[test]
     fn only_the_bar_is_docked() {
@@ -215,5 +252,21 @@ mod tests {
         assert!(!is_voice_class(b"whisple-settings\0whisple-settings\0"));
         assert!(!is_voice_class(b"whisple-onboarding\0whisple-onboarding\0"));
         assert!(!is_voice_class(b""));
+    }
+
+    #[test]
+    fn hidpi_placement_is_in_device_pixels() {
+        let screen = (0.0, 0.0, 960.0, 600.0);
+        let (x, y, width, height, radius) = device_geometry(400.0, 58.0, screen, 2.0);
+        assert_eq!((x, y, width, height), (560.0, 1048.0, 800.0, 116.0));
+        assert_eq!(radius, crate::app::WINDOW_RADIUS * 2.0);
+    }
+
+    #[test]
+    fn unusable_scale_falls_back_to_logical_pixels() {
+        let screen = (0.0, 0.0, 1920.0, 1200.0);
+        let at_one = device_geometry(400.0, 58.0, screen, 1.0);
+        assert_eq!(device_geometry(400.0, 58.0, screen, 0.0), at_one);
+        assert_eq!(device_geometry(400.0, 58.0, screen, f32::NAN), at_one);
     }
 }

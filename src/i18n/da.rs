@@ -249,6 +249,8 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("Whisple only listens while recording. With a local model, audio stays on your PC.", "Whisple lytter kun, mens du optager. Med en lokal model bliver lyden på din pc."),
     ("You can change this later in Settings › Privacy & security › Microphone.", "Du kan ændre det senere under Indstillinger › Beskyttelse af personlige oplysninger og sikkerhed › Mikrofon."),
     ("Let desktop apps use the microphone under Privacy & security › Microphone.", "Giv skrivebordsapps adgang under Beskyttelse af personlige oplysninger og sikkerhed › Mikrofon."),
+    ("Whisple only listens while recording. With a local model, audio stays on this computer.", "Whisple lytter kun, mens du optager. Med en lokal model bliver lyden på denne computer."),
+    ("You can choose another microphone later in Whisple Settings › Audio.", "Du kan vælge en anden mikrofon senere under Whisple-indstillinger › Lyd."),
     ("Waiting for macOS…", "Venter på macOS…"),
     ("Walk through the features, microphone and model steps.", "Gå funktionerne, mikrofonen og modellen igennem igen."),
     ("Website", "Hjemmeside"),
